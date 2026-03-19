@@ -72,4 +72,4 @@ python -m pytest -m "not network"
 - [ ] 已提供可复现的验证命令与结果 / Reproducible verification commands and results are included
 - [ ] 已评估兼容性与风险 / Compatibility and risk have been assessed
 - [ ] 已提供回滚方案 / A rollback plan is provided
-- [ ] 若涉及用户可见变更，已同步更新 `README.md` 与 `docs/CHANGELOG.md` / If user-visible changes are included, `README.md` and `docs/CHANGELOG.md` are updated
+- [ ] 若涉及用户可见变更，已同步更新相关文档与 `docs/CHANGELOG.md`；若未更新 `README.md`，已说明原因与文档落点 / If user-visible changes are included, the relevant docs and `docs/CHANGELOG.md` are updated; if `README.md` was not updated, the reason and documentation location are explained

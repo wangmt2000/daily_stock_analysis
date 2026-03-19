@@ -148,6 +148,7 @@ interface ChannelTestState {
 
 interface RuntimeConfig {
   primaryModel: string;
+  agentPrimaryModel: string;
   fallbackModels: string[];
   visionModel: string;
   temperature: string;
@@ -492,10 +493,22 @@ function resolveTemperatureFromItems(itemMap: Map<string, string>): string {
   return '0.7';
 }
 
+function normalizeAgentPrimaryModel(model: string): string {
+  const trimmedModel = model.trim();
+  if (!trimmedModel) {
+    return '';
+  }
+  if (trimmedModel.includes('/')) {
+    return trimmedModel;
+  }
+  return `openai/${trimmedModel}`;
+}
+
 function parseRuntimeConfigFromItems(items: Array<{ key: string; value: string }>): RuntimeConfig {
   const itemMap = new Map(items.map((item) => [item.key, item.value]));
   return {
     primaryModel: itemMap.get('LITELLM_MODEL') || '',
+    agentPrimaryModel: normalizeAgentPrimaryModel(itemMap.get('AGENT_LITELLM_MODEL') || ''),
     fallbackModels: splitModels(itemMap.get('LITELLM_FALLBACK_MODELS') || ''),
     visionModel: itemMap.get('VISION_MODEL') || '',
     temperature: resolveTemperatureFromItems(itemMap),
@@ -538,6 +551,7 @@ function channelsToUpdateItems(
   updates.push({ key: 'LLM_CHANNELS', value: channels.map((channel) => channel.name).join(',') });
   if (includeRuntimeConfig) {
     updates.push({ key: 'LITELLM_MODEL', value: runtimeConfig.primaryModel });
+    updates.push({ key: 'AGENT_LITELLM_MODEL', value: runtimeConfig.agentPrimaryModel });
     updates.push({ key: 'LITELLM_FALLBACK_MODELS', value: runtimeConfig.fallbackModels.join(',') });
     updates.push({ key: 'VISION_MODEL', value: runtimeConfig.visionModel });
     updates.push({ key: 'LLM_TEMPERATURE', value: runtimeConfig.temperature });
@@ -660,6 +674,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
   const hasChanges = useMemo(() => {
     const runtimeChanged = (
       runtimeConfig.primaryModel !== initialRuntimeConfig.primaryModel
+      || runtimeConfig.agentPrimaryModel !== initialRuntimeConfig.agentPrimaryModel
       || runtimeConfig.visionModel !== initialRuntimeConfig.visionModel
       || runtimeConfig.temperature !== initialRuntimeConfig.temperature
       || runtimeConfig.fallbackModels.join(',') !== initialRuntimeConfig.fallbackModels.join(',')
@@ -753,6 +768,14 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
         && !usesDirectEnvProvider(runtimeConfig.primaryModel);
       if (invalidPrimaryModel) {
         setSaveMessage({ type: 'local-error', text: '当前主模型不在已启用渠道的模型列表中，请重新选择。' });
+        return;
+      }
+
+      const invalidAgentPrimaryModel = runtimeConfig.agentPrimaryModel
+        && !availableModels.includes(runtimeConfig.agentPrimaryModel)
+        && !usesDirectEnvProvider(runtimeConfig.agentPrimaryModel);
+      if (invalidAgentPrimaryModel) {
+        setSaveMessage({ type: 'local-error', text: '当前 Agent 主模型不在已启用渠道的模型列表中，请重新选择。' });
         return;
       }
 
@@ -976,6 +999,20 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                       value={runtimeConfig.primaryModel}
                       onChange={setPrimaryModel}
                       options={buildModelOptions(availableModels, runtimeConfig.primaryModel, '自动（使用第一个可用模型）')}
+                      disabled={busy}
+                      placeholder=""
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs text-muted-text">Agent 主模型</label>
+                    <Select
+                      value={runtimeConfig.agentPrimaryModel}
+                      onChange={(value) => setRuntimeConfig((previous) => ({
+                        ...previous,
+                        agentPrimaryModel: normalizeAgentPrimaryModel(value),
+                      }))}
+                      options={buildModelOptions(availableModels, runtimeConfig.agentPrimaryModel, '自动（继承普通分析主模型）')}
                       disabled={busy}
                       placeholder=""
                     />

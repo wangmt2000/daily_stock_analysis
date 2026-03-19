@@ -79,6 +79,7 @@ const SettingsPage: React.FC = () => {
     'LLM_CHANNELS',
     'LLM_TEMPERATURE',
     'LITELLM_MODEL',
+    'AGENT_LITELLM_MODEL',
     'LITELLM_FALLBACK_MODELS',
     'AIHUBMIX_KEY',
     'DEEPSEEK_API_KEY',

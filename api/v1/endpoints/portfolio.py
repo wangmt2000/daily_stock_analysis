@@ -34,6 +34,7 @@ from api.v1.schemas.portfolio import (
 from src.services.portfolio_import_service import PortfolioImportService
 from src.services.portfolio_risk_service import PortfolioRiskService
 from src.services.portfolio_service import (
+    PortfolioBusyError,
     PortfolioConflictError,
     PortfolioOversellError,
     PortfolioService,
@@ -193,6 +194,8 @@ def create_trade(request: PortfolioTradeCreateRequest) -> PortfolioEventCreatedR
             note=request.note,
         )
         return PortfolioEventCreatedResponse(**data)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
     except PortfolioOversellError as exc:
         raise _conflict_error(error="portfolio_oversell", message=str(exc))
     except PortfolioConflictError as exc:
@@ -239,7 +242,7 @@ def list_trades(
 @router.delete(
     "/trades/{trade_id}",
     response_model=PortfolioDeleteResponse,
-    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete trade event",
 )
 def delete_trade(trade_id: int) -> PortfolioDeleteResponse:
@@ -252,6 +255,8 @@ def delete_trade(trade_id: int) -> PortfolioDeleteResponse:
                 detail={"error": "not_found", "message": f"Trade not found: {trade_id}"},
             )
         return PortfolioDeleteResponse(deleted=1)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
@@ -261,7 +266,7 @@ def delete_trade(trade_id: int) -> PortfolioDeleteResponse:
 @router.post(
     "/cash-ledger",
     response_model=PortfolioEventCreatedResponse,
-    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Record cash event",
 )
 def create_cash_ledger(request: PortfolioCashLedgerCreateRequest) -> PortfolioEventCreatedResponse:
@@ -276,6 +281,8 @@ def create_cash_ledger(request: PortfolioCashLedgerCreateRequest) -> PortfolioEv
             note=request.note,
         )
         return PortfolioEventCreatedResponse(**data)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -316,7 +323,7 @@ def list_cash_ledger(
 @router.delete(
     "/cash-ledger/{entry_id}",
     response_model=PortfolioDeleteResponse,
-    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete cash ledger event",
 )
 def delete_cash_ledger(entry_id: int) -> PortfolioDeleteResponse:
@@ -329,6 +336,8 @@ def delete_cash_ledger(entry_id: int) -> PortfolioDeleteResponse:
                 detail={"error": "not_found", "message": f"Cash ledger entry not found: {entry_id}"},
             )
         return PortfolioDeleteResponse(deleted=1)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
@@ -338,7 +347,7 @@ def delete_cash_ledger(entry_id: int) -> PortfolioDeleteResponse:
 @router.post(
     "/corporate-actions",
     response_model=PortfolioEventCreatedResponse,
-    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Record corporate action event",
 )
 def create_corporate_action(request: PortfolioCorporateActionCreateRequest) -> PortfolioEventCreatedResponse:
@@ -356,6 +365,8 @@ def create_corporate_action(request: PortfolioCorporateActionCreateRequest) -> P
             note=request.note,
         )
         return PortfolioEventCreatedResponse(**data)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -398,7 +409,7 @@ def list_corporate_actions(
 @router.delete(
     "/corporate-actions/{action_id}",
     response_model=PortfolioDeleteResponse,
-    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete corporate action event",
 )
 def delete_corporate_action(action_id: int) -> PortfolioDeleteResponse:
@@ -411,6 +422,8 @@ def delete_corporate_action(action_id: int) -> PortfolioDeleteResponse:
                 detail={"error": "not_found", "message": f"Corporate action not found: {action_id}"},
             )
         return PortfolioDeleteResponse(deleted=1)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
     except HTTPException:
         raise
     except Exception as exc:

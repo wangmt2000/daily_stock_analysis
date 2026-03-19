@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 import src.auth as auth
 from api.app import create_app
 from src.config import Config
+from src.services.portfolio_service import PortfolioBusyError
 from src.storage import DatabaseManager
 
 
@@ -431,6 +432,106 @@ class PortfolioApiTestCase(unittest.TestCase):
 
         missing_trade = self.client.delete("/api/v1/portfolio/trades/999999")
         self.assertEqual(missing_trade.status_code, 404)
+
+    def test_create_trade_busy_returns_409(self) -> None:
+        with patch(
+            "api.v1.endpoints.portfolio.PortfolioService.record_trade",
+            side_effect=PortfolioBusyError("Portfolio ledger is busy; please retry shortly."),
+        ):
+            resp = self.client.post(
+                "/api/v1/portfolio/trades",
+                json={
+                    "account_id": 1,
+                    "symbol": "600519",
+                    "trade_date": "2026-01-02",
+                    "side": "buy",
+                    "quantity": 10,
+                    "price": 100,
+                    "fee": 0,
+                    "tax": 0,
+                    "market": "cn",
+                    "currency": "CNY",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 409)
+        detail = resp.json()
+        self.assertEqual(detail.get("error"), "portfolio_busy")
+
+    def test_delete_trade_busy_returns_409(self) -> None:
+        with patch(
+            "api.v1.endpoints.portfolio.PortfolioService.delete_trade_event",
+            side_effect=PortfolioBusyError("Portfolio ledger is busy; please retry shortly."),
+        ):
+            resp = self.client.delete("/api/v1/portfolio/trades/1")
+
+        self.assertEqual(resp.status_code, 409)
+        detail = resp.json()
+        self.assertEqual(detail.get("error"), "portfolio_busy")
+
+    def test_create_cash_ledger_busy_returns_409(self) -> None:
+        with patch(
+            "api.v1.endpoints.portfolio.PortfolioService.record_cash_ledger",
+            side_effect=PortfolioBusyError("Portfolio ledger is busy; please retry shortly."),
+        ):
+            resp = self.client.post(
+                "/api/v1/portfolio/cash-ledger",
+                json={
+                    "account_id": 1,
+                    "event_date": "2026-01-02",
+                    "direction": "in",
+                    "amount": 1000,
+                    "currency": "CNY",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 409)
+        detail = resp.json()
+        self.assertEqual(detail.get("error"), "portfolio_busy")
+
+    def test_delete_cash_ledger_busy_returns_409(self) -> None:
+        with patch(
+            "api.v1.endpoints.portfolio.PortfolioService.delete_cash_ledger_event",
+            side_effect=PortfolioBusyError("Portfolio ledger is busy; please retry shortly."),
+        ):
+            resp = self.client.delete("/api/v1/portfolio/cash-ledger/1")
+
+        self.assertEqual(resp.status_code, 409)
+        detail = resp.json()
+        self.assertEqual(detail.get("error"), "portfolio_busy")
+
+    def test_create_corporate_action_busy_returns_409(self) -> None:
+        with patch(
+            "api.v1.endpoints.portfolio.PortfolioService.record_corporate_action",
+            side_effect=PortfolioBusyError("Portfolio ledger is busy; please retry shortly."),
+        ):
+            resp = self.client.post(
+                "/api/v1/portfolio/corporate-actions",
+                json={
+                    "account_id": 1,
+                    "symbol": "600519",
+                    "effective_date": "2026-01-02",
+                    "action_type": "split_adjustment",
+                    "market": "cn",
+                    "currency": "CNY",
+                    "split_ratio": 2.0,
+                },
+            )
+
+        self.assertEqual(resp.status_code, 409)
+        detail = resp.json()
+        self.assertEqual(detail.get("error"), "portfolio_busy")
+
+    def test_delete_corporate_action_busy_returns_409(self) -> None:
+        with patch(
+            "api.v1.endpoints.portfolio.PortfolioService.delete_corporate_action_event",
+            side_effect=PortfolioBusyError("Portfolio ledger is busy; please retry shortly."),
+        ):
+            resp = self.client.delete("/api/v1/portfolio/corporate-actions/1")
+
+        self.assertEqual(resp.status_code, 409)
+        detail = resp.json()
+        self.assertEqual(detail.get("error"), "portfolio_busy")
 
     def test_csv_broker_list_endpoint(self) -> None:
         resp = self.client.get("/api/v1/portfolio/imports/csv/brokers")

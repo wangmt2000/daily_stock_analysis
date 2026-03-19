@@ -492,10 +492,82 @@ class DataFetcherManager:
             # 默认数据源将在首次使用时延迟加载
             self._init_default_fetchers()
         self._fundamental_adapter = AkshareFundamentalAdapter()
+        self._tickflow_fetcher = None
+        self._tickflow_api_key: Optional[str] = None
+        self._tickflow_lock = RLock()
         self._fundamental_cache: Dict[str, Dict[str, Any]] = {}
         self._fundamental_cache_lock = RLock()
         self._fundamental_timeout_worker_limit = 8
         self._fundamental_timeout_slots = BoundedSemaphore(self._fundamental_timeout_worker_limit)
+
+    def _get_tickflow_fetcher(self):
+        """Lazily create a TickFlow fetcher for market-review-only calls."""
+        from src.config import get_config
+
+        config = get_config()
+        api_key = (getattr(config, "tickflow_api_key", None) or "").strip()
+
+        if not hasattr(self, "_tickflow_lock") or self._tickflow_lock is None:
+            self._tickflow_lock = RLock()
+
+        with self._tickflow_lock:
+            current_fetcher = getattr(self, "_tickflow_fetcher", None)
+            current_key = getattr(self, "_tickflow_api_key", None)
+
+            if not api_key:
+                if current_fetcher is not None and hasattr(current_fetcher, "close"):
+                    try:
+                        current_fetcher.close()
+                    except Exception as exc:
+                        logger.debug("[TickFlowFetcher] 关闭旧实例失败: %s", exc)
+                self._tickflow_fetcher = None
+                self._tickflow_api_key = None
+                return None
+
+            if current_fetcher is not None and current_key == api_key:
+                return current_fetcher
+
+            if current_fetcher is not None and hasattr(current_fetcher, "close"):
+                try:
+                    current_fetcher.close()
+                except Exception as exc:
+                    logger.debug("[TickFlowFetcher] 切换实例时关闭失败: %s", exc)
+
+            try:
+                from .tickflow_fetcher import TickFlowFetcher
+
+                fetcher = TickFlowFetcher(api_key=api_key)
+                self._tickflow_fetcher = fetcher
+                self._tickflow_api_key = api_key
+                return fetcher
+            except Exception as exc:
+                logger.warning("[TickFlowFetcher] 初始化失败: %s", exc)
+                self._tickflow_fetcher = None
+                self._tickflow_api_key = None
+                return None
+
+    def close(self) -> None:
+        """Best-effort release of manager-owned resources."""
+        if not hasattr(self, "_tickflow_lock") or self._tickflow_lock is None:
+            self._tickflow_lock = RLock()
+
+        with self._tickflow_lock:
+            current_fetcher = getattr(self, "_tickflow_fetcher", None)
+            self._tickflow_fetcher = None
+            self._tickflow_api_key = None
+
+        if current_fetcher is not None and hasattr(current_fetcher, "close"):
+            try:
+                current_fetcher.close()
+            except Exception as exc:
+                logger.debug("[TickFlowFetcher] 关闭管理器资源失败: %s", exc)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            # Best-effort cleanup during interpreter shutdown.
+            pass
 
     def _get_fundamental_cache_key(self, stock_code: str, budget_seconds: Optional[float] = None) -> str:
         """生成基本面缓存 key（包含预算分桶以避免低预算结果污染高预算请求）。"""
@@ -1348,6 +1420,17 @@ class DataFetcherManager:
 
     def get_main_indices(self, region: str = "cn") -> List[Dict[str, Any]]:
         """获取主要指数实时行情（自动切换数据源）"""
+        if region == "cn":
+            tickflow_fetcher = self._get_tickflow_fetcher()
+            if tickflow_fetcher is not None:
+                try:
+                    data = tickflow_fetcher.get_main_indices(region=region)
+                    if data:
+                        logger.info("[TickFlowFetcher] 获取指数行情成功")
+                        return data
+                except Exception as e:
+                    logger.warning(f"[TickFlowFetcher] 获取指数行情失败: {e}")
+
         for fetcher in self._fetchers:
             try:
                 data = fetcher.get_main_indices(region=region)
@@ -1361,6 +1444,16 @@ class DataFetcherManager:
 
     def get_market_stats(self) -> Dict[str, Any]:
         """获取市场涨跌统计（自动切换数据源）"""
+        tickflow_fetcher = self._get_tickflow_fetcher()
+        if tickflow_fetcher is not None:
+            try:
+                data = tickflow_fetcher.get_market_stats()
+                if data:
+                    logger.info("[TickFlowFetcher] 获取市场统计成功")
+                    return data
+            except Exception as e:
+                logger.warning(f"[TickFlowFetcher] 获取市场统计失败: {e}")
+
         for fetcher in self._fetchers:
             try:
                 data = fetcher.get_market_stats()

@@ -17,6 +17,7 @@ from src.config import (
     canonicalize_llm_channel_protocol,
     channel_allows_empty_api_key,
     get_configured_llm_models,
+    normalize_agent_litellm_model,
     normalize_news_strategy_profile,
     normalize_llm_channel_model,
     parse_env_bool,
@@ -767,6 +768,11 @@ class SystemConfigService:
             if not raw_channels:
                 return issues
 
+            configured_agent_model_raw = (effective_map.get("AGENT_LITELLM_MODEL") or "").strip()
+            configured_agent_model = normalize_agent_litellm_model(
+                configured_agent_model_raw,
+                configured_models=available_model_set,
+            )
             primary_model = (effective_map.get("LITELLM_MODEL") or "").strip()
             if primary_model and not SystemConfigService._has_runtime_source_for_model(primary_model, effective_map):
                 issues.append(
@@ -780,6 +786,28 @@ class SystemConfigService:
                         "severity": "error",
                         "expected": "enabled channel model or matching legacy API key",
                         "actual": primary_model,
+                    }
+                )
+
+            if (
+                configured_agent_model_raw
+                and configured_agent_model
+                and not SystemConfigService._has_runtime_source_for_model(
+                    configured_agent_model,
+                    effective_map,
+                )
+            ):
+                issues.append(
+                    {
+                        "key": "AGENT_LITELLM_MODEL",
+                        "code": "missing_runtime_source",
+                        "message": (
+                            "AGENT_LITELLM_MODEL is set, but there are no enabled channel models "
+                            "or matching legacy API keys for it"
+                        ),
+                        "severity": "error",
+                        "expected": "enabled channel model or matching legacy API key",
+                        "actual": configured_agent_model,
                     }
                 )
 
@@ -838,6 +866,31 @@ class SystemConfigService:
                     "severity": "error",
                     "expected": "one configured channel model",
                     "actual": primary_model,
+                }
+            )
+
+        configured_agent_model_raw = (effective_map.get("AGENT_LITELLM_MODEL") or "").strip()
+        configured_agent_model = normalize_agent_litellm_model(
+            configured_agent_model_raw,
+            configured_models=available_model_set,
+        )
+        if (
+            configured_agent_model_raw
+            and configured_agent_model
+            and configured_agent_model not in available_model_set
+            and not _uses_direct_env_provider(configured_agent_model)
+        ):
+            issues.append(
+                {
+                    "key": "AGENT_LITELLM_MODEL",
+                    "code": "unknown_model",
+                    "message": (
+                        "AGENT_LITELLM_MODEL is not declared by the current enabled channels. "
+                        f"Available models: {', '.join(available_models[:6])}"
+                    ),
+                    "severity": "error",
+                    "expected": "one configured channel model",
+                    "actual": configured_agent_model,
                 }
             )
 

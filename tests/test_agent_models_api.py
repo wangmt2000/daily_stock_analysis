@@ -71,6 +71,33 @@ class AgentModelsApiTestCase(unittest.TestCase):
         self.assertEqual(deployments[0]["source"], "llm_channels")
         self.assertEqual(deployments[0]["api_base"], "https://api.example.com/v1")
 
+    def test_models_endpoint_uses_agent_primary_override_for_primary_marker(self) -> None:
+        config = _build_config(
+            litellm_model="gemini/gemini-2.5-flash",
+            litellm_fallback_models=["openai/gpt-4o-mini"],
+            agent_litellm_model="openai/gpt-4o-mini",
+            llm_channels=[{"name": "mixed"}],
+            llm_models_source="llm_channels",
+            llm_model_list=[
+                {
+                    "model_name": "gemini/gemini-2.5-flash",
+                    "litellm_params": {"model": "gemini/gemini-2.5-flash", "api_key": "secret-g"},
+                },
+                {
+                    "model_name": "openai/gpt-4o-mini",
+                    "litellm_params": {"model": "openai/gpt-4o-mini", "api_key": "secret-o"},
+                },
+            ],
+        )
+
+        deployments = list_agent_model_deployments(config)
+        by_model = {item["model"]: item for item in deployments}
+
+        self.assertTrue(by_model["openai/gpt-4o-mini"]["is_primary"])
+        self.assertFalse(by_model["openai/gpt-4o-mini"]["is_fallback"])
+        self.assertFalse(by_model["gemini/gemini-2.5-flash"]["is_primary"])
+        self.assertFalse(by_model["gemini/gemini-2.5-flash"]["is_fallback"])
+
     def test_models_endpoint_resolves_legacy_placeholders_to_real_models(self) -> None:
         config = _build_config(
             llm_model_list=[

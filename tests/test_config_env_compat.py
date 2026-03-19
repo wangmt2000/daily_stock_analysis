@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for backward-compatible config env aliases and fallbacks."""
+"""Tests for backward-compatible config env aliases and TickFlow loading."""
 
 import os
 import unittest
@@ -9,6 +9,46 @@ from src.config import Config
 
 
 class ConfigEnvCompatibilityTestCase(unittest.TestCase):
+    def tearDown(self):
+        Config.reset_instance()
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_load_from_env_reads_tickflow_api_key(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "TICKFLOW_API_KEY": "tf-secret",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.tickflow_api_key, "tf-secret")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_load_from_env_keeps_default_behavior_without_tickflow_api_key(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertIsNone(config.tickflow_api_key)
+        self.assertEqual(
+            config.realtime_source_priority,
+            "tencent,akshare_sina,efinance,akshare_em",
+        )
+
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
     def test_schedule_run_immediately_falls_back_to_legacy_run_immediately(

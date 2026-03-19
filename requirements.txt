@@ -16,6 +16,7 @@ tushare>=1.4.0              # Priority 2: 挖地兔 Pro API
 pytdx>=1.72                 # Priority 2: 通达信行情服务器
 baostock>=0.8.0             # Priority 3: 证券宝数据
 yfinance>=0.2.0             # Priority 4: Yahoo Finance (Fallback)
+tickflow>=0.1.0            # TickFlow official SDK (Issue #632, market review enhancement)
 
 #飞书
 lark-oapi>=1.0.0             # 飞书API

@@ -7,6 +7,7 @@ export type ApiErrorCategory =
   | 'model_tool_incompatible'
   | 'invalid_tool_call'
   | 'portfolio_oversell'
+  | 'portfolio_busy'
   | 'upstream_llm_400'
   | 'upstream_timeout'
   | 'upstream_network'
@@ -329,6 +330,16 @@ export function parseApiError(error: unknown): ParsedApiError {
       rawMessage,
       status,
       category: 'portfolio_oversell',
+    });
+  }
+
+  if (errorCode === 'portfolio_busy' || includesAny(matchText, ['portfolio ledger is busy'])) {
+    return createParsedApiError({
+      title: '持仓账本正忙',
+      message: '持仓账本正在处理另一笔变更，请稍后重试。',
+      rawMessage,
+      status,
+      category: 'portfolio_busy',
     });
   }
 

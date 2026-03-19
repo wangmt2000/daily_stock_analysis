@@ -4,15 +4,20 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
+from sqlalchemy.exc import OperationalError
 from sqlalchemy import select
 
 from src.config import Config
+from src.repositories.portfolio_repo import PortfolioBusyError, PortfolioRepository
 from src.services.portfolio_service import PortfolioConflictError, PortfolioOversellError, PortfolioService
 from src.storage import DatabaseManager, PortfolioDailySnapshot, PortfolioPosition, PortfolioPositionLot, PortfolioTrade
 
@@ -452,6 +457,129 @@ class PortfolioServiceTestCase(unittest.TestCase):
         self.assertEqual(len(trade_rows), 0)
         self.assertEqual(len(snapshot_rows), 0)
         self.assertEqual(len(lot_rows), 0)
+
+    def test_concurrent_sell_race_allows_only_one_write(self) -> None:
+        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        aid = account["id"]
+        self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 1),
+            side="buy",
+            quantity=10,
+            price=10,
+            market="cn",
+            currency="CNY",
+        )
+
+        barrier = threading.Barrier(3)
+        results: list[str] = []
+        errors: list[Exception] = []
+
+        def _worker(uid: str) -> None:
+            svc = PortfolioService()
+            barrier.wait()
+            try:
+                svc.record_trade(
+                    account_id=aid,
+                    symbol="600519",
+                    trade_date=date(2026, 1, 2),
+                    side="sell",
+                    quantity=10,
+                    price=11,
+                    market="cn",
+                    currency="CNY",
+                    trade_uid=uid,
+                )
+                results.append(uid)
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_worker, args=(f"sell-race-{idx}",), daemon=True)
+            for idx in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], PortfolioOversellError)
+
+        trades = self.service.list_trade_events(account_id=aid, page=1, page_size=20)
+        sell_count = sum(1 for item in trades["items"] if item["side"] == "sell")
+        self.assertEqual(sell_count, 1)
+
+    def test_concurrent_duplicate_full_close_sell_keeps_conflict_semantics(self) -> None:
+        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        aid = account["id"]
+        self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 1),
+            side="buy",
+            quantity=10,
+            price=10,
+            market="cn",
+            currency="CNY",
+        )
+
+        barrier = threading.Barrier(3)
+        results: list[str] = []
+        errors: list[Exception] = []
+
+        def _worker() -> None:
+            svc = PortfolioService()
+            barrier.wait()
+            try:
+                svc.record_trade(
+                    account_id=aid,
+                    symbol="600519",
+                    trade_date=date(2026, 1, 2),
+                    side="sell",
+                    quantity=10,
+                    price=11,
+                    market="cn",
+                    currency="CNY",
+                    trade_uid="dup-race-sell-1",
+                )
+                results.append("ok")
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], PortfolioConflictError)
+        self.assertIn("Duplicate trade_uid", str(errors[0]))
+
+    def test_portfolio_write_session_maps_sqlite_locked_error(self) -> None:
+        repo = PortfolioRepository(db_manager=self.db)
+        session = self.db.get_session()
+        stmt_exc = OperationalError(
+            "BEGIN IMMEDIATE",
+            None,
+            sqlite3.OperationalError("database is locked"),
+        )
+
+        with patch.object(self.db, "get_session", return_value=session):
+            with patch.object(
+                session.connection(),
+                "exec_driver_sql",
+                side_effect=stmt_exc,
+            ):
+                with self.assertRaises(PortfolioBusyError):
+                    with repo.portfolio_write_session():
+                        pass
 
 
 if __name__ == "__main__":
