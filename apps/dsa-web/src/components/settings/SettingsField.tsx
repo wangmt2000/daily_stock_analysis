@@ -129,7 +129,7 @@ function renderFieldControl(
               </div>
               <button
                 type="button"
-                className="inline-flex h-11 items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-muted-text transition-colors hover:bg-white/10 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-11 items-center justify-center rounded-xl border settings-border settings-surface-hover px-3 text-xs text-muted-text transition-colors hover:settings-surface-hover hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={disabled || !schema?.isEditable || values.length <= 1}
                 onClick={() => {
                   const nextValues = values.filter((_, rowIndex) => rowIndex !== index);
@@ -144,7 +144,7 @@ function renderFieldControl(
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-white/5 px-3 py-1 text-xs text-secondary-text transition-colors hover:bg-white/10 hover:text-white"
+              className="inline-flex items-center justify-center rounded-lg border settings-border settings-surface-hover px-3 py-1 text-xs text-secondary-text transition-colors hover:settings-surface-hover hover:text-foreground"
               disabled={disabled || !schema?.isEditable}
               onClick={() => onChange(serializeMultiValues([...values, '']))}
             >
@@ -202,12 +202,12 @@ export const SettingsField: React.FC<SettingsFieldProps> = ({
   return (
     <div
       className={cn(
-        'rounded-[1.15rem] border bg-white/2 p-4 shadow-soft-card transition-all duration-200 hover:bg-white/5',
-        hasError ? 'border-danger/40' : 'border-white/10',
+        'rounded-[1.15rem] border settings-surface p-4 shadow-soft-card transition-all duration-200 hover:settings-surface-hover',
+        hasError ? 'border-danger/40' : 'settings-border',
       )}
     >
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <label className="text-sm font-semibold text-white" htmlFor={controlId}>
+        <label className="text-sm font-semibold text-foreground" htmlFor={controlId}>
           {title}
         </label>
         {schema?.isSensitive ? (

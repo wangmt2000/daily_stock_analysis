@@ -36,7 +36,7 @@ export const Checkbox: React.FC<CheckboxProps> = ({
       {label && (
         <label
           htmlFor={checkboxId}
-          className="cursor-pointer select-none text-sm font-medium text-white"
+          className="cursor-pointer select-none text-sm font-medium text-foreground"
         >
           {label}
         </label>

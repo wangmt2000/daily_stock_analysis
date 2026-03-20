@@ -360,6 +360,154 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertIsNone(report.details.financial_report)
         self.assertIsNone(report.details.dividend_metrics)
 
+    def test_history_markdown_localizes_english_report_and_placeholder_name(self) -> None:
+        """History markdown should preserve report_language for English reports."""
+        result = AnalysisResult(
+            code="AAPL",
+            name="股票AAPL",
+            sentiment_score=78,
+            trend_prediction="Bullish",
+            operation_advice="Buy",
+            analysis_summary="Momentum remains constructive.",
+            report_language="en",
+            dashboard={
+                "core_conclusion": {
+                    "one_sentence": "Favor buying on pullbacks.",
+                    "position_advice": {
+                        "no_position": "Open a starter position.",
+                        "has_position": "Hold and trail the stop.",
+                    },
+                },
+                "intelligence": {
+                    "risk_alerts": [],
+                },
+                "battle_plan": {
+                    "sniper_points": {
+                        "ideal_buy": "180-182",
+                        "stop_loss": "172",
+                        "take_profit": "195",
+                    }
+                },
+            },
+        )
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_english_markdown_001",
+            report_type="full",
+            news_content="news",
+            context_snapshot=None,
+            save_snapshot=False,
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(
+                AnalysisHistory.query_id == "query_english_markdown_001"
+            ).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        markdown = HistoryService(self.db).get_markdown_report(str(record_id))
+
+        self.assertIsNotNone(markdown)
+        self.assertIn("Stock Analysis Report", markdown)
+        self.assertIn("Core Conclusion", markdown)
+        self.assertIn("Unnamed Stock (AAPL)", markdown)
+        self.assertNotIn("核心结论", markdown)
+
+    def test_history_detail_localizes_english_summary_fields(self) -> None:
+        """History detail should localize summary enums for English reports."""
+        if get_history_detail is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        result = AnalysisResult(
+            code="AAPL",
+            name="股票AAPL",
+            sentiment_score=78,
+            trend_prediction="看多",
+            operation_advice="买入",
+            analysis_summary="Momentum remains constructive.",
+            report_language="en",
+        )
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_english_detail_001",
+            report_type="full",
+            news_content="news",
+            context_snapshot=None,
+            save_snapshot=False,
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(
+                AnalysisHistory.query_id == "query_english_detail_001"
+            ).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        report = get_history_detail(str(record_id), db_manager=self.db)
+
+        self.assertEqual(report.meta.report_language, "en")
+        self.assertEqual(report.meta.stock_name, "Unnamed Stock")
+        self.assertEqual(report.summary.operation_advice, "Buy")
+        self.assertEqual(report.summary.trend_prediction, "Bullish")
+        self.assertEqual(report.summary.sentiment_label, "Bullish")
+
+    def test_history_markdown_uses_safe_bias_emoji_for_english_status(self) -> None:
+        """English bias status should keep the correct non-risk emoji in markdown."""
+        result = AnalysisResult(
+            code="AAPL",
+            name="股票AAPL",
+            sentiment_score=80,
+            trend_prediction="Bullish",
+            operation_advice="Buy",
+            analysis_summary="Momentum remains constructive.",
+            report_language="en",
+            dashboard={
+                "data_perspective": {
+                    "price_position": {
+                        "current_price": 190.5,
+                        "ma5": 188.0,
+                        "ma10": 184.5,
+                        "ma20": 179.2,
+                        "bias_ma5": 1.33,
+                        "bias_status": "Safe",
+                        "support_level": 184.5,
+                        "resistance_level": 195.0,
+                    }
+                }
+            },
+        )
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_english_markdown_bias_001",
+            report_type="full",
+            news_content="news",
+            context_snapshot=None,
+            save_snapshot=False,
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(
+                AnalysisHistory.query_id == "query_english_markdown_bias_001"
+            ).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        markdown = HistoryService(self.db).get_markdown_report(str(record_id))
+
+        self.assertIsNotNone(markdown)
+        self.assertIn("✅Safe", markdown)
+        self.assertNotIn("🚨Safe", markdown)
+
     def test_delete_analysis_history_records_also_cleans_backtests(self) -> None:
         """删除历史记录时应一并清理关联回测结果。"""
         record_id = self._save_history("query_delete_001")

@@ -15,6 +15,8 @@ export interface AnalysisRequest {
 
 // ============ 报告类型 ============
 
+export type ReportLanguage = 'zh' | 'en';
+
 /** 报告元信息 */
 export interface ReportMeta {
   id?: number;  // 分析历史记录主键 ID（历史报告时有此字段）
@@ -22,6 +24,7 @@ export interface ReportMeta {
   stockCode: string;
   stockName: string;
   reportType: 'simple' | 'detailed' | 'full' | 'brief';
+  reportLanguage?: ReportLanguage;
   createdAt: string;
   currentPrice?: number;
   changePct?: number;
@@ -29,7 +32,17 @@ export interface ReportMeta {
 }
 
 /** 情绪标签 */
-export type SentimentLabel = '极度悲观' | '悲观' | '中性' | '乐观' | '极度乐观';
+export type SentimentLabel =
+  | '极度悲观'
+  | '悲观'
+  | '中性'
+  | '乐观'
+  | '极度乐观'
+  | 'Very Bearish'
+  | 'Bearish'
+  | 'Neutral'
+  | 'Bullish'
+  | 'Very Bullish';
 
 /** 报告概览区 */
 export interface ReportSummary {
@@ -205,7 +218,15 @@ export interface ApiError {
 // ============ 辅助函数 ============
 
 /** 根据情绪评分获取情绪标签 */
-export const getSentimentLabel = (score: number): SentimentLabel => {
+export const getSentimentLabel = (score: number, language: ReportLanguage = 'zh'): SentimentLabel => {
+  if (language === 'en') {
+    if (score <= 20) return 'Very Bearish';
+    if (score <= 40) return 'Bearish';
+    if (score <= 60) return 'Neutral';
+    if (score <= 80) return 'Bullish';
+    return 'Very Bullish';
+  }
+
   if (score <= 20) return '极度悲观';
   if (score <= 40) return '悲观';
   if (score <= 60) return '中性';

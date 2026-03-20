@@ -18,9 +18,9 @@ export const SettingsCategoryNav: React.FC<SettingsCategoryNavProps> = ({
   onSelect,
 }) => {
   return (
-    <div className="h-full rounded-[1.5rem] border border-white/10 bg-card p-4 shadow-soft-card-strong">
+    <div className="h-full rounded-[1.5rem] border settings-border bg-card p-4 shadow-soft-card-strong">
       <div className="mb-4">
-        <p className="text-xs uppercase tracking-[0.3em] text-cyan font-semibold">配置分类</p>
+        <p className="settings-accent-text text-xs font-semibold uppercase tracking-[0.3em]">配置分类</p>
         <p className="mt-1 text-[11px] leading-relaxed text-muted-text">按模块整理系统设置与认证能力。</p>
       </div>
 
@@ -38,14 +38,14 @@ export const SettingsCategoryNav: React.FC<SettingsCategoryNavProps> = ({
               className={cn(
                 'w-full rounded-[1.1rem] border px-3 py-3 text-left transition-all duration-200',
                 isActive
-                  ? 'border-cyan bg-elevated shadow-[0_0_15px_rgba(0,212,255,0.1)]'
-                  : 'border-white/10 bg-white/2 hover:border-white/20 hover:bg-white/5',
+                  ? 'settings-accent-badge-soft settings-shadow-accent'
+                  : 'settings-border settings-surface hover:settings-border-strong hover:settings-surface-hover',
               )}
               onClick={() => onSelect(category.category)}
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className={cn('text-sm font-semibold tracking-tight', isActive ? 'text-white' : 'text-secondary-text')}>
+                  <p className={cn('text-sm font-semibold tracking-tight', isActive ? 'text-foreground' : 'text-secondary-text')}>
                     {title}
                   </p>
                   {description ? (
@@ -55,7 +55,7 @@ export const SettingsCategoryNav: React.FC<SettingsCategoryNavProps> = ({
                 <Badge
                   variant={isActive ? 'info' : 'default'}
                   size="sm"
-                  className={isActive ? 'bg-cyan/10 text-cyan border-cyan/20' : 'border-white/10 bg-white/5 text-muted-text'}
+                  className={isActive ? 'settings-accent-badge' : 'settings-border settings-surface-hover text-muted-text'}
                 >
                   {count}
                 </Badge>

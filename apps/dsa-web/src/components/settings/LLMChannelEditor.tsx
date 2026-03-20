@@ -202,9 +202,9 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
         : 'default';
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-white/10 bg-white/2 shadow-soft-card transition-all hover:bg-white/5">
+    <div className="mb-2 overflow-hidden rounded-xl border settings-border settings-surface shadow-soft-card transition-all hover:settings-surface-hover">
       <div
-        className="flex cursor-pointer select-none items-center gap-2.5 px-4 py-3 transition-colors hover:bg-white/5"
+        className="flex cursor-pointer select-none items-center gap-2.5 px-4 py-3 transition-colors hover:settings-surface-hover"
         onClick={() => onToggleExpand(index)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
@@ -221,7 +221,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
           type="checkbox"
           checked={channel.enabled}
           disabled={busy}
-          className="h-4 w-4 shrink-0 rounded border-border/70 bg-base text-cyan focus:ring-cyan/20"
+          className="settings-input-checkbox h-4 w-4 shrink-0 rounded border-border/70 bg-base"
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => onUpdate(index, 'enabled', e.target.checked)}
         />
@@ -267,7 +267,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
       </div>
 
       {expanded ? (
-        <div className="space-y-4 bg-background/15 px-4 py-4">
+        <div className="settings-surface-overlay-soft space-y-4 px-4 py-4">
           <div className="grid gap-2 sm:grid-cols-2">
             <Input
               label="渠道名称"
@@ -326,7 +326,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
               type="button"
               variant="gradient"
               size="sm"
-              className="px-3 text-[11px] border-cyan/20 shadow-none"
+              className="settings-accent-badge-soft px-3 text-[11px] shadow-none"
               disabled={busy}
               onClick={() => onTest(channel, index)}
             >
@@ -884,13 +884,13 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
     <div className="space-y-4">
       <button
         type="button"
-        className="flex w-full items-center justify-between rounded-[1.35rem] border border-white/10 bg-white/2 px-5 py-4 text-left transition-all duration-200 hover:bg-white/5"
+        className="flex w-full items-center justify-between rounded-[1.35rem] border settings-border settings-surface px-5 py-4 text-left transition-all duration-200 hover:settings-surface-hover"
         onClick={() => setIsCollapsed((previous) => !previous)}
       >
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <h3 className="text-base font-semibold text-white">AI 模型配置</h3>
-            <Badge variant="info" className="bg-cyan/10 text-cyan border-cyan/20">渠道管理</Badge>
+            <h3 className="text-base font-semibold text-foreground">AI 模型配置</h3>
+            <Badge variant="info" className="settings-accent-badge">渠道管理</Badge>
           </div>
           <p className="text-xs text-muted-text">
             添加服务商渠道，填入 API Key 和模型名称即可。配置会自动同步到 .env 文件。
@@ -901,13 +901,13 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
 
       {!isCollapsed ? (
         <div className="space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-          <div className="rounded-[1.35rem] border border-white/10 bg-white/2 p-4">
+          <div className="settings-surface rounded-[1.35rem] border settings-border p-4">
             <div className="mb-3 flex items-center justify-between">
               <div>
-                <h4 className="text-sm font-medium text-white">快速添加渠道</h4>
+                <h4 className="text-sm font-medium text-foreground">快速添加渠道</h4>
                 <p className="mt-1 text-xs text-secondary-text">先选择预设服务商，再一键创建配置草稿。</p>
               </div>
-              <Badge variant="default" className="border-white/10 bg-white/5 text-muted-text">{channels.length} 个渠道</Badge>
+              <Badge variant="default" className="settings-border settings-surface-hover text-muted-text">{channels.length} 个渠道</Badge>
             </div>
             <div className="flex items-center gap-2">
               <Button type="button" variant="gradient" className="whitespace-nowrap" disabled={busy} onClick={addChannel}>
@@ -936,7 +936,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
             </div>
 
             {channels.length === 0 ? (
-              <div className="rounded-[1.35rem] border border-dashed border-border/28 bg-background/12 px-4 py-10 text-center">
+              <div className="settings-surface-overlay-muted rounded-[1.35rem] border border-dashed border-border/28 px-4 py-10 text-center">
                 <p className="text-sm font-medium text-secondary-text">还没有渠道</p>
                 <p className="mt-1 text-xs text-muted-text">选择服务商预设后点击“添加渠道”即可开始配置。</p>
               </div>
@@ -959,13 +959,13 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
           </div>
 
           {managesRuntimeConfig ? (
-            <div className="rounded-[1.35rem] border border-white/10 bg-white/2 p-4">
+            <div className="settings-surface rounded-[1.35rem] border settings-border p-4">
               <div className="mb-4 flex items-center justify-between">
                 <div>
-                  <span className="text-xs font-medium uppercase tracking-wider text-cyan">运行时参数</span>
+                  <span className="settings-accent-text text-xs font-medium uppercase tracking-wider">运行时参数</span>
                   <p className="mt-1 text-[11px] text-muted-text">主模型、Fallback、Vision 与 Temperature 会直接写入运行时配置。</p>
                 </div>
-                <Badge variant="default" className="border-white/10 bg-white/5 text-muted-text">Runtime</Badge>
+                <Badge variant="default" className="settings-border settings-surface-hover text-muted-text">Runtime</Badge>
               </div>
               <div className="mb-4">
                 <label className="mb-1 block text-xs text-muted-text">Temperature</label>
@@ -978,7 +978,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                     value={runtimeConfig.temperature}
                     disabled={busy}
                     onChange={(event) => setRuntimeConfig((previous) => ({ ...previous, temperature: event.target.value }))}
-                    className="h-1.5 flex-1 cursor-pointer rounded-full bg-border/60 accent-cyan"
+                    className="settings-input-checkbox h-1.5 flex-1 cursor-pointer rounded-full bg-border/60"
                   />
                   <span className="w-8 text-right text-sm text-secondary-text">{runtimeConfig.temperature}</span>
                 </div>
@@ -1028,7 +1028,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                             checked={runtimeConfig.fallbackModels.includes(model)}
                             disabled={busy || model === runtimeConfig.primaryModel}
                             onChange={() => toggleFallbackModel(model)}
-                            className="h-4 w-4 rounded border-border/70 bg-base text-cyan focus:ring-cyan/20"
+                            className="settings-input-checkbox h-4 w-4 rounded border-border/70 bg-base"
                           />
                           <span>{model}</span>
                         </label>

@@ -80,6 +80,28 @@ export default {
         'muted-bg': 'hsl(var(--muted))',
         'secondary-text': 'hsl(var(--secondary-text))',
         'muted-text': 'hsl(var(--muted-text))',
+        // 设计令牌 (Design Tokens)
+        dim: 'hsl(var(--border-dim-raw) / 0.06)',
+        subtle: 'hsl(var(--bg-subtle-raw) / 0.05)',
+        'subtle-hover': 'hsl(var(--bg-subtle-raw) / 0.1)',
+        'subtle-soft': 'hsl(var(--bg-subtle-raw) / 0.03)',
+        'subtle-active': 'hsl(var(--bg-subtle-raw) / 0.15)',
+        'surface-1': 'var(--surface-1)',
+        'surface-2': 'var(--surface-2)',
+        'surface-3': 'var(--surface-3)',
+        'overlay-hover': 'var(--overlay-hover)',
+        'overlay-selected': 'var(--overlay-selected)',
+      },
+      borderColor: {
+        dim: 'hsl(var(--border-dim-raw) / 0.06)',
+        subtle: 'hsl(var(--border-subtle-raw) / 0.08)',
+        'subtle-hover': 'hsl(var(--border-subtle-raw) / 0.15)',
+      },
+      backgroundColor: {
+        subtle: 'hsl(var(--bg-subtle-raw) / 0.05)',
+        'subtle-hover': 'hsl(var(--bg-subtle-raw) / 0.1)',
+        'subtle-soft': 'hsl(var(--bg-subtle-raw) / 0.03)',
+        'subtle-active': 'hsl(var(--bg-subtle-raw) / 0.15)',
       },
       backgroundImage: {
         'gradient-purple-cyan': 'linear-gradient(135deg, hsla(var(--accent), 0.2) 0%, hsla(var(--primary), 0.1) 100%)',

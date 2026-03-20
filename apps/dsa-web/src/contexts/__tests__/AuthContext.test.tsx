@@ -3,11 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApiError, createParsedApiError } from '../../api/error';
 import { AuthProvider, useAuth } from '../AuthContext';
 
-const { getStatus, login, changePassword, logout } = vi.hoisted(() => ({
+const { getStatus, login, changePassword, logout, resetDashboardState } = vi.hoisted(() => ({
   getStatus: vi.fn(),
   login: vi.fn(),
   changePassword: vi.fn(),
   logout: vi.fn(),
+  resetDashboardState: vi.fn(),
 }));
 
 vi.mock('../../api/auth', () => ({
@@ -16,6 +17,14 @@ vi.mock('../../api/auth', () => ({
     login,
     changePassword,
     logout,
+  },
+}));
+
+vi.mock('../../stores', () => ({
+  useStockPoolStore: {
+    getState: () => ({
+      resetDashboardState,
+    }),
   },
 }));
 
@@ -79,10 +88,11 @@ describe('AuthContext', () => {
         passwordChangeable: true,
       })
       .mockResolvedValueOnce({
-        authEnabled: false,
+        authEnabled: true,
         loggedIn: false,
-        passwordSet: false,
-        passwordChangeable: false,
+        passwordSet: true,
+        passwordChangeable: true,
+        setupState: 'enabled',
       });
     logout.mockResolvedValue(undefined);
 
@@ -96,6 +106,26 @@ describe('AuthContext', () => {
     fireEvent.click(screen.getByRole('button', { name: 'trigger-logout' }));
 
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('logged-out'));
+    expect(resetDashboardState).toHaveBeenCalled();
+  });
+
+  it('does not reset dashboard state when auth is disabled', async () => {
+    getStatus.mockResolvedValueOnce({
+      authEnabled: false,
+      loggedIn: false,
+      passwordSet: false,
+      passwordChangeable: false,
+      setupState: 'no_password',
+    });
+
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>
+    );
+
+    await screen.findByTestId('status');
+    expect(resetDashboardState).not.toHaveBeenCalled();
   });
 
   it('treats a 401 logout as already signed out after status refresh', async () => {
@@ -137,5 +167,6 @@ describe('AuthContext', () => {
     fireEvent.click(screen.getByRole('button', { name: 'trigger-logout' }));
 
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('logged-out'));
+    expect(resetDashboardState).toHaveBeenCalled();
   });
 });

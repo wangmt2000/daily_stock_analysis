@@ -104,6 +104,7 @@ const baseCategories = [
   { category: 'system', title: 'System', description: '系统设置', displayOrder: 1, fields: [] },
   { category: 'base', title: 'Base', description: '基础配置', displayOrder: 2, fields: [] },
   { category: 'ai_model', title: 'AI', description: '模型配置', displayOrder: 3, fields: [] },
+  { category: 'agent', title: 'Agent', description: 'Agent 配置', displayOrder: 4, fields: [] },
 ];
 
 type ConfigState = {
@@ -198,6 +199,26 @@ function buildSystemConfigState(overrides: ConfigOverride = {}) {
           },
         },
       ],
+      agent: [
+        {
+          key: 'AGENT_ORCHESTRATOR_TIMEOUT_S',
+          value: '600',
+          rawValueExists: true,
+          isMasked: false,
+          schema: {
+            key: 'AGENT_ORCHESTRATOR_TIMEOUT_S',
+            category: 'agent',
+            dataType: 'integer',
+            uiControl: 'number',
+            isSensitive: false,
+            isRequired: false,
+            isEditable: true,
+            options: [],
+            validation: {},
+            displayOrder: 1,
+          },
+        },
+      ],
     },
     issueByKey: {},
     activeCategory: 'system',
@@ -257,6 +278,77 @@ describe('SettingsPage', () => {
     // Reset should call resetDraft and NOT call load
     expect(resetDraft).toHaveBeenCalledTimes(1);
     expect(load).not.toHaveBeenCalled();
+  });
+
+  it('hides unavailable deep research and event monitor fields from the agent category', () => {
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      activeCategory: 'agent',
+      itemsByCategory: {
+        ...buildSystemConfigState().itemsByCategory,
+        agent: [
+          {
+            key: 'AGENT_ORCHESTRATOR_TIMEOUT_S',
+            value: '600',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'AGENT_ORCHESTRATOR_TIMEOUT_S',
+              category: 'agent',
+              dataType: 'integer',
+              uiControl: 'number',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 1,
+            },
+          },
+          {
+            key: 'AGENT_DEEP_RESEARCH_BUDGET',
+            value: '30000',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'AGENT_DEEP_RESEARCH_BUDGET',
+              category: 'agent',
+              dataType: 'integer',
+              uiControl: 'number',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: false,
+              options: [],
+              validation: {},
+              displayOrder: 2,
+            },
+          },
+          {
+            key: 'AGENT_EVENT_MONITOR_ENABLED',
+            value: 'false',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'AGENT_EVENT_MONITOR_ENABLED',
+              category: 'agent',
+              dataType: 'boolean',
+              uiControl: 'switch',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: false,
+              options: [],
+              validation: {},
+              displayOrder: 3,
+            },
+          },
+        ],
+      },
+    }));
+
+    render(<SettingsPage />);
+
+    expect(screen.getByText('AGENT_ORCHESTRATOR_TIMEOUT_S')).toBeInTheDocument();
+    expect(screen.queryByText('AGENT_DEEP_RESEARCH_BUDGET')).not.toBeInTheDocument();
+    expect(screen.queryByText('AGENT_EVENT_MONITOR_ENABLED')).not.toBeInTheDocument();
   });
 
   it('reset button semantic: discards local changes without network request', () => {

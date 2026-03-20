@@ -2,7 +2,7 @@ import React from 'react';
 import { cn } from '../../utils/cn';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'gradient' | 'danger' | 'settings-primary' | 'settings-secondary';
+  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'gradient' | 'danger' | 'danger-subtle' | 'settings-primary' | 'settings-secondary' | 'home-action-ai' | 'home-action-report';
   size?: 'sm' | 'md' | 'lg' | 'xl';
   isLoading?: boolean;
   /** Custom loading text. */
@@ -20,12 +20,15 @@ const BUTTON_SIZE_STYLES = {
 const BUTTON_VARIANT_STYLES = {
   primary: 'border border-cyan/30 bg-primary-gradient text-primary-foreground shadow-lg shadow-cyan/20 hover:brightness-105',
   secondary: 'border border-border/70 bg-card text-foreground shadow-soft-card hover:bg-hover',
-  'settings-primary': 'border border-[rgba(0,212,255,0.26)] bg-gradient-to-br from-[rgba(0,212,255,0.96)] to-[rgba(0,168,204,0.96)] text-[#041118] shadow-lg shadow-cyan/20 hover:brightness-105 hover:shadow-xl hover:shadow-cyan/22',
-  'settings-secondary': 'border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] text-secondary-text hover:translate-y-[-1px] hover:border-[rgba(0,212,255,0.3)] hover:bg-[rgba(0,212,255,0.06)] hover:text-foreground',
+  'settings-primary': 'border settings-button-primary hover:brightness-105 hover:shadow-xl',
+  'settings-secondary': 'border settings-button-secondary hover:translate-y-[-1px]',
   outline: 'border border-cyan/25 bg-transparent text-cyan hover:bg-cyan/10',
   ghost: 'border border-transparent bg-transparent text-secondary-text hover:bg-hover hover:text-foreground',
   gradient: 'border border-cyan/20 bg-gradient-to-r from-cyan to-purple text-primary-foreground shadow-lg shadow-cyan/20 hover:brightness-105',
   danger: 'border border-danger/40 bg-danger text-destructive-foreground shadow-lg shadow-danger/20 hover:brightness-105',
+  'danger-subtle': 'border border-danger/60 bg-danger/10 text-danger hover:bg-danger/15',
+  'home-action-ai': 'bg-[var(--home-action-ai-bg)] border border-[var(--home-action-ai-border)] text-[var(--home-action-ai-text)] hover:bg-[var(--home-action-ai-hover-bg)]',
+  'home-action-report': 'bg-[var(--home-action-report-bg)] border border-[var(--home-action-report-border)] text-[var(--home-action-report-text)] hover:bg-[var(--home-action-report-hover-bg)]',
 } as const;
 
 /**
@@ -43,7 +46,7 @@ export const Button: React.FC<ButtonProps> = ({
   type = 'button',
   ...props
 }) => {
-  const glowStyles = glow ? 'shadow-glow-cyan hover:shadow-[0_0_30px_rgba(0,212,255,0.38)]' : '';
+  const glowStyles = glow ? 'shadow-glow-cyan settings-glow-cyan-hover' : '';
 
   return (
     <button

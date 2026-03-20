@@ -76,6 +76,33 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         self.assertEqual(result["report"]["meta"]["report_type"], "full")
 
+    def test_build_analysis_response_localizes_placeholder_stock_name_for_english(self) -> None:
+        service = AnalysisService()
+        result = service._build_analysis_response(
+            SimpleNamespace(
+                code="AAPL",
+                name="股票AAPL",
+                current_price=180.35,
+                change_pct=1.04,
+                model_used="test-model",
+                analysis_summary="Momentum remains constructive.",
+                operation_advice="Buy",
+                trend_prediction="Bullish",
+                sentiment_score=78,
+                news_summary="news",
+                technical_analysis="tech",
+                fundamental_analysis="fundamental",
+                risk_warning="risk",
+                report_language="en",
+                get_sniper_points=lambda: {},
+            ),
+            "q1",
+            report_type="full",
+        )
+
+        self.assertEqual(result["stock_name"], "Unnamed Stock")
+        self.assertEqual(result["report"]["meta"]["stock_name"], "Unnamed Stock")
+
     def test_build_analysis_report_extracts_fundamental_fields_from_snapshot(self) -> None:
         if _build_analysis_report is None:
             self.skipTest("analysis endpoint helpers unavailable in this environment")
@@ -107,6 +134,26 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         self.assertEqual(report.details.financial_report["report_date"], "2025-12-31")
         self.assertEqual(report.details.dividend_metrics["ttm_dividend_yield_pct"], 2.5)
+
+    def test_build_analysis_report_preserves_report_language(self) -> None:
+        if _build_analysis_report is None:
+            self.skipTest("analysis endpoint helpers unavailable in this environment")
+
+        report = _build_analysis_report(
+            report_data={
+                "meta": {"report_language": "en"},
+                "summary": {"analysis_summary": "English output"},
+                "strategy": {},
+                "details": {},
+            },
+            query_id="q1",
+            stock_code="AAPL",
+            stock_name="Apple",
+            context_snapshot={"report_language": "zh"},
+            fallback_fundamental_payload=None,
+        )
+
+        self.assertEqual(report.meta.report_language, "en")
 
     def test_load_sync_fundamental_sources_uses_query_and_code_for_fallback(self) -> None:
         if _load_sync_fundamental_sources is None:

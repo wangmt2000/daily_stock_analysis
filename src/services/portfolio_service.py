@@ -34,6 +34,7 @@ VALID_COST_METHODS = {"fifo", "avg"}
 VALID_SIDES = {"buy", "sell"}
 VALID_CASH_DIRECTIONS = {"in", "out"}
 VALID_CORPORATE_ACTIONS = {"cash_dividend", "split_adjustment"}
+PORTFOLIO_FX_REFRESH_DISABLED_REASON = "portfolio_fx_update_disabled"
 
 
 class PortfolioConflictError(Exception):
@@ -570,6 +571,8 @@ class PortfolioService:
     ) -> Dict[str, Any]:
         """Refresh account FX pairs online with stale fallback when fetch fails."""
         as_of_date = as_of or date.today()
+        config = get_config()
+        refresh_enabled = bool(getattr(config, "portfolio_fx_update_enabled", True))
         if account_id is not None:
             account_rows = [self._require_active_account(account_id)]
         else:
@@ -578,13 +581,19 @@ class PortfolioService:
         summary = {
             "as_of": as_of_date.isoformat(),
             "account_count": len(account_rows),
+            "refresh_enabled": refresh_enabled,
+            "disabled_reason": None if refresh_enabled else PORTFOLIO_FX_REFRESH_DISABLED_REASON,
             "pair_count": 0,
             "updated_count": 0,
             "stale_count": 0,
             "error_count": 0,
         }
         for account in account_rows:
-            item = self._refresh_account_fx_rates(account=account, as_of_date=as_of_date)
+            item = self._refresh_account_fx_rates(
+                account=account,
+                as_of_date=as_of_date,
+                refresh_enabled=refresh_enabled,
+            )
             summary["pair_count"] += item["pair_count"]
             summary["updated_count"] += item["updated_count"]
             summary["stale_count"] += item["stale_count"]
@@ -1136,24 +1145,64 @@ class PortfolioService:
             as_of_date=as_of_date,
         )
 
-    def _refresh_account_fx_rates(self, *, account: Any, as_of_date: date) -> Dict[str, int]:
-        """Refresh FX pairs for one account and keep stale fallback on failures."""
-        config = get_config()
-        if not getattr(config, "portfolio_fx_update_enabled", True):
-            return {"pair_count": 0, "updated_count": 0, "stale_count": 0, "error_count": 0}
-
+    def _list_account_refresh_fx_currencies(
+        self,
+        *,
+        account: Any,
+        as_of_date: date,
+        strict: bool = True,
+    ) -> List[str]:
+        """Return distinct non-base currencies participating in refresh for one account."""
         base_currency = self._normalize_currency(account.base_currency)
         currencies: Set[str] = set()
-        for row in self.repo.list_trades(account.id, as_of=as_of_date):
-            currencies.add(self._normalize_currency(row.currency))
-        for row in self.repo.list_cash_ledger(account.id, as_of=as_of_date):
-            currencies.add(self._normalize_currency(row.currency))
-
-        summary = {"pair_count": 0, "updated_count": 0, "stale_count": 0, "error_count": 0}
-        for from_currency in sorted(currencies):
-            if from_currency == base_currency:
+        rows = list(self.repo.list_trades(account.id, as_of=as_of_date))
+        rows.extend(self.repo.list_cash_ledger(account.id, as_of=as_of_date))
+        for row in rows:
+            try:
+                currency = self._normalize_currency(row.currency)
+            except ValueError:
+                if strict:
+                    raise
+                logger.warning(
+                    "Skip invalid FX refresh currency for account %s on %s: %r",
+                    account.id,
+                    as_of_date.isoformat(),
+                    getattr(row, "currency", None),
+                )
                 continue
-            summary["pair_count"] += 1
+            if currency != base_currency:
+                currencies.add(currency)
+        return sorted(currencies)
+
+    def _refresh_account_fx_rates(
+        self,
+        *,
+        account: Any,
+        as_of_date: date,
+        refresh_enabled: bool,
+    ) -> Dict[str, int]:
+        """Refresh FX pairs for one account and keep stale fallback on failures."""
+        refresh_currencies = self._list_account_refresh_fx_currencies(
+            account=account,
+            as_of_date=as_of_date,
+            strict=refresh_enabled,
+        )
+        if not refresh_enabled:
+            return {
+                "pair_count": len(refresh_currencies),
+                "updated_count": 0,
+                "stale_count": 0,
+                "error_count": 0,
+            }
+
+        base_currency = self._normalize_currency(account.base_currency)
+        summary = {
+            "pair_count": len(refresh_currencies),
+            "updated_count": 0,
+            "stale_count": 0,
+            "error_count": 0,
+        }
+        for from_currency in refresh_currencies:
             try:
                 rate = self._fetch_fx_rate_from_yfinance(
                     from_currency=from_currency,

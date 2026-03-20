@@ -59,4 +59,35 @@ describe('HistoryList', () => {
     fireEvent.click(screen.getAllByRole('checkbox')[1]);
     expect(onToggleItemSelection).toHaveBeenCalledWith(1);
   });
+
+  it('toggles select-all when clicking the label text', () => {
+    const onToggleSelectAll = vi.fn();
+
+    render(
+      <HistoryList
+        {...baseProps}
+        items={items}
+        onToggleSelectAll={onToggleSelectAll}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('全选当前'));
+
+    expect(onToggleSelectAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('generates unique select-all ids across multiple instances', () => {
+    const { container } = render(
+      <>
+        <HistoryList {...baseProps} items={items} />
+        <HistoryList {...baseProps} items={items} />
+      </>,
+    );
+
+    const labels = container.querySelectorAll('label[for]');
+    const ids = Array.from(labels).map((label) => label.getAttribute('for'));
+
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
 });

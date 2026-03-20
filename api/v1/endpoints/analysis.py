@@ -48,6 +48,7 @@ from api.v1.schemas.history import (
 )
 from data_provider.base import canonical_stock_code
 from src.config import Config
+from src.report_language import get_localized_stock_name, normalize_report_language
 from src.services.task_queue import (
     get_task_queue,
     DuplicateTaskError,
@@ -506,14 +507,19 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             model_used = normalize_model_used(
                 (raw_result or {}).get("model_used") if isinstance(raw_result, dict) else None
             )
+            report_language = normalize_report_language(
+                (raw_result or {}).get("report_language") if isinstance(raw_result, dict) else None
+            )
+            stock_name = get_localized_stock_name(record.name, record.code, report_language)
             # Build report from DB record so completed tasks return real data
             report_dict = AnalysisReport(
                 meta=ReportMeta(
                     id=record.id,
                     query_id=task_id,
                     stock_code=record.code,
-                    stock_name=record.name,
+                    stock_name=stock_name,
                     report_type=getattr(record, 'report_type', None),
+                    report_language=report_language,
                     created_at=record.created_at.isoformat() if record.created_at else None,
                     model_used=model_used,
                 ),
@@ -537,7 +543,7 @@ def get_analysis_status(task_id: str) -> TaskStatus:
                 result=AnalysisResultResponse(
                     query_id=task_id,
                     stock_code=record.code,
-                    stock_name=record.name,
+                    stock_name=stock_name,
                     report=report_dict,
                     created_at=record.created_at.isoformat() if record.created_at else datetime.now().isoformat()
                 ),
@@ -625,12 +631,23 @@ def _build_analysis_report(
     summary_data = report_data.get("summary", {})
     strategy_data = report_data.get("strategy", {})
     details_data = report_data.get("details", {})
+    report_language = normalize_report_language(
+        meta_data.get("report_language")
+        or (context_snapshot or {}).get("report_language")
+        or getattr(Config.get_instance(), "report_language", "zh")
+    )
+    localized_stock_name = get_localized_stock_name(
+        meta_data.get("stock_name", stock_name),
+        meta_data.get("stock_code", stock_code),
+        report_language,
+    )
 
     meta = ReportMeta(
         query_id=meta_data.get("query_id", query_id),
         stock_code=meta_data.get("stock_code", stock_code),
-        stock_name=meta_data.get("stock_name", stock_name),
+        stock_name=localized_stock_name,
         report_type=meta_data.get("report_type", "detailed"),
+        report_language=report_language,
         created_at=meta_data.get("created_at", datetime.now().isoformat()),
         current_price=meta_data.get("current_price"),
         change_pct=meta_data.get("change_pct"),

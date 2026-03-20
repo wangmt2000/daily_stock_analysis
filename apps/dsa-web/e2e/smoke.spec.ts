@@ -52,7 +52,7 @@ test.describe('web smoke', () => {
   test('home page shows analysis entry and history panel after login', async ({ page }) => {
     await login(page);
 
-    const stockInput = page.getByPlaceholder('输入股票代码，如 600519、00700、AAPL');
+    const stockInput = page.getByPlaceholder('输入股票代码，如 600519、HK00700、AAPL');
     await expect(stockInput).toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole('link', { name: '首页' })).toBeVisible();
     await expect(page.getByRole('link', { name: '问股' })).toBeVisible();
@@ -108,8 +108,8 @@ test.describe('web smoke', () => {
     await page.waitForLoadState('domcontentloaded');
     await page.waitForTimeout(1000);
 
-    // Use text content instead of role for heading
-    await expect(page.getByText('系统设置')).toBeVisible({ timeout: 10_000 });
+    // Use heading role for more precise selection
+    await expect(page.getByRole('heading', { name: '系统设置' })).toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole('button', { name: '重置' })).toBeVisible();
     await expect(page.getByRole('button', { name: /保存配置/ })).toBeVisible();
   });

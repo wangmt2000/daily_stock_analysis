@@ -12,8 +12,8 @@ A股自选股智能分析系统 - 搜索服务模块
 """
 
 import logging
-import random
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -1150,11 +1150,41 @@ class SearXNGSearchProvider(BaseSearchProvider):
     """
     SearXNG search engine (self-hosted, no quota).
 
-    Uses base_urls as "keys" for load balancing. Requires format: json in settings.yml.
+    Self-hosted instances are used when explicitly configured.
+    Otherwise, the provider can lazily discover public instances from
+    searx.space and rotate across them with per-request failover.
     """
 
-    def __init__(self, base_urls: List[str]):
-        super().__init__(base_urls, "SearXNG")
+    PUBLIC_INSTANCES_URL = "https://searx.space/data/instances.json"
+    PUBLIC_INSTANCES_CACHE_TTL_SECONDS = 3600
+    PUBLIC_INSTANCES_STALE_REFRESH_BACKOFF_SECONDS = 60
+    PUBLIC_INSTANCES_POOL_LIMIT = 20
+    PUBLIC_INSTANCES_MAX_ATTEMPTS = 3
+    PUBLIC_INSTANCES_TIMEOUT_SECONDS = 5
+    SELF_HOSTED_TIMEOUT_SECONDS = 10
+
+    _public_instances_cache: Optional[Tuple[float, List[str]]] = None
+    _public_instances_stale_retry_after: float = 0.0
+    _public_instances_lock = threading.Lock()
+
+    def __init__(self, base_urls: Optional[List[str]] = None, *, use_public_instances: bool = False):
+        normalized_base_urls = [url.rstrip("/") for url in (base_urls or []) if url.strip()]
+        super().__init__(normalized_base_urls, "SearXNG")
+        self._base_urls = normalized_base_urls
+        self._use_public_instances = bool(use_public_instances and not self._base_urls)
+        self._cursor = 0
+        self._cursor_lock = threading.Lock()
+
+    @property
+    def is_available(self) -> bool:
+        return bool(self._base_urls) or self._use_public_instances
+
+    @classmethod
+    def reset_public_instance_cache(cls) -> None:
+        """Reset the shared searx.space cache (used by tests)."""
+        with cls._public_instances_lock:
+            cls._public_instances_cache = None
+            cls._public_instances_stale_retry_after = 0.0
 
     @staticmethod
     def _parse_http_error(response) -> str:
@@ -1177,22 +1207,148 @@ class SearXNGSearchProvider(BaseSearchProvider):
             body = raw_text if isinstance(raw_text, str) else ""
             return f"HTTP {response.status_code}: {body[:200]}"
 
+    @staticmethod
+    def _time_range(days: int) -> str:
+        if days <= 1:
+            return "day"
+        if days <= 7:
+            return "week"
+        if days <= 30:
+            return "month"
+        return "year"
+
+    @classmethod
+    def _search_latency_seconds(cls, instance_data: Dict[str, Any]) -> float:
+        timing = (instance_data.get("timing") or {}).get("search") or {}
+        all_timing = timing.get("all")
+        if isinstance(all_timing, dict):
+            for key in ("mean", "median"):
+                value = all_timing.get(key)
+                if isinstance(value, (int, float)):
+                    return float(value)
+        return float("inf")
+
+    @classmethod
+    def _extract_public_instances(cls, payload: Any) -> List[str]:
+        if not isinstance(payload, dict):
+            return []
+
+        instances = payload.get("instances")
+        if not isinstance(instances, dict):
+            return []
+
+        ranked: List[Tuple[float, float, str]] = []
+        for raw_url, item in instances.items():
+            if not isinstance(raw_url, str) or not isinstance(item, dict):
+                continue
+            if item.get("network_type") != "normal":
+                continue
+            http_status = (item.get("http") or {}).get("status_code")
+            if http_status != 200:
+                continue
+            timing = (item.get("timing") or {}).get("search") or {}
+            uptime = timing.get("success_percentage")
+            if not isinstance(uptime, (int, float)) or float(uptime) <= 0:
+                continue
+
+            ranked.append(
+                (
+                    float(uptime),
+                    cls._search_latency_seconds(item),
+                    raw_url.rstrip("/"),
+                )
+            )
+
+        ranked.sort(key=lambda row: (-row[0], row[1], row[2]))
+        return [url for _, _, url in ranked[: cls.PUBLIC_INSTANCES_POOL_LIMIT]]
+
+    @classmethod
+    def _get_public_instances(cls) -> List[str]:
+        now = time.time()
+        with cls._public_instances_lock:
+            stale_urls: List[str] = []
+            if cls._public_instances_cache is None and cls._public_instances_stale_retry_after > now:
+                logger.debug(
+                    "[SearXNG] 公共实例冷启动刷新退避中，剩余 %.0fs",
+                    cls._public_instances_stale_retry_after - now,
+                )
+                return []
+            if cls._public_instances_cache is not None:
+                cached_at, cached_urls = cls._public_instances_cache
+                if now - cached_at < cls.PUBLIC_INSTANCES_CACHE_TTL_SECONDS:
+                    return list(cached_urls)
+                stale_urls = list(cached_urls)
+                if cls._public_instances_stale_retry_after > now:
+                    logger.debug(
+                        "[SearXNG] 公共实例刷新退避中，继续使用过期缓存，剩余 %.0fs",
+                        cls._public_instances_stale_retry_after - now,
+                    )
+                    return stale_urls
+
+            try:
+                response = requests.get(
+                    cls.PUBLIC_INSTANCES_URL,
+                    timeout=cls.PUBLIC_INSTANCES_TIMEOUT_SECONDS,
+                )
+                if response.status_code != 200:
+                    logger.warning(
+                        "[SearXNG] 拉取公共实例列表失败: HTTP %s",
+                        response.status_code,
+                    )
+                else:
+                    urls = cls._extract_public_instances(response.json())
+                    if urls:
+                        cls._public_instances_cache = (now, list(urls))
+                        cls._public_instances_stale_retry_after = 0.0
+                        logger.info("[SearXNG] 已刷新公共实例池，共 %s 个候选实例", len(urls))
+                        return list(urls)
+                    logger.warning("[SearXNG] searx.space 未返回可用公共实例，保留已有缓存")
+            except Exception as exc:
+                logger.warning("[SearXNG] 拉取公共实例列表失败: %s", exc)
+
+            if stale_urls:
+                cls._public_instances_stale_retry_after = (
+                    now + cls.PUBLIC_INSTANCES_STALE_REFRESH_BACKOFF_SECONDS
+                )
+                logger.warning(
+                    "[SearXNG] 公共实例刷新失败，继续使用过期缓存，共 %s 个候选实例；"
+                    "%.0fs 内不再刷新",
+                    len(stale_urls),
+                    cls.PUBLIC_INSTANCES_STALE_REFRESH_BACKOFF_SECONDS,
+                )
+                return stale_urls
+            cls._public_instances_stale_retry_after = (
+                now + cls.PUBLIC_INSTANCES_STALE_REFRESH_BACKOFF_SECONDS
+            )
+            logger.warning(
+                "[SearXNG] 公共实例冷启动刷新失败，%.0fs 内不再刷新",
+                cls.PUBLIC_INSTANCES_STALE_REFRESH_BACKOFF_SECONDS,
+            )
+            return []
+
+    def _rotate_candidates(self, pool: List[str], *, max_attempts: int) -> List[str]:
+        if not pool or max_attempts <= 0:
+            return []
+        with self._cursor_lock:
+            start = self._cursor % len(pool)
+            self._cursor = (self._cursor + 1) % len(pool)
+        ordered = pool[start:] + pool[:start]
+        return ordered[:max_attempts]
+
     def _do_search(  # type: ignore[override]
-        self, query: str, base_url: str, max_results: int, days: int = 7
+        self,
+        query: str,
+        base_url: str,
+        max_results: int,
+        days: int = 7,
+        *,
+        timeout: int,
+        retry_enabled: bool,
     ) -> SearchResponse:
-        """Execute SearXNG search."""
+        """Execute one SearXNG search against a specific instance."""
         try:
             base = base_url.rstrip("/")
             search_url = base if base.endswith("/search") else base + "/search"
-
-            if days <= 1:
-                time_range = "day"
-            elif days <= 7:
-                time_range = "week"
-            elif days <= 30:
-                time_range = "month"
-            else:
-                time_range = "year"
 
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1201,11 +1357,12 @@ class SearXNGSearchProvider(BaseSearchProvider):
             params = {
                 "q": query,
                 "format": "json",
-                "time_range": time_range,
+                "time_range": self._time_range(days),
                 "pageno": 1,
             }
 
-            response = _get_with_retry(search_url, headers=headers, params=params, timeout=10)
+            request_get = _get_with_retry if retry_enabled else requests.get
+            response = request_get(search_url, headers=headers, params=params, timeout=timeout)
 
             if response.status_code != 200:
                 error_msg = self._parse_http_error(response)
@@ -1315,6 +1472,77 @@ class SearXNGSearchProvider(BaseSearchProvider):
         except Exception:
             return "未知来源"
 
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """Execute SearXNG search with instance rotation and per-request failover."""
+        start_time = time.time()
+        if self._base_urls:
+            candidates = self._rotate_candidates(
+                self._base_urls,
+                max_attempts=len(self._base_urls),
+            )
+            retry_enabled = True
+            timeout = self.SELF_HOSTED_TIMEOUT_SECONDS
+            empty_error = "SearXNG 未配置可用实例"
+        elif self._use_public_instances:
+            public_instances = self._get_public_instances()
+            candidates = self._rotate_candidates(
+                public_instances,
+                max_attempts=min(len(public_instances), self.PUBLIC_INSTANCES_MAX_ATTEMPTS),
+            )
+            retry_enabled = False
+            timeout = self.PUBLIC_INSTANCES_TIMEOUT_SECONDS
+            empty_error = "未获取到可用的公共 SearXNG 实例"
+        else:
+            candidates = []
+            retry_enabled = False
+            timeout = self.PUBLIC_INSTANCES_TIMEOUT_SECONDS
+            empty_error = "SearXNG 未配置可用实例"
+
+        if not candidates:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=empty_error,
+                search_time=time.time() - start_time,
+            )
+
+        errors: List[str] = []
+        for base_url in candidates:
+            response = self._do_search(
+                query,
+                base_url,
+                max_results,
+                days=days,
+                timeout=timeout,
+                retry_enabled=retry_enabled,
+            )
+            response.search_time = time.time() - start_time
+            if response.success:
+                logger.info(
+                    "[%s] 搜索 '%s' 成功，实例=%s，返回 %s 条结果，耗时 %.2fs",
+                    self.name,
+                    query,
+                    base_url,
+                    len(response.results),
+                    response.search_time,
+                )
+                return response
+
+            errors.append(f"{base_url}: {response.error_message or '未知错误'}")
+            logger.warning("[%s] 实例 %s 搜索失败: %s", self.name, base_url, response.error_message)
+
+        elapsed = time.time() - start_time
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider=self.name,
+            success=False,
+            error_message="；".join(errors[:3]) if errors else empty_error,
+            search_time=elapsed,
+        )
+
 
 class SearchService:
     """
@@ -1357,6 +1585,7 @@ class SearchService:
         serpapi_keys: Optional[List[str]] = None,
         minimax_keys: Optional[List[str]] = None,
         searxng_base_urls: Optional[List[str]] = None,
+        searxng_public_instances_enabled: bool = True,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
     ):
@@ -1370,6 +1599,7 @@ class SearchService:
             serpapi_keys: SerpAPI Key 列表
             minimax_keys: MiniMax API Key 列表
             searxng_base_urls: SearXNG 实例地址列表（自建无配额兜底）
+            searxng_public_instances_enabled: 未配置自建实例时，是否自动使用公共 SearXNG 实例
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
         """
@@ -1417,13 +1647,20 @@ class SearchService:
             self._providers.append(MiniMaxSearchProvider(minimax_keys))
             logger.info(f"已配置 MiniMax 搜索，共 {len(minimax_keys)} 个 API Key")
 
-        # 6. SearXNG（自建实例，无配额兜底，最后兜底）
-        if searxng_base_urls:
-            self._providers.append(SearXNGSearchProvider(searxng_base_urls))
-            logger.info(f"已配置 SearXNG 搜索，共 {len(searxng_base_urls)} 个实例")
-        
+        # 6. SearXNG（自建实例优先；未配置时可自动发现公共实例）
+        searxng_provider = SearXNGSearchProvider(
+            searxng_base_urls,
+            use_public_instances=bool(searxng_public_instances_enabled and not searxng_base_urls),
+        )
+        if searxng_provider.is_available:
+            self._providers.append(searxng_provider)
+            if searxng_base_urls:
+                logger.info("已配置 SearXNG 搜索，共 %s 个自建实例", len(searxng_base_urls))
+            else:
+                logger.info("已启用 SearXNG 公共实例自动发现模式")
+
         if not self._providers:
-            logger.warning("未配置任何搜索引擎 API Key，新闻搜索功能将不可用")
+            logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
 
         # In-memory search result cache: {cache_key: (timestamp, SearchResponse)}
         self._cache: Dict[str, Tuple[float, 'SearchResponse']] = {}
@@ -2132,7 +2369,7 @@ class SearchService:
                 results=[],
                 provider="None",
                 success=False,
-                error_message="未配置搜索引擎 API Key"
+                error_message="未配置搜索能力"
             )
         
         logger.info(f"[增强搜索] 数据源失败，启动增强搜索: {stock_name}({stock_code})")
@@ -2294,6 +2531,7 @@ def get_search_service() -> SearchService:
             serpapi_keys=config.serpapi_keys,
             minimax_keys=config.minimax_api_keys,
             searxng_base_urls=config.searxng_base_urls,
+            searxng_public_instances_enabled=config.searxng_public_instances_enabled,
             news_max_age_days=config.news_max_age_days,
             news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
         )
@@ -2326,4 +2564,4 @@ if __name__ == "__main__":
         print(f"耗时: {response.search_time:.2f}s")
         print("\n" + response.to_context())
     else:
-        print("未配置搜索引擎 API Key，跳过测试")
+        print("未配置搜索能力，跳过测试")

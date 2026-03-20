@@ -157,6 +157,7 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
         llm_adapter=llm_adapter,
         skill_instructions=skill_manager.get_skill_instructions(),
         max_steps=getattr(config, "agent_max_steps", 10),
+        timeout_seconds=getattr(config, "agent_orchestrator_timeout_s", 0),
     )
 
 

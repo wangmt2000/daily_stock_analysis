@@ -87,6 +87,7 @@ class BaseAgent(ABC):
         self,
         ctx: AgentContext,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> StageResult:
         """Execute this agent and return a :class:`StageResult`.
 
@@ -112,6 +113,7 @@ class BaseAgent(ABC):
                 llm_adapter=self.llm_adapter,
                 max_steps=self.max_steps,
                 progress_callback=progress_callback,
+                max_wall_clock_seconds=timeout_seconds,
             )
 
             result.tokens_used = loop_result.total_tokens

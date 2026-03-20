@@ -243,6 +243,8 @@ class PortfolioImportBrokerListResponse(BaseModel):
 class PortfolioFxRefreshResponse(BaseModel):
     as_of: str
     account_count: int
+    refresh_enabled: bool
+    disabled_reason: Optional[str] = None
     pair_count: int
     updated_count: int
     stale_count: int

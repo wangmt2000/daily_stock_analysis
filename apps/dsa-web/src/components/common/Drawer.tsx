@@ -76,7 +76,7 @@ export const Drawer: React.FC<DrawerProps> = ({
           className={cn(
             'relative flex w-full flex-col bg-card',
             borderClass,
-            side === 'right' ? 'border-white/50' : 'border-border/70 shadow-2xl',
+            side === 'right' ? 'border-border/80' : 'border-border/70 shadow-2xl',
             side === 'left' ? 'animate-slide-in-left' : 'animate-slide-in-right'
           )}
         >

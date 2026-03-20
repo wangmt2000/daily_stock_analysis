@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pie, PieChart, ResponsiveContainer, Tooltip, Legend, Cell } from 'recharts';
 import { portfolioApi } from '../api/portfolio';
 import type { ParsedApiError } from '../api/error';
@@ -13,6 +13,7 @@ import type {
   PortfolioCorporateActionListItem,
   PortfolioCorporateActionType,
   PortfolioCostMethod,
+  PortfolioFxRefreshResponse,
   PortfolioImportBrokerItem,
   PortfolioImportCommitResponse,
   PortfolioImportParseResponse,
@@ -43,6 +44,16 @@ type PendingDelete =
   | { eventType: 'trade'; id: number; message: string }
   | { eventType: 'cash'; id: number; message: string }
   | { eventType: 'corporate'; id: number; message: string };
+
+type FxRefreshFeedback = {
+  tone: 'neutral' | 'success' | 'warning';
+  text: string;
+};
+
+type FxRefreshContext = {
+  viewKey: string;
+  requestId: number;
+};
 
 function getTodayIso(): string {
   return toDateInputValue(new Date());
@@ -81,6 +92,42 @@ function formatBrokerLabel(value: string, displayName?: string): string {
   return value;
 }
 
+function buildFxRefreshFeedback(data: PortfolioFxRefreshResponse): FxRefreshFeedback {
+  if (data.refreshEnabled === false) {
+    return {
+      tone: 'neutral',
+      text: '汇率在线刷新已被禁用。',
+    };
+  }
+
+  if (data.pairCount === 0) {
+    return {
+      tone: 'neutral',
+      text: '当前范围无可刷新的汇率对。',
+    };
+  }
+
+  if (data.updatedCount > 0 && data.staleCount === 0 && data.errorCount === 0) {
+    return {
+      tone: 'success',
+      text: `汇率已刷新，共更新 ${data.updatedCount} 对。`,
+    };
+  }
+
+  const summary = `更新 ${data.updatedCount} 对，仍过期 ${data.staleCount} 对，失败 ${data.errorCount} 对。`;
+  if (data.staleCount > 0) {
+    return {
+      tone: 'warning',
+      text: `已尝试刷新，但仍有部分货币对使用 stale/fallback 汇率。${summary}`,
+    };
+  }
+
+  return {
+    tone: 'warning',
+    text: `在线刷新未完全成功。${summary}`,
+  };
+}
+
 const PortfolioPage: React.FC = () => {
   // Set page title
   useEffect(() => {
@@ -103,6 +150,8 @@ const PortfolioPage: React.FC = () => {
   const [snapshot, setSnapshot] = useState<PortfolioSnapshotResponse | null>(null);
   const [risk, setRisk] = useState<PortfolioRiskResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [fxRefreshing, setFxRefreshing] = useState(false);
+  const [fxRefreshFeedback, setFxRefreshFeedback] = useState<FxRefreshFeedback | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
   const [riskWarning, setRiskWarning] = useState<string | null>(null);
   const [writeWarning, setWriteWarning] = useState<string | null>(null);
@@ -161,6 +210,8 @@ const PortfolioPage: React.FC = () => {
   });
 
   const queryAccountId = selectedAccount === 'all' ? undefined : selectedAccount;
+  const refreshViewKey = `${selectedAccount === 'all' ? 'all' : `account:${selectedAccount}`}:cost:${costMethod}`;
+  const refreshContextRef = useRef<FxRefreshContext>({ viewKey: refreshViewKey, requestId: 0 });
   const hasAccounts = accounts.length > 0;
   const writableAccount = selectedAccount === 'all' ? undefined : accounts.find((item) => item.id === selectedAccount);
   const writableAccountId = writableAccount?.id;
@@ -171,6 +222,13 @@ const PortfolioPage: React.FC = () => {
     : eventType === 'cash'
       ? cashEvents.length
       : corporateEvents.length;
+
+  const isActiveRefreshContext = (requestedViewKey: string, requestedRequestId: number) => {
+    return (
+      refreshContextRef.current.viewKey === requestedViewKey
+      && refreshContextRef.current.requestId === requestedRequestId
+    );
+  };
 
   const loadAccounts = useCallback(async () => {
     try {
@@ -320,6 +378,15 @@ const PortfolioPage: React.FC = () => {
   useEffect(() => {
     void loadEvents();
   }, [loadEvents]);
+
+  useEffect(() => {
+    refreshContextRef.current = {
+      viewKey: refreshViewKey,
+      requestId: refreshContextRef.current.requestId + 1,
+    };
+    setFxRefreshing(false);
+    setFxRefreshFeedback(null);
+  }, [refreshViewKey]);
 
   useEffect(() => {
     setEventPage(1);
@@ -564,11 +631,109 @@ const PortfolioPage: React.FC = () => {
     await Promise.all([loadAccounts(), loadSnapshotAndRisk(), loadEvents(), loadBrokers()]);
   };
 
+  const reloadSnapshotAndRiskForScope = useCallback(async (
+    requestedViewKey: string,
+    requestedRequestId: number,
+    requestedAccountId: number | undefined,
+    requestedCostMethod: PortfolioCostMethod,
+  ): Promise<boolean> => {
+    if (!isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+      return false;
+    }
+
+    setRiskWarning(null);
+
+    try {
+      const snapshotData = await portfolioApi.getSnapshot({
+        accountId: requestedAccountId,
+        costMethod: requestedCostMethod,
+      });
+      if (!isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+        return false;
+      }
+      setSnapshot(snapshotData);
+      setError(null);
+
+      try {
+        const riskData = await portfolioApi.getRisk({
+          accountId: requestedAccountId,
+          costMethod: requestedCostMethod,
+        });
+        if (!isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+          return false;
+        }
+        setRisk(riskData);
+        setRiskWarning(null);
+      } catch (riskErr) {
+        if (!isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+          return false;
+        }
+        setRisk(null);
+        const parsed = getParsedApiError(riskErr);
+        setRiskWarning(parsed.message || '风险数据获取失败，已降级为仅展示快照数据。');
+      }
+      return true;
+    } catch (err) {
+      if (!isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+        return false;
+      }
+      setSnapshot(null);
+      setRisk(null);
+      setError(getParsedApiError(err));
+      return false;
+    }
+  }, []);
+
+  const handleRefreshFx = async () => {
+    if (!hasAccounts || isLoading || fxRefreshing) {
+      return;
+    }
+
+    const requestedViewKey = refreshViewKey;
+    const requestedAccountId = queryAccountId;
+    const requestedCostMethod = costMethod;
+    const requestedRequestId = refreshContextRef.current.requestId + 1;
+    refreshContextRef.current = {
+      viewKey: requestedViewKey,
+      requestId: requestedRequestId,
+    };
+
+    try {
+      setFxRefreshing(true);
+      setFxRefreshFeedback(null);
+      const result = await portfolioApi.refreshFx({
+        accountId: requestedAccountId,
+      });
+      if (!isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+        return;
+      }
+      const reloaded = await reloadSnapshotAndRiskForScope(
+        requestedViewKey,
+        requestedRequestId,
+        requestedAccountId,
+        requestedCostMethod,
+      );
+      if (!reloaded || !isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+        return;
+      }
+      setFxRefreshFeedback(buildFxRefreshFeedback(result));
+    } catch (err) {
+      if (!isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+        return;
+      }
+      setError(getParsedApiError(err));
+    } finally {
+      if (isActiveRefreshContext(requestedViewKey, requestedRequestId)) {
+        setFxRefreshing(false);
+      }
+    }
+  };
+
   return (
     <div className="min-h-screen p-4 md:p-6 space-y-4">
       <section className="space-y-3">
         <div className="space-y-2">
-          <h1 className="text-xl md:text-2xl font-semibold text-white">持仓管理</h1>
+          <h1 className="text-xl md:text-2xl font-semibold text-foreground">持仓管理</h1>
           <p className="text-xs md:text-sm text-secondary">
             组合快照、手工录入、CSV 导入与风险分析（支持全组合 / 单账户切换）
           </p>
@@ -614,7 +779,12 @@ const PortfolioPage: React.FC = () => {
                 >
                   {showCreateAccount ? '收起新建' : '新建账户'}
                 </button>
-                <button type="button" onClick={() => void handleRefresh()} disabled={isLoading} className="btn-secondary text-sm flex-1">
+                <button
+                  type="button"
+                  onClick={() => void handleRefresh()}
+                  disabled={isLoading || fxRefreshing}
+                  className="btn-secondary text-sm flex-1"
+                >
                   {isLoading ? '刷新中...' : '刷新数据'}
                 </button>
               </div>
@@ -642,7 +812,7 @@ const PortfolioPage: React.FC = () => {
       {(showCreateAccount || !hasAccounts) ? (
         <Card padding="md">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-white">新建账户</h2>
+            <h2 className="text-sm font-semibold text-foreground">新建账户</h2>
             {hasAccounts ? (
               <button
                 type="button"
@@ -707,26 +877,49 @@ const PortfolioPage: React.FC = () => {
       <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总权益</p>
-          <p className="mt-1 text-xl font-semibold text-white">{formatMoney(snapshot?.totalEquity, snapshot?.currency || 'CNY')}</p>
+          <p className="mt-1 text-xl font-semibold text-foreground">{formatMoney(snapshot?.totalEquity, snapshot?.currency || 'CNY')}</p>
         </Card>
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总市值</p>
-          <p className="mt-1 text-xl font-semibold text-white">{formatMoney(snapshot?.totalMarketValue, snapshot?.currency || 'CNY')}</p>
+          <p className="mt-1 text-xl font-semibold text-foreground">{formatMoney(snapshot?.totalMarketValue, snapshot?.currency || 'CNY')}</p>
         </Card>
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总现金</p>
-          <p className="mt-1 text-xl font-semibold text-white">{formatMoney(snapshot?.totalCash, snapshot?.currency || 'CNY')}</p>
+          <p className="mt-1 text-xl font-semibold text-foreground">{formatMoney(snapshot?.totalCash, snapshot?.currency || 'CNY')}</p>
         </Card>
         <Card variant="gradient" padding="md">
-          <p className="text-xs text-secondary">汇率状态</p>
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-xs text-secondary">汇率状态</p>
+            <button
+              type="button"
+              className="btn-secondary !px-3 !py-1 !text-xs shrink-0"
+              onClick={() => void handleRefreshFx()}
+              disabled={!hasAccounts || isLoading || fxRefreshing}
+            >
+              {fxRefreshing ? '刷新中...' : '刷新汇率'}
+            </button>
+          </div>
           <div className="mt-2">{snapshot?.fxStale ? <Badge variant="warning">过期</Badge> : <Badge variant="success">最新</Badge>}</div>
+          {fxRefreshFeedback ? (
+            <p
+              className={`mt-2 text-xs ${
+                fxRefreshFeedback.tone === 'success'
+                  ? 'text-emerald-200'
+                  : fxRefreshFeedback.tone === 'warning'
+                    ? 'text-amber-100'
+                    : 'text-secondary'
+              }`}
+            >
+              {fxRefreshFeedback.text}
+            </p>
+          ) : null}
         </Card>
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-3 gap-3">
         <Card className="xl:col-span-2" padding="md">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-white">持仓明细</h2>
+            <h2 className="text-sm font-semibold text-foreground">持仓明细</h2>
             <span className="text-xs text-secondary">共 {positionRows.length} 项</span>
           </div>
           {positionRows.length === 0 ? (
@@ -749,7 +942,7 @@ const PortfolioPage: React.FC = () => {
                   {positionRows.map((row) => (
                     <tr key={`${row.accountId}-${row.symbol}-${row.market}`} className="border-b border-white/5">
                       <td className="py-2 pr-2 text-secondary">{row.accountName}</td>
-                      <td className="py-2 pr-2 font-mono text-white">{row.symbol}</td>
+                      <td className="py-2 pr-2 font-mono text-foreground">{row.symbol}</td>
                       <td className="py-2 pr-2 text-right">{row.quantity.toFixed(2)}</td>
                       <td className="py-2 pr-2 text-right">{row.avgCost.toFixed(4)}</td>
                       <td className="py-2 pr-2 text-right">{row.lastPrice.toFixed(4)}</td>
@@ -766,7 +959,7 @@ const PortfolioPage: React.FC = () => {
         </Card>
 
         <Card padding="md">
-          <h2 className="text-sm font-semibold text-white mb-3">{concentrationMode === 'sector' ? '行业集中度分布' : '行业数据暂不可用，当前展示个股集中度'}</h2>
+          <h2 className="text-sm font-semibold text-foreground mb-3">{concentrationMode === 'sector' ? '行业集中度分布' : '行业数据暂不可用，当前展示个股集中度'}</h2>
           {concentrationPieData.length > 0 ? (
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
@@ -800,7 +993,7 @@ const PortfolioPage: React.FC = () => {
 
       <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-2">回撤监控</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-2">回撤监控</h3>
           <div className="text-xs text-secondary space-y-1">
             <div>最大回撤: {formatPct(risk?.drawdown?.maxDrawdownPct)}</div>
             <div>当前回撤: {formatPct(risk?.drawdown?.currentDrawdownPct)}</div>
@@ -808,7 +1001,7 @@ const PortfolioPage: React.FC = () => {
           </div>
         </Card>
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-2">止损接近预警</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-2">止损接近预警</h3>
           <div className="text-xs text-secondary space-y-1">
             <div>触发数: {risk?.stopLoss?.triggeredCount ?? 0}</div>
             <div>接近数: {risk?.stopLoss?.nearCount ?? 0}</div>
@@ -816,7 +1009,7 @@ const PortfolioPage: React.FC = () => {
           </div>
         </Card>
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-2">口径</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-2">口径</h3>
           <div className="text-xs text-secondary space-y-1">
             <div>账户数: {snapshot?.accountCount ?? 0}</div>
             <div>计价币种: {snapshot?.currency || 'CNY'}</div>
@@ -827,7 +1020,7 @@ const PortfolioPage: React.FC = () => {
 
       <section className="grid grid-cols-1 xl:grid-cols-3 gap-3">
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-3">手工录入：交易</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-3">手工录入：交易</h3>
           <form className="space-y-2" onSubmit={handleTradeSubmit}>
             <input className="input-terminal w-full text-sm" placeholder="股票代码（例如 600519）" value={tradeForm.symbol}
               onChange={(e) => setTradeForm((prev) => ({ ...prev, symbol: e.target.value }))} required />
@@ -858,7 +1051,7 @@ const PortfolioPage: React.FC = () => {
         </Card>
 
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-3">手工录入：资金流水</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-3">手工录入：资金流水</h3>
           <form className="space-y-2" onSubmit={handleCashSubmit}>
             <div className="grid grid-cols-2 gap-2">
               <input className="input-terminal text-sm" type="date" value={cashForm.eventDate}
@@ -878,7 +1071,7 @@ const PortfolioPage: React.FC = () => {
         </Card>
 
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-3">手工录入：公司行为</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-3">手工录入：公司行为</h3>
           <form className="space-y-2" onSubmit={handleCorporateSubmit}>
             <input className="input-terminal w-full text-sm" placeholder="股票代码" value={corpForm.symbol}
               onChange={(e) => setCorpForm((prev) => ({ ...prev, symbol: e.target.value }))} required />
@@ -907,7 +1100,7 @@ const PortfolioPage: React.FC = () => {
 
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-3">
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-3">券商 CSV 导入</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-3">券商 CSV 导入</h3>
           <div className="space-y-2">
             {brokerLoadWarning ? (
               <div className="text-xs text-amber-300 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2 py-1">
@@ -955,7 +1148,7 @@ const PortfolioPage: React.FC = () => {
         </Card>
 
         <Card padding="md">
-          <h3 className="text-sm font-semibold text-white mb-3">事件记录</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-3">事件记录</h3>
           <div className="space-y-2">
             <div className="grid grid-cols-2 gap-2">
               <select className="input-terminal text-sm" value={eventType} onChange={(e) => setEventType(e.target.value as EventType)}>

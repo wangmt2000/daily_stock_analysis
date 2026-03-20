@@ -11,6 +11,7 @@ import type {
   PortfolioCostMethod,
   PortfolioDeleteResponse,
   PortfolioEventCreatedResponse,
+  PortfolioFxRefreshResponse,
   PortfolioImportBrokerListResponse,
   PortfolioImportCommitResponse,
   PortfolioImportParseResponse,
@@ -24,6 +25,11 @@ type SnapshotQuery = {
   accountId?: number;
   asOf?: string;
   costMethod?: PortfolioCostMethod;
+};
+
+type FxRefreshQuery = {
+  accountId?: number;
+  asOf?: string;
 };
 
 type EventQuery = {
@@ -58,6 +64,17 @@ function buildSnapshotParams(query: SnapshotQuery): Record<string, string | numb
   }
   if (query.costMethod) {
     params.cost_method = query.costMethod;
+  }
+  return params;
+}
+
+function buildFxRefreshParams(query: FxRefreshQuery): Record<string, string | number> {
+  const params: Record<string, string | number> = {};
+  if (query.accountId != null) {
+    params.account_id = query.accountId;
+  }
+  if (query.asOf) {
+    params.as_of = query.asOf;
   }
   return params;
 }
@@ -113,6 +130,13 @@ export const portfolioApi = {
       params: buildSnapshotParams(query),
     });
     return toCamelCase<PortfolioRiskResponse>(response.data);
+  },
+
+  async refreshFx(query: FxRefreshQuery = {}): Promise<PortfolioFxRefreshResponse> {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/portfolio/fx/refresh', undefined, {
+      params: buildFxRefreshParams(query),
+    });
+    return toCamelCase<PortfolioFxRefreshResponse>(response.data);
   },
 
   async createTrade(payload: PortfolioTradeCreateRequest): Promise<PortfolioEventCreatedResponse> {

@@ -119,6 +119,7 @@ class ReportMeta(BaseModel):
     stock_code: str = Field(..., description="股票代码")
     stock_name: Optional[str] = Field(None, description="股票名称")
     report_type: Optional[str] = Field(None, description="报告类型")
+    report_language: Optional[str] = Field(None, description="报告输出语言（zh/en）")
     created_at: Optional[str] = Field(None, description="创建时间")
     current_price: Optional[float] = Field(None, description="分析时股价")
     change_pct: Optional[float] = Field(None, description="分析时涨跌幅(%)")
@@ -175,6 +176,7 @@ class AnalysisReport(BaseModel):
                     "stock_code": "600519",
                     "stock_name": "贵州茅台",
                     "report_type": "detailed",
+                    "report_language": "zh",
                     "created_at": "2024-01-01T12:00:00"
                 },
                 "summary": {

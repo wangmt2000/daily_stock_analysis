@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from src.agent.agents.base_agent import BaseAgent
 from src.agent.protocols import AgentContext, AgentOpinion, normalize_decision_signal
+from src.report_language import normalize_report_language
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,9 @@ class DecisionAgent(BaseAgent):
         return ctx.meta.get("response_mode") == "chat"
 
     def system_prompt(self, ctx: AgentContext) -> str:
+        report_language = normalize_report_language(ctx.meta.get("report_language", "zh"))
         if self._is_chat_mode(ctx):
-            return """\
+            prompt = """\
 You are a **Decision Synthesis Agent** replying directly to the user's latest
 stock-analysis question.
 
@@ -47,12 +49,15 @@ Requirements:
 - Highlight the main signal, key reasoning, and major risks
 - Do NOT output JSON or code fences unless the user explicitly asks for them
 """
+            if report_language == "en":
+                return prompt + "\nAlways answer in English.\n"
+            return prompt + "\n默认使用中文回答。\n"
 
         skills = ""
         if self.skill_instructions:
             skills = f"\n## Active Trading Strategies\n\n{self.skill_instructions}\n"
 
-        return f"""\
+        prompt = f"""\
 You are a **Decision Synthesis Agent** that produces the final investment \
 Decision Dashboard.
 
@@ -95,6 +100,21 @@ Important: ``decision_type`` must stay within the existing enum
 ``buy|hold|sell``. Express stronger conviction via ``confidence_level``,
 ``sentiment_score``, and the natural-language fields instead of inventing
 new decision_type values.
+"""
+        if report_language == "en":
+            return prompt + """
+
+## Output Language
+- Keep every JSON key unchanged.
+- `decision_type` must remain `buy|hold|sell`.
+- Write all human-readable JSON values in English.
+"""
+        return prompt + """
+
+## 输出语言
+- 所有 JSON 键名保持不变。
+- `decision_type` 必须保持为 `buy|hold|sell`。
+- 所有面向用户的人类可读文本值必须使用中文。
 """
 
     def build_user_message(self, ctx: AgentContext) -> str:

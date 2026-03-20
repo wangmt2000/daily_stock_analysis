@@ -55,7 +55,7 @@ function boolIcon(value?: boolean | null) {
 const MetricRow: React.FC<{ label: string; value: string; accent?: boolean }> = ({ label, value, accent }) => (
   <div className="flex items-center justify-between border-b border-white/5 py-1.5 last:border-0">
     <span className="text-xs text-secondary-text">{label}</span>
-    <span className={`text-sm font-mono font-semibold ${accent ? 'text-cyan' : 'text-white'}`}>{value}</span>
+    <span className={`text-sm font-mono font-semibold ${accent ? 'text-cyan' : 'text-foreground'}`}>{value}</span>
   </div>
 );
 
@@ -96,7 +96,7 @@ const PerformanceCard: React.FC<{ metrics: PerformanceMetrics; title: string }> 
 
 const RunSummary: React.FC<{ data: BacktestRunResponse }> = ({ data }) => (
   <div className="flex items-center gap-4 rounded-lg border border-white/5 bg-elevated px-3 py-2 text-xs font-mono animate-fade-in">
-    <span className="text-secondary-text">Processed: <span className="text-white">{data.processed}</span></span>
+    <span className="text-secondary-text">Processed: <span className="text-foreground">{data.processed}</span></span>
     <span className="text-secondary-text">Saved: <span className="text-cyan">{data.saved}</span></span>
     <span className="text-secondary-text">Completed: <span className="text-emerald-400">{data.completed}</span></span>
     <span className="text-secondary-text">Insufficient: <span className="text-amber-400">{data.insufficient}</span></span>

@@ -24,7 +24,7 @@ const NotFoundPage: React.FC = () => {
         </span>
       </div>
 
-      <h1 className="text-2xl font-bold text-white mb-2">页面未找到</h1>
+      <h1 className="text-2xl font-bold text-foreground mb-2">页面未找到</h1>
       <p className="text-muted-text mb-8">抱歉，您访问的页面不存在或已被移动</p>
 
       <button 

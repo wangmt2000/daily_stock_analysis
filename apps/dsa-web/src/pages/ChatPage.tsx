@@ -6,23 +6,15 @@ import { agentApi } from '../api/agent';
 import { ApiErrorAlert, Button, ConfirmDialog, ScrollArea } from '../components/common';
 import { getParsedApiError } from '../api/error';
 import type { StrategyInfo } from '../api/agent';
-import { historyApi } from '../api/history';
 import {
   useAgentChatStore,
   type Message,
   type ProgressStep,
 } from '../stores/agentChatStore';
 import { downloadSession, formatSessionAsMarkdown } from '../utils/chatExport';
+import type { ChatFollowUpContext } from '../utils/chatFollowUp';
+import { buildFollowUpPrompt, resolveChatFollowUpContext } from '../utils/chatFollowUp';
 import { isNearBottom } from '../utils/chatScroll';
-
-interface FollowUpContext {
-  stock_code: string;
-  stock_name: string | null;
-  previous_analysis_summary?: unknown;
-  previous_strategy?: unknown;
-  previous_price?: number;
-  previous_change_pct?: number;
-}
 
 // Quick question examples shown on empty state
 const QUICK_QUESTIONS = [
@@ -44,20 +36,26 @@ const ChatPage: React.FC = () => {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sending, setSending] = useState(false);
+  const [isFollowUpContextLoading, setIsFollowUpContextLoading] = useState(false);
   const [sendToast, setSendToast] = useState<{
     type: 'success' | 'error';
     message: string;
   } | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const initialFollowUpHandled = useRef(false);
-  const followUpContextRef = useRef<FollowUpContext | null>(null);
+  const isMountedRef = useRef(true);
+  const followUpHydrationTokenRef = useRef(0);
+  const followUpContextRef = useRef<ChatFollowUpContext | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const pendingScrollBehaviorRef = useRef<ScrollBehavior>('auto');
 
   // Set page title
   useEffect(() => {
     document.title = '策略问股 - DSA';
+  }, []);
+
+  useEffect(() => () => {
+    isMountedRef.current = false;
   }, []);
 
   const {
@@ -166,28 +164,37 @@ const ChatPage: React.FC = () => {
 
   // Handle follow-up from report page: ?stock=600519&name=贵州茅台&recordId=xxx
   useEffect(() => {
-    if (initialFollowUpHandled.current) return;
     const stock = searchParams.get('stock');
     const name = searchParams.get('name');
     const recordId = searchParams.get('recordId');
-    if (stock) {
-      initialFollowUpHandled.current = true;
-      const displayName = name ? `${name}(${stock})` : stock;
-      setInput(`请深入分析 ${displayName}`);
-      if (recordId) {
-        historyApi.getDetail(Number(recordId)).then((report) => {
-          const ctx: FollowUpContext = { stock_code: stock, stock_name: name };
-          if (report.summary) ctx.previous_analysis_summary = report.summary;
-          if (report.strategy) ctx.previous_strategy = report.strategy;
-          if (report.meta) {
-            ctx.previous_price = report.meta.currentPrice;
-            ctx.previous_change_pct = report.meta.changePct;
-          }
-          followUpContextRef.current = ctx;
-        }).catch(() => {});
-      }
-      setSearchParams({}, { replace: true });
+    if (!stock) {
+      return;
     }
+
+    const hydrationToken = ++followUpHydrationTokenRef.current;
+    setInput(buildFollowUpPrompt(stock, name));
+    followUpContextRef.current = {
+      stock_code: stock,
+      stock_name: name,
+    };
+    if (recordId) {
+      setIsFollowUpContextLoading(true);
+    }
+    void resolveChatFollowUpContext({
+      stockCode: stock,
+      stockName: name,
+      recordId: recordId ? Number(recordId) : undefined,
+    }).then((context) => {
+      if (!isMountedRef.current || followUpHydrationTokenRef.current !== hydrationToken) {
+        return;
+      }
+      followUpContextRef.current = context;
+    }).finally(() => {
+      if (isMountedRef.current && followUpHydrationTokenRef.current === hydrationToken) {
+        setIsFollowUpContextLoading(false);
+      }
+    });
+    setSearchParams({}, { replace: true });
   }, [searchParams, setSearchParams]);
 
   const handleSend = useCallback(
@@ -205,7 +212,9 @@ const ChatPage: React.FC = () => {
         strategies: usedStrategy ? [usedStrategy] : undefined,
         context: followUpContextRef.current ?? undefined,
       };
+      followUpHydrationTokenRef.current += 1;
       followUpContextRef.current = null;
+      setIsFollowUpContextLoading(false);
 
       setInput('');
       requestScrollToBottom('smooth');
@@ -332,7 +341,7 @@ const ChatPage: React.FC = () => {
         </h2>
         <button
           onClick={handleStartNewChat}
-          className="rounded-lg p-1.5 text-muted-text transition-all hover:bg-white/10 hover:text-white"
+          className="rounded-lg p-1.5 text-muted-text transition-all hover:bg-white/10 hover:text-foreground"
           title="开启新对话"
         >
           <svg
@@ -377,7 +386,7 @@ const ChatPage: React.FC = () => {
                 aria-label={`切换到对话 ${s.title}`}
               >
                 {/* 装饰条 */}
-                <div 
+                <div
                   className={`h-10 w-1 rounded-full flex-shrink-0 transition-colors ${
                     s.session_id === sessionId ? 'bg-cyan' : 'bg-white/10'
                   }`}
@@ -387,7 +396,7 @@ const ChatPage: React.FC = () => {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
                       <span className={`block truncate text-sm font-semibold tracking-tight transition-colors ${
-                        s.session_id === sessionId ? 'text-white' : 'text-secondary-text group-hover:text-white'
+                        s.session_id === sessionId ? 'text-foreground' : 'text-secondary-text group-hover:text-foreground'
                       }`}>
                         {s.title}
                       </span>
@@ -677,7 +686,7 @@ const ChatPage: React.FC = () => {
                   <div
                     className={`min-w-0 w-fit max-w-[min(100%,48rem)] overflow-hidden rounded-2xl px-5 py-3.5 ${
                       msg.role === 'user'
-                        ? 'bg-cyan/10 text-white border border-cyan/20 rounded-tr-sm'
+                        ? 'bg-cyan/10 text-foreground border border-cyan/20 rounded-tr-sm'
                         : 'bg-card/72 text-secondary-text border border-white/30 rounded-tl-sm'
                     }`}
                   >
@@ -851,6 +860,11 @@ const ChatPage: React.FC = () => {
                 发送
               </Button>
             </div>
+            {isFollowUpContextLoading && (
+              <p className="mt-2 text-xs text-secondary-text">
+                正在加载历史分析上下文；现在可直接发送追问。
+              </p>
+            )}
           </div>
         </div>
       </div>

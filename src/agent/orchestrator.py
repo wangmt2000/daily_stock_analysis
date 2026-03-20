@@ -25,6 +25,7 @@ can be a drop-in replacement via the factory.
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import re
 import time
@@ -41,6 +42,7 @@ from src.agent.protocols import (
 )
 from src.agent.runner import parse_dashboard_json
 from src.agent.tools.registry import ToolRegistry
+from src.report_language import normalize_report_language
 
 if TYPE_CHECKING:
     from src.agent.executor import AgentResult
@@ -152,6 +154,52 @@ class AgentOrchestrator:
         if hasattr(agent, "max_steps"):
             agent.max_steps = self.max_steps
         return agent
+
+    def _callable_accepts_timeout_kwarg(self, func: Any) -> Optional[bool]:
+        """Return whether a callable accepts ``timeout_seconds`` when inspectable."""
+        if not callable(func):
+            return None
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            return None
+
+        if "timeout_seconds" in signature.parameters:
+            return True
+        return any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+
+    def _agent_run_accepts_timeout(self, run_callable: Any) -> bool:
+        """Best-effort compatibility check for legacy test doubles / custom agents."""
+        side_effect = getattr(run_callable, "side_effect", None)
+        accepts_timeout = self._callable_accepts_timeout_kwarg(side_effect)
+        if accepts_timeout is not None:
+            return accepts_timeout
+
+        accepts_timeout = self._callable_accepts_timeout_kwarg(run_callable)
+        if accepts_timeout is not None:
+            return accepts_timeout
+
+        return True
+
+    def _run_stage_agent(
+        self,
+        agent: Any,
+        ctx: AgentContext,
+        progress_callback: Optional[Callable] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> StageResult:
+        """Run a stage agent while preserving compatibility with older call signatures."""
+        run_kwargs = {"progress_callback": progress_callback}
+        if (
+            timeout_seconds is not None
+            and timeout_seconds > 0
+            and self._agent_run_accepts_timeout(agent.run)
+        ):
+            run_kwargs["timeout_seconds"] = timeout_seconds
+        return agent.run(ctx, **run_kwargs)
 
     # -----------------------------------------------------------------
     # Public interface (mirrors AgentExecutor)
@@ -301,7 +349,17 @@ class AgentOrchestrator:
                     "message": f"Starting {agent.agent_name} analysis...",
                 })
 
-            result: StageResult = agent.run(ctx, progress_callback=progress_callback)
+            remaining_timeout_s = (
+                max(0.0, timeout_s - elapsed_s)
+                if timeout_s
+                else None
+            )
+            result: StageResult = self._run_stage_agent(
+                agent,
+                ctx,
+                progress_callback=progress_callback,
+                timeout_seconds=remaining_timeout_s,
+            )
             stats.record_stage(result)
             all_tool_calls.extend(
                 tc for tc in (result.meta.get("tool_calls_log") or [])
@@ -506,6 +564,7 @@ class AgentOrchestrator:
             ctx.stock_code = context.get("stock_code", "")
             ctx.stock_name = context.get("stock_name", "")
             ctx.meta["strategies_requested"] = context.get("strategies", [])
+            ctx.meta["report_language"] = normalize_report_language(context.get("report_language", "zh"))
 
             # Pre-populate data fields that the caller already has
             for data_key in ("realtime_quote", "daily_history", "chip_distribution",
@@ -516,6 +575,9 @@ class AgentOrchestrator:
         # Try to extract stock code from the query text
         if not ctx.stock_code:
             ctx.stock_code = _extract_stock_code(task)
+
+        if "report_language" not in ctx.meta:
+            ctx.meta["report_language"] = "zh"
 
         return ctx
 

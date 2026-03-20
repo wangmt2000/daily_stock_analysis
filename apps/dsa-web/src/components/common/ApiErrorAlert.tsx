@@ -33,7 +33,7 @@ export const ApiErrorAlert: React.FC<ApiErrorAlertProps> = ({
         {onDismiss ? (
           <button
             type="button"
-            className="shrink-0 rounded-md border border-white/10 px-2 py-1 text-[11px] text-red-100/85 transition hover:bg-white/5"
+            className="shrink-0 rounded-md border border-danger/25 bg-danger/5 px-2 py-1 text-[11px] text-danger transition hover:bg-danger/12"
             onClick={onDismiss}
           >
             {dismissLabel}
@@ -41,9 +41,9 @@ export const ApiErrorAlert: React.FC<ApiErrorAlertProps> = ({
         ) : null}
       </div>
       {showDetails ? (
-        <details className="mt-3 rounded-lg border border-white/8 bg-black/15 px-3 py-2">
-          <summary className="cursor-pointer text-xs text-red-100/90">查看详情</summary>
-          <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-5 text-red-100/85">
+        <details className="mt-3 rounded-lg border border-subtle bg-surface-2 px-3 py-2">
+          <summary className="cursor-pointer text-xs text-danger opacity-90">查看详情</summary>
+          <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-5 text-danger opacity-85">
             {error.rawMessage}
           </pre>
         </details>
