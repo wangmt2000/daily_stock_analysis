@@ -167,15 +167,21 @@ def is_bse_code(code: str) -> bool:
     """
     Check if the code is a Beijing Stock Exchange (BSE) A-share code.
 
-    BSE rules:
-    - Old format (pre-2024): 8xxxxx (e.g. 838163), 4xxxxx (e.g. 430047)
-    - New format (2024+, post full migration Oct 2025): 920xxx+
-    Note: 900xxx are Shanghai B-shares, NOT BSE — must return False.
+    BSE rules (2026):
+    - New format (2024+): 92xxxx main trading codes
+    - Historical ranges: 43xxxx, 83xxxx, 87xxxx, 88xxxx
+    - Special instruments: 81xxxx convertible bonds, 82xxxx preferred shares
+    - Subscription codes: 889xxx
+    Note: 900xxx are Shanghai B-shares and must return False.
     """
     c = (code or "").strip().split(".")[0]
     if len(c) != 6 or not c.isdigit():
         return False
-    return c.startswith(("8", "4")) or c.startswith("92")
+
+    if c.startswith("900"):
+        return False
+
+    return c.startswith(("92", "43", "81", "82", "83", "87", "88"))
 
 def is_st_stock(name: str) -> bool:
     """

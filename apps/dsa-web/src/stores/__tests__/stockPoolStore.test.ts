@@ -106,6 +106,49 @@ describe('stockPoolStore', () => {
     expect(historyApi.getList).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to the next history report after deleting the currently selected item', async () => {
+    const nextHistoryItem = {
+      ...historyItem,
+      id: 2,
+      queryId: 'q-2',
+      stockCode: 'AAPL',
+      stockName: 'Apple',
+    };
+    const nextHistoryReport = {
+      ...historyReport,
+      meta: {
+        ...historyReport.meta,
+        id: 2,
+        queryId: 'q-2',
+        stockCode: 'AAPL',
+        stockName: 'Apple',
+      },
+    };
+
+    useStockPoolStore.setState({
+      historyItems: [historyItem, nextHistoryItem],
+      selectedHistoryIds: [1],
+      selectedReport: historyReport,
+    });
+
+    vi.mocked(historyApi.deleteRecords).mockResolvedValue({ deleted: 1 });
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 1,
+      page: 1,
+      limit: 20,
+      items: [nextHistoryItem],
+    });
+    vi.mocked(historyApi.getDetail).mockResolvedValue(nextHistoryReport);
+
+    await useStockPoolStore.getState().deleteSelectedHistory();
+
+    const state = useStockPoolStore.getState();
+    expect(state.historyItems).toHaveLength(1);
+    expect(state.historyItems[0].id).toBe(2);
+    expect(state.selectedReport?.meta.id).toBe(2);
+    expect(state.selectedReport?.meta.stockCode).toBe('AAPL');
+  });
+
   it('surfaces duplicate task errors without replacing the dashboard error state', async () => {
     vi.mocked(analysisApi.analyzeAsync).mockRejectedValue(
       new DuplicateTaskError('600519', 'task-1', '股票 600519 正在分析中'),
@@ -118,6 +161,45 @@ describe('stockPoolStore', () => {
     expect(state.duplicateError).toContain('600519');
     expect(state.error).toBeNull();
     expect(state.isAnalyzing).toBe(false);
+  });
+
+  it('rejects obviously invalid mixed alphanumeric input before calling the API', async () => {
+    useStockPoolStore.getState().setQuery('00aaaaa');
+
+    await useStockPoolStore.getState().submitAnalysis();
+
+    const state = useStockPoolStore.getState();
+    expect(state.inputError).toBe('请输入有效的股票代码或股票名称');
+    expect(state.isAnalyzing).toBe(false);
+    expect(analysisApi.analyzeAsync).not.toHaveBeenCalled();
+  });
+
+  it('accepts HK suffix codes from autocomplete without local validation errors', async () => {
+    vi.mocked(analysisApi.analyzeAsync).mockResolvedValue({
+      taskId: 'task-hk-1',
+      stockCode: '00700.HK',
+      status: 'pending',
+      message: 'accepted',
+    } as never);
+
+    await useStockPoolStore.getState().submitAnalysis({
+      stockCode: '00700.HK',
+      stockName: '腾讯控股',
+      originalQuery: '00700',
+      selectionSource: 'autocomplete',
+    });
+
+    const state = useStockPoolStore.getState();
+    expect(state.inputError).toBeUndefined();
+    expect(state.isAnalyzing).toBe(false);
+    expect(analysisApi.analyzeAsync).toHaveBeenCalledWith({
+      stockCode: '00700.HK',
+      reportType: 'detailed',
+      stockName: '腾讯控股',
+      originalQuery: '00700',
+      selectionSource: 'autocomplete',
+      notify: true,
+    });
   });
 
   it('merges newly discovered history items during silent refresh', async () => {

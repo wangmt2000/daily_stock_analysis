@@ -3,7 +3,7 @@
 DecisionAgent — final synthesis and decision-making specialist.
 
 Responsible for:
-- Aggregating opinions from technical + intel + risk + strategy agents
+- Aggregating opinions from technical + intel + risk + skill agents
 - Producing the final Decision Dashboard JSON
 - Generating actionable buy/hold/sell recommendations with price levels
 """
@@ -40,7 +40,7 @@ You are a **Decision Synthesis Agent** replying directly to the user's latest
 stock-analysis question.
 
 You will receive structured opinions from the technical, intelligence, risk,
-and strategy stages. Synthesize them into a concise, natural-language answer.
+and skill stages. Synthesize them into a concise, natural-language answer.
 
 Requirements:
 - Answer the user's actual question directly
@@ -55,7 +55,7 @@ Requirements:
 
         skills = ""
         if self.skill_instructions:
-            skills = f"\n## Active Trading Strategies\n\n{self.skill_instructions}\n"
+            skills = f"\n## Active Trading Skills\n\n{self.skill_instructions}\n"
 
         prompt = f"""\
 You are a **Decision Synthesis Agent** that produces the final investment \
@@ -64,7 +64,7 @@ Decision Dashboard.
 You will receive:
 1. Structured opinions from a Technical Agent and an Intel Agent
 2. Any risk flags raised by a Risk Agent
-3. Strategy evaluation results (if applicable)
+        3. Skill evaluation results (if applicable)
 
 Your task: synthesise all inputs into a single, actionable Decision Dashboard.
 {skills}
@@ -80,7 +80,7 @@ Your task: synthesise all inputs into a single, actionable Decision Dashboard.
 - Technical opinion weight: ~40%
 - Intel / sentiment weight: ~30%
 - Risk flags weight: ~30% (negative override: any high-severity risk caps signal at "hold")
-- If a strategy opinion is present, blend it at 20% weight (reducing others proportionally)
+- If a skill opinion is present, blend it at 20% weight (reducing others proportionally)
 
 ## Scoring
 - 80-100: buy (all conditions met, high conviction)
@@ -156,9 +156,10 @@ new decision_type values.
                 parts.append(f"- [{rf.get('severity', 'medium')}] {rf.get('category', '')}: {rf.get('description', '')}")
             parts.append("")
 
-        # Strategy meta
-        if ctx.meta.get("strategies_requested"):
-            parts.append(f"## Strategies: {', '.join(ctx.meta['strategies_requested'])}")
+        # Skill meta
+        requested_skills = ctx.meta.get("skills_requested") or ctx.meta.get("strategies_requested")
+        if requested_skills:
+            parts.append(f"## Skills: {', '.join(requested_skills)}")
             parts.append("")
 
         if self._is_chat_mode(ctx):

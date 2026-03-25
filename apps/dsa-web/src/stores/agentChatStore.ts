@@ -27,13 +27,13 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  strategy?: string;
-  strategyName?: string;
+  skill?: string;
+  skillName?: string;
   thinkingSteps?: ProgressStep[];
 }
 
 export interface StreamMeta {
-  strategyName?: string;
+  skillName?: string;
 }
 
 interface AgentChatState {
@@ -180,14 +180,14 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
     set({ abortController: ac });
 
     const streamSessionId = payload.session_id || storeSessionId;
-    const strategyName = meta?.strategyName ?? '通用';
+    const skillName = meta?.skillName ?? '通用';
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
       content: payload.message,
-      strategy: payload.strategies?.[0],
-      strategyName,
+      skill: payload.skills?.[0],
+      skillName,
     };
 
     set((s) => ({
@@ -293,8 +293,8 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
               id: (Date.now() + 1).toString(),
               role: 'assistant',
               content: finalContent || '（无内容）',
-              strategy: payload.strategies?.[0],
-              strategyName,
+              skill: payload.skills?.[0],
+              skillName,
               thinkingSteps: [...currentProgressSteps],
             },
           ],

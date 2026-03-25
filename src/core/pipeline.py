@@ -24,6 +24,7 @@ import pandas as pd
 from src.config import get_config, Config
 from src.storage import get_db
 from data_provider import DataFetcherManager
+from data_provider.base import normalize_stock_code
 from data_provider.realtime_types import ChipDistribution
 from src.analyzer import GeminiAnalyzer, AnalysisResult, fill_chip_structure_if_needed, fill_price_position_if_needed
 from src.data.stock_mapping import STOCK_NAME_MAP
@@ -84,8 +85,8 @@ class StockAnalysisPipeline:
         self.db = get_db()
         self.fetcher_manager = DataFetcherManager()
         # 不再单独创建 akshare_fetcher，统一使用 fetcher_manager 获取增强数据
-        self.trend_analyzer = StockTrendAnalyzer()  # 趋势分析器
-        self.analyzer = GeminiAnalyzer()
+        self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
+        self.analyzer = GeminiAnalyzer(config=self.config)
         self.notifier = NotificationService(source_message=source_message)
         
         # 初始化搜索服务
@@ -102,7 +103,7 @@ class StockAnalysisPipeline:
         )
         
         logger.info(f"调度器初始化完成，最大并发数: {self.max_workers}")
-        logger.info("已启用趋势分析器 (MA5>MA10>MA20 多头判断)")
+        logger.info("已启用技术分析引擎（均线/趋势/量价指标）")
         # 打印实时行情/筹码配置状态
         if self.config.enable_realtime_quote:
             logger.info(f"实时行情已启用 (优先级: {self.config.realtime_source_priority})")
@@ -264,6 +265,11 @@ class StockAnalysisPipeline:
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 基本面聚合失败: {e}")
                 fundamental_context = self.fetcher_manager.build_failed_fundamental_context(code, str(e))
+
+            fundamental_context = self._attach_belong_boards_to_fundamental_context(
+                code,
+                fundamental_context,
+            )
 
             # P0: write-only snapshot, fail-open, no read dependency on this table.
             try:
@@ -591,6 +597,57 @@ class StockAnalysisPipeline:
         )
 
         return enhanced
+
+    def _attach_belong_boards_to_fundamental_context(
+        self,
+        code: str,
+        fundamental_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Attach A-share board membership as a top-level supplemental field.
+
+        Keep this as a shallow copy so cached fundamental contexts are not
+        mutated in place after retrieval.
+        """
+        if isinstance(fundamental_context, dict):
+            enriched_context = dict(fundamental_context)
+        else:
+            enriched_context = self.fetcher_manager.build_failed_fundamental_context(
+                code,
+                "invalid fundamental context",
+            )
+
+        existing_boards = enriched_context.get("belong_boards")
+        if isinstance(existing_boards, list):
+            enriched_context["belong_boards"] = list(existing_boards)
+            return enriched_context
+
+        boards_block = enriched_context.get("boards")
+        boards_status = boards_block.get("status") if isinstance(boards_block, dict) else None
+        coverage = enriched_context.get("coverage")
+        boards_coverage = coverage.get("boards") if isinstance(coverage, dict) else None
+        market = enriched_context.get("market")
+        if not isinstance(market, str) or not market.strip():
+            market = get_market_for_stock(normalize_stock_code(code))
+
+        if (
+            market != "cn"
+            or boards_status == "not_supported"
+            or boards_coverage == "not_supported"
+        ):
+            enriched_context["belong_boards"] = []
+            return enriched_context
+
+        boards: List[Dict[str, Any]] = []
+        try:
+            raw_boards = self.fetcher_manager.get_belong_boards(code)
+            if isinstance(raw_boards, list):
+                boards = raw_boards
+        except Exception as e:
+            logger.debug("%s attach belong_boards failed (fail-open): %s", code, e)
+
+        enriched_context["belong_boards"] = boards
+        return enriched_context
 
     def _analyze_with_agent(
         self, 
@@ -1434,6 +1491,17 @@ class StockAnalysisPipeline:
                         non_wechat_success = self.notifier.send_to_pushover(report) or non_wechat_success
                     elif channel == NotificationChannel.ASTRBOT:
                         non_wechat_success = self.notifier.send_to_astrbot(report) or non_wechat_success
+                    elif channel == NotificationChannel.SLACK:
+                        use_image = self.notifier._should_use_image_for_channel(
+                            channel, image_bytes
+                        )
+                        if use_image and self.notifier._slack_bot_token and self.notifier._slack_channel_id:
+                            result = self.notifier._send_slack_image(
+                                image_bytes, fallback_content=report
+                            )
+                        else:
+                            result = self.notifier.send_to_slack(report)
+                        non_wechat_success = result or non_wechat_success
                     else:
                         logger.warning(f"未知通知渠道: {channel}")
 

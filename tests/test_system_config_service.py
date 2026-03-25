@@ -13,7 +13,7 @@ ensure_litellm_stub()
 
 from src.config import Config
 from src.core.config_manager import ConfigManager
-from src.services.system_config_service import ConfigConflictError, SystemConfigService
+from src.services.system_config_service import ConfigConflictError, ConfigImportError, SystemConfigService
 
 
 class SystemConfigServiceTestCase(unittest.TestCase):
@@ -43,6 +43,12 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         os.environ.pop("ENV_FILE", None)
         self.temp_dir.cleanup()
 
+    def _rewrite_env(self, *lines: str) -> None:
+        self.env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        Config.reset_instance()
+        self.manager = ConfigManager(env_path=self.env_path)
+        self.service = SystemConfigService(manager=self.manager)
+
     def test_get_config_returns_raw_sensitive_values(self) -> None:
         payload = self.service.get_config(include_schema=True)
         items = {item["key"]: item for item in payload["items"]}
@@ -51,6 +57,87 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(items["GEMINI_API_KEY"]["value"], "secret-key-value")
         self.assertFalse(items["GEMINI_API_KEY"]["is_masked"])
         self.assertTrue(items["GEMINI_API_KEY"]["raw_value_exists"])
+
+    def test_export_desktop_env_returns_raw_text(self) -> None:
+        self.env_path.write_text(
+            "# Desktop config\nSTOCK_LIST=600519,000001\n\nGEMINI_API_KEY=secret-key-value\n",
+            encoding="utf-8",
+        )
+
+        payload = self.service.export_desktop_env()
+
+        self.assertEqual(
+            payload["content"],
+            "# Desktop config\nSTOCK_LIST=600519,000001\n\nGEMINI_API_KEY=secret-key-value\n",
+        )
+        self.assertEqual(payload["config_version"], self.manager.get_config_version())
+
+    def test_import_desktop_env_merges_keys_without_deleting_unspecified_values(self) -> None:
+        current_version = self.manager.get_config_version()
+
+        payload = self.service.import_desktop_env(
+            config_version=current_version,
+            content="STOCK_LIST=300750\nCUSTOM_NOTE=desktop backup\n",
+            reload_now=False,
+        )
+
+        self.assertTrue(payload["success"])
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["STOCK_LIST"], "300750")
+        self.assertEqual(current_map["CUSTOM_NOTE"], "desktop backup")
+        self.assertEqual(current_map["GEMINI_API_KEY"], "secret-key-value")
+
+    def test_import_desktop_env_treats_mask_token_as_literal_value(self) -> None:
+        current_version = self.manager.get_config_version()
+
+        self.service.import_desktop_env(
+            config_version=current_version,
+            content="GEMINI_API_KEY=******\n",
+            reload_now=False,
+        )
+
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["GEMINI_API_KEY"], "******")
+
+    def test_import_desktop_env_uses_last_duplicate_assignment(self) -> None:
+        current_version = self.manager.get_config_version()
+
+        self.service.import_desktop_env(
+            config_version=current_version,
+            content="STOCK_LIST=000001\nSTOCK_LIST=300750\n",
+            reload_now=False,
+        )
+
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["STOCK_LIST"], "300750")
+
+    def test_import_desktop_env_allows_empty_assignment(self) -> None:
+        current_version = self.manager.get_config_version()
+
+        self.service.import_desktop_env(
+            config_version=current_version,
+            content="LOG_LEVEL=\n",
+            reload_now=False,
+        )
+
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["LOG_LEVEL"], "")
+
+    def test_import_desktop_env_rejects_empty_or_comment_only_content(self) -> None:
+        with self.assertRaises(ConfigImportError):
+            self.service.import_desktop_env(
+                config_version=self.manager.get_config_version(),
+                content="   \n# only comments\n\n",
+                reload_now=False,
+            )
+
+    def test_import_desktop_env_raises_conflict_for_stale_version(self) -> None:
+        with self.assertRaises(ConfigConflictError):
+            self.service.import_desktop_env(
+                config_version="stale-version",
+                content="STOCK_LIST=300750\n",
+                reload_now=False,
+            )
 
     def test_update_preserves_masked_secret(self) -> None:
         old_version = self.manager.get_config_version()
@@ -225,6 +312,52 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["issues"], [])
+
+    def test_validate_accepts_legacy_agent_orchestrator_mode_alias(self) -> None:
+        validation = self.service.validate(items=[{"key": "AGENT_ORCHESTRATOR_MODE", "value": "strategy"}])
+
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["issues"], [])
+
+    def test_get_config_projects_legacy_strategy_aliases_onto_skill_fields(self) -> None:
+        self._rewrite_env(
+            "AGENT_STRATEGY_DIR=legacy-strategies",
+            "AGENT_STRATEGY_AUTOWEIGHT=false",
+            "AGENT_STRATEGY_ROUTING=manual",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["AGENT_SKILL_DIR"]["value"], "legacy-strategies")
+        self.assertEqual(items["AGENT_SKILL_AUTOWEIGHT"]["value"], "false")
+        self.assertEqual(items["AGENT_SKILL_ROUTING"]["value"], "manual")
+        self.assertNotIn("AGENT_STRATEGY_DIR", items)
+        self.assertNotIn("AGENT_STRATEGY_AUTOWEIGHT", items)
+        self.assertNotIn("AGENT_STRATEGY_ROUTING", items)
+
+    def test_get_config_respects_empty_canonical_skill_field_over_legacy_alias(self) -> None:
+        self._rewrite_env(
+            "AGENT_SKILL_DIR=",
+            "AGENT_STRATEGY_DIR=legacy-strategies",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["AGENT_SKILL_DIR"]["value"], "")
+
+    def test_get_config_normalizes_legacy_orchestrator_mode_for_ui(self) -> None:
+        self._rewrite_env("AGENT_ORCHESTRATOR_MODE=strategy")
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["AGENT_ORCHESTRATOR_MODE"]["value"], "specialist")
+        self.assertEqual(
+            items["AGENT_ORCHESTRATOR_MODE"]["schema"]["validation"]["enum"],
+            ["quick", "standard", "full", "specialist", "strategy", "skill"],
+        )
 
     @patch.object(
         Config,

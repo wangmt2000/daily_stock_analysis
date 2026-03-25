@@ -484,6 +484,43 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
     @mock.patch("src.notification.get_config")
     @mock.patch("requests.post")
+    def test_send_to_slack_via_notification_service_with_webhook(
+        self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(slack_webhook_url="https://hooks.slack.com/services/T/B/xxx")
+        mock_get_config.return_value = cfg
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        resp.text = "ok"
+        mock_post.return_value = resp
+
+        service = NotificationService()
+        self.assertIn(NotificationChannel.SLACK, service.get_available_channels())
+
+        ok = service.send("slack content")
+
+        self.assertTrue(ok)
+        mock_post.assert_called_once()
+
+    @mock.patch("src.notification.get_config")
+    @mock.patch("requests.post")
+    def test_send_to_slack_via_notification_service_with_bot(
+        self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(slack_bot_token="xoxb-test", slack_channel_id="C123")
+        mock_get_config.return_value = cfg
+        mock_post.return_value = _make_response(200, {"ok": True})
+
+        service = NotificationService()
+        self.assertIn(NotificationChannel.SLACK, service.get_available_channels())
+
+        ok = service.send("slack bot content")
+
+        self.assertTrue(ok)
+        mock_post.assert_called_once()
+
+    @mock.patch("src.notification.get_config")
+    @mock.patch("requests.post")
     def test_send_to_serverchan3_via_notification_service(
         self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
     ):

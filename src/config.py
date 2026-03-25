@@ -516,17 +516,17 @@ class Config:
     _agent_mode_explicit: bool = False  # True when AGENT_MODE was explicitly set in env
     agent_max_steps: int = 10
     agent_skills: List[str] = field(default_factory=list)
-    agent_strategy_dir: Optional[str] = None
+    agent_skill_dir: Optional[str] = None
     agent_nl_routing: bool = False  # Enable natural language routing in bot dispatcher
     agent_arch: str = "single"     # Agent architecture: 'single' (legacy) or 'multi' (orchestrator)
-    agent_orchestrator_mode: str = "standard"  # Orchestrator mode: quick/standard/full/strategy
+    agent_orchestrator_mode: str = "standard"  # Orchestrator mode: quick/standard/full/specialist
     agent_orchestrator_timeout_s: int = 600  # Cooperative timeout budget for the whole multi-agent pipeline
     agent_risk_override: bool = True  # Allow risk agent to veto buy signals
     agent_deep_research_budget: int = 30000  # Max token budget for deep research
     agent_deep_research_timeout: int = 180  # Max seconds for /research command before returning timeout
     agent_memory_enabled: bool = False  # Enable memory & calibration system
-    agent_strategy_autoweight: bool = True  # Auto-weight strategies by backtest performance
-    agent_strategy_routing: str = "auto"  # Strategy routing: 'auto' (regime-based) or 'manual'
+    agent_skill_autoweight: bool = True  # Auto-weight skills by backtest performance
+    agent_skill_routing: str = "auto"  # Skill routing: 'auto' (regime-based) or 'manual'
     agent_event_monitor_enabled: bool = False  # Enable periodic event-driven alert checks in schedule mode
     agent_event_monitor_interval_minutes: int = 5  # Polling interval for event monitor background checks
     agent_event_alert_rules_json: str = ""  # JSON array of serialized EventMonitor rules
@@ -568,6 +568,11 @@ class Config:
     discord_bot_token: Optional[str] = None  # Discord Bot Token
     discord_main_channel_id: Optional[str] = None  # Discord 主频道 ID
     discord_webhook_url: Optional[str] = None  # Discord Webhook URL
+
+    # Slack 通知配置
+    slack_webhook_url: Optional[str] = None  # Slack Incoming Webhook URL
+    slack_bot_token: Optional[str] = None  # Slack Bot Token (xoxb-...)
+    slack_channel_id: Optional[str] = None  # Slack 频道 ID (Bot 模式必填)
 
     # AstrBot 通知配置
     astrbot_token: Optional[str] = None
@@ -748,8 +753,8 @@ class Config:
 
     # --- Post-init validation ---------------------------------------------------
     _VALID_AGENT_ARCH = {"single", "multi"}
-    _VALID_ORCHESTRATOR_MODES = {"quick", "standard", "full", "strategy"}
-    _VALID_STRATEGY_ROUTING = {"auto", "manual"}
+    _VALID_ORCHESTRATOR_MODES = {"quick", "standard", "full", "specialist"}
+    _VALID_SKILL_ROUTING = {"auto", "manual"}
 
     def __post_init__(self) -> None:
         _log = logging.getLogger(__name__)
@@ -759,18 +764,24 @@ class Config:
                 self.agent_arch, self._VALID_AGENT_ARCH,
             )
             object.__setattr__(self, "agent_arch", "single")
+        if self.agent_orchestrator_mode in {"strategy", "skill"}:
+            _log.info(
+                "AGENT_ORCHESTRATOR_MODE=%s is deprecated; normalizing to 'specialist'",
+                self.agent_orchestrator_mode,
+            )
+            object.__setattr__(self, "agent_orchestrator_mode", "specialist")
         if self.agent_orchestrator_mode not in self._VALID_ORCHESTRATOR_MODES:
             _log.warning(
                 "Invalid AGENT_ORCHESTRATOR_MODE=%r, falling back to 'standard'. Valid: %s",
                 self.agent_orchestrator_mode, self._VALID_ORCHESTRATOR_MODES,
             )
             object.__setattr__(self, "agent_orchestrator_mode", "standard")
-        if self.agent_strategy_routing not in self._VALID_STRATEGY_ROUTING:
+        if self.agent_skill_routing not in self._VALID_SKILL_ROUTING:
             _log.warning(
-                "Invalid AGENT_STRATEGY_ROUTING=%r, falling back to 'auto'. Valid: %s",
-                self.agent_strategy_routing, self._VALID_STRATEGY_ROUTING,
+                "Invalid AGENT_SKILL_ROUTING=%r, falling back to 'auto'. Valid: %s",
+                self.agent_skill_routing, self._VALID_SKILL_ROUTING,
             )
-            object.__setattr__(self, "agent_strategy_routing", "auto")
+            object.__setattr__(self, "agent_skill_routing", "auto")
 
     # 单例实例存储
     _instance: Optional['Config'] = None
@@ -1117,7 +1128,7 @@ class Config:
             _agent_mode_explicit=os.getenv('AGENT_MODE') is not None,
             agent_max_steps=parse_env_int(os.getenv('AGENT_MAX_STEPS'), 10, field_name='AGENT_MAX_STEPS', minimum=1),
             agent_skills=[s.strip() for s in os.getenv('AGENT_SKILLS', '').split(',') if s.strip()],
-            agent_strategy_dir=os.getenv('AGENT_STRATEGY_DIR'),
+            agent_skill_dir=os.getenv('AGENT_SKILL_DIR') or os.getenv('AGENT_STRATEGY_DIR'),
             agent_nl_routing=os.getenv('AGENT_NL_ROUTING', 'false').lower() == 'true',
             agent_arch=os.getenv('AGENT_ARCH', 'single').lower(),
             agent_orchestrator_mode=os.getenv('AGENT_ORCHESTRATOR_MODE', 'standard').lower(),
@@ -1141,8 +1152,14 @@ class Config:
                 minimum=30,
             ),
             agent_memory_enabled=os.getenv('AGENT_MEMORY_ENABLED', 'false').lower() == 'true',
-            agent_strategy_autoweight=os.getenv('AGENT_STRATEGY_AUTOWEIGHT', 'true').lower() == 'true',
-            agent_strategy_routing=os.getenv('AGENT_STRATEGY_ROUTING', 'auto').lower(),
+            agent_skill_autoweight=(
+                os.getenv('AGENT_SKILL_AUTOWEIGHT')
+                or os.getenv('AGENT_STRATEGY_AUTOWEIGHT', 'true')
+            ).lower() == 'true',
+            agent_skill_routing=(
+                os.getenv('AGENT_SKILL_ROUTING')
+                or os.getenv('AGENT_STRATEGY_ROUTING', 'auto')
+            ).lower(),
             agent_event_monitor_enabled=os.getenv('AGENT_EVENT_MONITOR_ENABLED', 'false').lower() == 'true',
             agent_event_monitor_interval_minutes=parse_env_int(
                 os.getenv('AGENT_EVENT_MONITOR_INTERVAL_MINUTES'),
@@ -1175,6 +1192,9 @@ class Config:
                 or os.getenv('DISCORD_CHANNEL_ID')
             ),
             discord_webhook_url=os.getenv('DISCORD_WEBHOOK_URL'),
+            slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL'),
+            slack_bot_token=os.getenv('SLACK_BOT_TOKEN'),
+            slack_channel_id=os.getenv('SLACK_CHANNEL_ID'),
             astrbot_url=os.getenv('ASTRBOT_URL'),
             astrbot_token=os.getenv('ASTRBOT_TOKEN'),
             single_stock_notify=os.getenv('SINGLE_STOCK_NOTIFY', 'false').lower() == 'true',
@@ -1974,6 +1994,8 @@ class Config:
             or self.custom_webhook_urls
             or (self.discord_bot_token and self.discord_main_channel_id)
             or self.discord_webhook_url
+            or self.slack_webhook_url
+            or (self.slack_bot_token and self.slack_channel_id)
         )
 
         if not has_notification:

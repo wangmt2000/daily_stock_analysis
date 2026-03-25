@@ -46,7 +46,7 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "category": "agent",
         "title": "Agent",
-        "description": "Agent mode and strategy settings.",
+        "description": "Agent mode and strategy-skill settings.",
         "display_order": 55,
     },
     {
@@ -1001,6 +1001,51 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "display_order": 35,
     },
     # ------------------------------------------------------------------
+    # Notification – Slack  (Bot > Webhook when both configured)
+    # ------------------------------------------------------------------
+    "SLACK_BOT_TOKEN": {
+        "title": "Slack Bot Token",
+        "description": "Slack Bot Token (xoxb-...). Recommended; supports image upload. Takes priority over Webhook when both are configured.",
+        "category": "notification",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {},
+        "display_order": 36,
+    },
+    "SLACK_CHANNEL_ID": {
+        "title": "Slack Channel ID",
+        "description": "Slack channel ID (required when using Bot Token).",
+        "category": "notification",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {},
+        "display_order": 37,
+    },
+    "SLACK_WEBHOOK_URL": {
+        "title": "Slack Incoming Webhook URL",
+        "description": "Slack Incoming Webhook URL (text only, no image support).",
+        "category": "notification",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {},
+        "display_order": 38,
+    },
+    # ------------------------------------------------------------------
     # Notification – Pushover
     # ------------------------------------------------------------------
     "PUSHOVER_USER_KEY": {
@@ -1472,22 +1517,22 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "display_order": 20,
     },
     "AGENT_SKILLS": {
-        "title": "Agent Skills",
-        "description": "Comma-separated list of active agent strategies. When set to specific strategies (not 'all'), scheduled tasks will automatically use the Agent pipeline.",
+        "title": "Agent Strategies",
+        "description": "Comma-separated list of active agent strategy skills. Leave empty to use the primary default strategy skill declared in metadata (built-in default: bull_trend). When set to specific skills (not 'all'), scheduled tasks will automatically use the Agent pipeline.",
         "category": "agent",
         "data_type": "string",
         "ui_control": "text",
         "is_sensitive": False,
         "is_required": False,
         "is_editable": True,
-        "default_value": "bull_trend,ma_golden_cross,volume_breakout,shrink_pullback",
+        "default_value": "",
         "options": [],
         "validation": {},
         "display_order": 30,
     },
-    "AGENT_STRATEGY_DIR": {
+    "AGENT_SKILL_DIR": {
         "title": "Agent Strategy Dir",
-        "description": "Directory containing agent strategy YAML files.",
+        "description": "Directory containing agent strategy-skill definition files (YAML or SKILL.md bundles).",
         "category": "agent",
         "data_type": "string",
         "ui_control": "text",
@@ -1532,7 +1577,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "AGENT_ORCHESTRATOR_MODE": {
         "title": "Orchestrator Mode",
-        "description": "Pipeline mode when AGENT_ARCH=multi. 'quick' (tech→decision), 'standard' (tech→intel→decision), 'full' (tech→intel→risk→decision), 'strategy' (full + per-strategy agents).",
+        "description": "Pipeline mode when AGENT_ARCH=multi. 'quick' (tech→decision), 'standard' (tech→intel→decision), 'full' (tech→intel→risk→decision), 'specialist' (full + per-strategy specialist agents).",
         "category": "agent",
         "data_type": "string",
         "ui_control": "select",
@@ -1544,9 +1589,9 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             {"label": "Quick", "value": "quick"},
             {"label": "Standard", "value": "standard"},
             {"label": "Full", "value": "full"},
-            {"label": "Strategy", "value": "strategy"},
+            {"label": "Specialist", "value": "specialist"},
         ],
-        "validation": {},
+        "validation": {"enum": ["quick", "standard", "full", "specialist", "strategy", "skill"]},
         "display_order": 61,
     },
     "AGENT_ORCHESTRATOR_TIMEOUT_S": {
@@ -1619,9 +1664,9 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {},
         "display_order": 66,
     },
-    "AGENT_STRATEGY_AUTOWEIGHT": {
+    "AGENT_SKILL_AUTOWEIGHT": {
         "title": "Auto-Weight Strategies",
-        "description": "Automatically weight strategy opinions by their historical backtest performance.",
+        "description": "Automatically weight strategy-skill opinions by their historical backtest performance.",
         "category": "agent",
         "data_type": "boolean",
         "ui_control": "switch",
@@ -1633,9 +1678,9 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {},
         "display_order": 67,
     },
-    "AGENT_STRATEGY_ROUTING": {
+    "AGENT_SKILL_ROUTING": {
         "title": "Strategy Routing",
-        "description": "Strategy selection mode. 'auto' detects market regime and picks relevant strategies; 'manual' uses AGENT_SKILLS list only.",
+        "description": "Strategy-skill selection mode. 'auto' detects market regime and picks relevant skills; 'manual' uses AGENT_SKILLS list only.",
         "category": "agent",
         "data_type": "string",
         "ui_control": "select",
@@ -1816,6 +1861,7 @@ def _infer_category(key: str) -> str:
         "SERVERCHAN",
         "DINGTALK",
         "DISCORD",
+        "SLACK",
         "CUSTOM_WEBHOOK",
         "WECOM",
         "ASTRBOT",

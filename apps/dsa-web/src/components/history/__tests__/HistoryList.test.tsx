@@ -29,10 +29,12 @@ const items: HistoryItem[] = [
 
 describe('HistoryList', () => {
   it('shows the empty state copy when no history exists', () => {
-    render(<HistoryList {...baseProps} items={[]} />);
+    const { container } = render(<HistoryList {...baseProps} items={[]} />);
 
     expect(screen.getByText('暂无历史分析记录')).toBeInTheDocument();
     expect(screen.getByText('完成首次分析后，这里会保留最近结果。')).toBeInTheDocument();
+    expect(screen.getByText('历史分析')).toBeInTheDocument();
+    expect(container.querySelector('.glass-card')).toBeTruthy();
   });
 
   it('renders selected count and forwards item interactions', () => {
@@ -74,6 +76,12 @@ describe('HistoryList', () => {
     fireEvent.click(screen.getByText('全选当前'));
 
     expect(onToggleSelectAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables delete when nothing is selected', () => {
+    render(<HistoryList {...baseProps} items={items} />);
+
+    expect(screen.getByRole('button', { name: '删除' })).toBeDisabled();
   });
 
   it('generates unique select-all ids across multiple instances', () => {

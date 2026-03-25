@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { analysisApi, DuplicateTaskError } from '../../api/analysis';
 import { historyApi } from '../../api/history';
 import { useStockPoolStore } from '../../stores';
+import { getReportText, normalizeReportLanguage } from '../../utils/reportLanguage';
 import HomePage from '../HomePage';
 
 const navigateMock = vi.fn();
@@ -57,6 +58,7 @@ const historyReport = {
     stockCode: '600519',
     stockName: '贵州茅台',
     reportType: 'detailed' as const,
+    reportLanguage: 'zh' as const,
     createdAt: '2026-03-18T08:00:00Z',
   },
   summary: {
@@ -97,9 +99,15 @@ describe('HomePage', () => {
     expect(dashboard).toBeInTheDocument();
     expect(dashboard.className).toContain('h-[calc(100vh-5rem)]');
     expect(dashboard.className).toContain('lg:h-[calc(100vh-2rem)]');
-    expect(screen.getByPlaceholderText('输入股票代码，如 600519、HK00700、AAPL')).toBeInTheDocument();
+    expect(dashboard.firstElementChild?.className).toContain('min-h-0');
+    expect(dashboard.querySelector('.flex-1.flex.min-h-0.overflow-hidden')).toBeTruthy();
+    expect(screen.getByPlaceholderText('输入股票代码或名称，如 600519、贵州茅台、AAPL')).toBeInTheDocument();
     expect(await screen.findByText('趋势维持强势')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '详细报告' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: getReportText(normalizeReportLanguage(historyReport.meta.reportLanguage)).fullReport,
+      }),
+    ).toBeInTheDocument();
   });
 
   it('shows the empty report workspace when history is empty', async () => {
@@ -117,6 +125,7 @@ describe('HomePage', () => {
     );
 
     expect(await screen.findByText('开始分析')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '开始分析', level: 3 })).toBeInTheDocument();
     expect(screen.getByText('输入股票代码进行分析，或从左侧选择历史报告查看')).toBeInTheDocument();
     expect(screen.getByText('暂无历史分析记录')).toBeInTheDocument();
   });
@@ -138,7 +147,7 @@ describe('HomePage', () => {
       </MemoryRouter>,
     );
 
-    const input = await screen.findByPlaceholderText('输入股票代码，如 600519、HK00700、AAPL');
+    const input = await screen.findByPlaceholderText('输入股票代码或名称，如 600519、贵州茅台、AAPL');
     fireEvent.change(input, { target: { value: '600519' } });
     fireEvent.click(screen.getByRole('button', { name: '分析' }));
 
@@ -168,5 +177,100 @@ describe('HomePage', () => {
     expect(navigateMock).toHaveBeenCalledWith(
       '/chat?stock=600519&name=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%B0&recordId=1',
     );
+  });
+
+  it('confirms and deletes selected history from the dashboard state flow', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 1,
+      page: 1,
+      limit: 20,
+      items: [historyItem],
+    });
+    vi.mocked(historyApi.getDetail).mockResolvedValue(historyReport);
+    vi.mocked(historyApi.deleteRecords).mockResolvedValue({ deleted: 1 });
+
+    useStockPoolStore.setState({
+      historyItems: [historyItem],
+      selectedHistoryIds: [1],
+      selectedReport: historyReport,
+    });
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '删除' }));
+
+    expect(
+      await screen.findByText('确认删除这条历史记录吗？删除后将不可恢复。'),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => {
+      expect(historyApi.deleteRecords).toHaveBeenCalledWith([1]);
+    });
+  });
+
+  it('opens and closes the mobile history drawer without changing dashboard styles', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 0,
+      page: 1,
+      limit: 20,
+      items: [],
+    });
+
+    const { container } = render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    const trigger = await screen.findByTitle('历史记录');
+    fireEvent.click(trigger);
+
+    expect(container.querySelector('.home-mobile-overlay')).toBeTruthy();
+    expect(container.querySelector('.dashboard-card')).toBeTruthy();
+
+    fireEvent.click(container.querySelector('.fixed.inset-0.z-40') as HTMLElement);
+
+    await waitFor(() => {
+      expect(container.querySelector('.home-mobile-overlay')).toBeFalsy();
+    });
+  });
+
+  it('renders active task panel content from dashboard state', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 0,
+      page: 1,
+      limit: 20,
+      items: [],
+    });
+
+    useStockPoolStore.setState({
+      activeTasks: [
+        {
+          taskId: 'task-1',
+          stockCode: '600519',
+          stockName: '贵州茅台',
+          status: 'processing',
+          progress: 45,
+          message: '正在抓取最新行情',
+          reportType: 'detailed',
+          createdAt: '2026-03-18T08:00:00Z',
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('分析任务')).toBeInTheDocument();
+    expect(screen.getByText('正在抓取最新行情')).toBeInTheDocument();
   });
 });

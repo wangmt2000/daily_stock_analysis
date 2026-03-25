@@ -152,17 +152,23 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p1.search.assert_called_once()
         p2.search.assert_called_once()
 
-    def test_search_comprehensive_intel_uses_same_filter(self) -> None:
-        """Comprehensive intel should use same strict date filtering logic."""
+    def test_search_comprehensive_intel_splits_strict_and_non_strict_filters(self) -> None:
+        """Latest news stays strict while market analysis keeps undated results."""
         today = datetime.now().date()
         old = (today - timedelta(days=20)).isoformat()
         fresh = (today - timedelta(days=1)).isoformat()
+        analysis_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        analysis_text = analysis_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        expected_analysis_date = analysis_dt.astimezone().date().isoformat()
 
         service, mock_search = self._create_service_with_mock_provider(
             news_max_age_days=3,
             news_strategy_profile="medium",  # min(7,3)=3
-            response=_response([_result("old", old), _result("fresh", fresh)]),
         )
+        mock_search.side_effect = [
+            _response([_result("old", old), _result("fresh", fresh)]),
+            _response([_result("analysis_unknown", None), _result("analysis_dated", analysis_text)]),
+        ]
         with patch("src.search_service.time.sleep"):
             intel = service.search_comprehensive_intel(
                 stock_code="600519",
@@ -176,8 +182,70 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             self.assertEqual(kwargs["days"], 3)
             self.assertEqual(kwargs["max_results"], 6)  # target 3 -> overfetch 6
 
-        for resp in intel.values():
-            self.assertTrue(all(item.title != "old" for item in resp.results))
+        self.assertEqual([item.title for item in intel["latest_news"].results], ["fresh"])
+        self.assertEqual(
+            [item.title for item in intel["market_analysis"].results],
+            ["analysis_unknown", "analysis_dated"],
+        )
+        self.assertIsNone(intel["market_analysis"].results[0].published_date)
+        self.assertEqual(intel["market_analysis"].results[1].published_date, expected_analysis_date)
+
+    def test_search_comprehensive_intel_etf_risk_check_keeps_unknown_dates(self) -> None:
+        """ETF risk_check should avoid strict freshness filtering."""
+        fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        expected_fresh_date = fresh_dt.astimezone().date().isoformat()
+
+        service, mock_search = self._create_service_with_mock_provider(
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        mock_search.side_effect = [
+            _response([_result("latest_news", fresh_text)]),
+            _response([_result("market_analysis_unknown", None)]),
+            _response([_result("risk_unknown", None)]),
+        ]
+
+        with patch("src.search_service.time.sleep"):
+            intel = service.search_comprehensive_intel(
+                stock_code="510300",
+                stock_name="沪深300ETF",
+                max_searches=3,
+            )
+
+        self.assertEqual(intel["latest_news"].results[0].published_date, expected_fresh_date)
+        self.assertEqual([item.title for item in intel["market_analysis"].results], ["market_analysis_unknown"])
+        self.assertIsNone(intel["market_analysis"].results[0].published_date)
+        self.assertEqual([item.title for item in intel["risk_check"].results], ["risk_unknown"])
+        self.assertIsNone(intel["risk_check"].results[0].published_date)
+
+    def test_search_comprehensive_intel_non_etf_risk_check_stays_strict(self) -> None:
+        """Non-ETF risk_check should keep strict freshness filtering."""
+        fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        expected_fresh_date = fresh_dt.astimezone().date().isoformat()
+
+        service, mock_search = self._create_service_with_mock_provider(
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        mock_search.side_effect = [
+            _response([_result("latest_news", fresh_text)]),
+            _response([_result("market_analysis_unknown", None)]),
+            _response([_result("risk_unknown", None)]),
+        ]
+
+        with patch("src.search_service.time.sleep"):
+            intel = service.search_comprehensive_intel(
+                stock_code="600519",
+                stock_name="贵州茅台",
+                max_searches=3,
+            )
+
+        self.assertEqual(intel["latest_news"].results[0].published_date, expected_fresh_date)
+        self.assertEqual([item.title for item in intel["market_analysis"].results], ["market_analysis_unknown"])
+        self.assertIsNone(intel["market_analysis"].results[0].published_date)
+        self.assertEqual(intel["risk_check"].results, [])
 
     def test_effective_window_helper_has_no_side_effect(self) -> None:
         """_effective_news_window_days should not mutate stored news_window_days."""

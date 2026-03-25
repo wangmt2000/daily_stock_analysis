@@ -1,5 +1,9 @@
 import type React from 'react';
-import type { ReportMeta, ReportSummary as ReportSummaryType } from '../../types/analysis';
+import type {
+  ReportDetails as ReportDetailsType,
+  ReportMeta,
+  ReportSummary as ReportSummaryType,
+} from '../../types/analysis';
 import { ScoreGauge, Card } from '../common';
 import { formatDateTime } from '../../utils/format';
 import { getReportText, normalizeReportLanguage } from '../../utils/reportLanguage';
@@ -7,18 +11,80 @@ import { getReportText, normalizeReportLanguage } from '../../utils/reportLangua
 interface ReportOverviewProps {
   meta: ReportMeta;
   summary: ReportSummaryType;
+  details?: ReportDetailsType;
   isHistory?: boolean;
 }
+
+type BoardStatus = 'leading' | 'lagging';
+
+type BoardSignal = {
+  status: BoardStatus;
+  changePct?: number;
+};
+
+const normalizeBoardName = (value?: string): string =>
+  (value || '').trim().replace(/\s+/g, ' ');
+
+const coerceFiniteNumber = (value: unknown): number | undefined => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim().replace(/%$/, '');
+    if (!trimmed) {
+      return undefined;
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+};
+
+const buildBoardSignalMap = (details?: ReportDetailsType): Map<string, BoardSignal> => {
+  const signalMap = new Map<string, BoardSignal>();
+  const topBoards = Array.isArray(details?.sectorRankings?.top) ? details.sectorRankings.top : [];
+  const bottomBoards = Array.isArray(details?.sectorRankings?.bottom) ? details.sectorRankings.bottom : [];
+
+  topBoards.forEach((item) => {
+    const normalizedName = normalizeBoardName(item?.name);
+    if (!normalizedName) {
+      return;
+    }
+    signalMap.set(normalizedName, {
+      status: 'leading',
+      changePct: coerceFiniteNumber(item.changePct),
+    });
+  });
+
+  bottomBoards.forEach((item) => {
+    const normalizedName = normalizeBoardName(item?.name);
+    if (!normalizedName) {
+      return;
+    }
+    signalMap.set(normalizedName, {
+      status: 'lagging',
+      changePct: coerceFiniteNumber(item.changePct),
+    });
+  });
+
+  return signalMap;
+};
 
 /**
  * 报告概览区组件 - 终端风格
  */
 export const ReportOverview: React.FC<ReportOverviewProps> = ({
   meta,
-  summary
+  summary,
+  details,
 }) => {
   const reportLanguage = normalizeReportLanguage(meta.reportLanguage);
   const text = getReportText(reportLanguage);
+  const relatedBoards = (Array.isArray(details?.belongBoards) ? details.belongBoards : [])
+    .filter((board) => normalizeBoardName(board?.name).length > 0)
+    .slice(0, 3);
+  const boardSignals = buildBoardSignalMap(details);
+
   const getPriceChangeStyle = (changePct: number | undefined): React.CSSProperties | undefined => {
     if (changePct === undefined || changePct === null) {
       return undefined;
@@ -39,6 +105,20 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
     if (changePct === undefined || changePct === null) return '--';
     const sign = changePct > 0 ? '+' : '';
     return `${sign}${changePct.toFixed(2)}%`;
+  };
+
+  const getBoardStatusLabel = (status: BoardStatus): string => {
+    if (status === 'leading') {
+      return text.leadingBoard;
+    }
+    return text.laggingBoard;
+  };
+
+  const getBoardStatusClassName = (status: BoardStatus): string => {
+    if (status === 'leading') {
+      return 'bg-success/10 text-success';
+    }
+    return 'bg-danger/10 text-danger';
   };
 
   return (
@@ -126,6 +206,52 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
               </div>
             </Card>
           </div>
+
+          {relatedBoards.length > 0 && (
+            <Card variant="bordered" padding="sm" className="home-panel-card text-left">
+              <div className="mb-3 flex items-baseline gap-2">
+                <span className="label-uppercase">{text.boardLinkage}</span>
+                <h3 className="mt-0.5 text-base font-semibold text-foreground">{text.relatedBoards}</h3>
+              </div>
+
+              <div className="space-y-2.5">
+                {relatedBoards.map((board, index) => {
+                  const boardName = normalizeBoardName(board.name);
+                  const signal = boardSignals.get(boardName);
+                  return (
+                    <div
+                      key={`${boardName}-${board.code || index}`}
+                      className="flex flex-wrap items-center gap-2 text-sm"
+                    >
+                      <span className="home-accent-chip px-2 py-0.5 text-xs font-medium">
+                        {boardName}
+                      </span>
+                      {board.type && (
+                        <span className="rounded-full bg-muted/30 px-2 py-0.5 text-xs text-muted-text">
+                          {board.type}
+                        </span>
+                      )}
+                      {signal && (
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs font-medium ${getBoardStatusClassName(signal.status)}`}
+                        >
+                          {getBoardStatusLabel(signal.status)}
+                        </span>
+                      )}
+                      {signal && signal.changePct !== undefined && signal.changePct !== null && (
+                        <span
+                          className="text-xs font-mono"
+                          style={getPriceChangeStyle(signal.changePct)}
+                        >
+                          {formatChangePct(signal.changePct)}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
         </div>
 
         {/* 右侧：情绪指标 - 填满格子高度，消除与 STRATEGY POINTS 之间的空隙 */}

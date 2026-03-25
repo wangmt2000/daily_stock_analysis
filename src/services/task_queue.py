@@ -26,25 +26,36 @@ from typing import Optional, Dict, List, Any, TYPE_CHECKING, Tuple, Literal
 if TYPE_CHECKING:
     from asyncio import Queue as AsyncQueue
 
-from data_provider.base import canonical_stock_code
+from data_provider.base import canonical_stock_code, normalize_stock_code
+from src.utils.analysis_metadata import SELECTION_SOURCES
 
 logger = logging.getLogger(__name__)
 
 
+def _dedupe_stock_code_key(stock_code: str) -> str:
+    """
+    Build the internal duplicate-detection key for a stock code.
+
+    The task queue should treat equivalent market code shapes as the same
+    underlying stock, e.g. ``600519`` and ``600519.SH``.
+    """
+    return canonical_stock_code(normalize_stock_code(stock_code))
+
+
 class TaskStatus(str, Enum):
-    """任务状态枚举"""
-    PENDING = "pending"        # 等待执行
-    PROCESSING = "processing"  # 执行中
-    COMPLETED = "completed"    # 已完成
-    FAILED = "failed"          # 失败
+    """Task status enumeration"""
+    PENDING = "pending"        # Waiting for execution
+    PROCESSING = "processing"  # In progress
+    COMPLETED = "completed"    # Completed
+    FAILED = "failed"          # Failed
 
 
 @dataclass
 class TaskInfo:
     """
-    任务信息数据类
-    
-    包含任务的完整状态信息，用于 API 响应和内部管理
+    Task information dataclass.
+
+    Used for API responses and internal task management.
     """
     task_id: str
     stock_code: str
@@ -58,9 +69,11 @@ class TaskInfo:
     created_at: datetime = field(default_factory=datetime.now)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    original_query: Optional[str] = None
+    selection_source: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典，用于 API 响应"""
+        """Convert task info into an API-friendly dictionary."""
         return {
             "task_id": self.task_id,
             "stock_code": self.stock_code,
@@ -73,10 +86,12 @@ class TaskInfo:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error": self.error,
+            "original_query": self.original_query,
+            "selection_source": self.selection_source,
         }
     
     def copy(self) -> 'TaskInfo':
-        """创建任务信息的副本"""
+        """Create a shallow copy of the task information."""
         return TaskInfo(
             task_id=self.task_id,
             stock_code=self.stock_code,
@@ -90,6 +105,8 @@ class TaskInfo:
             created_at=self.created_at,
             started_at=self.started_at,
             completed_at=self.completed_at,
+            original_query=self.original_query,
+            selection_source=self.selection_source,
         )
 
 
@@ -138,7 +155,7 @@ class AnalysisTaskQueue:
         
         # 核心数据结构
         self._tasks: Dict[str, TaskInfo] = {}           # task_id -> TaskInfo
-        self._analyzing_stocks: Dict[str, str] = {}     # stock_code -> task_id
+        self._analyzing_stocks: Dict[str, str] = {}     # dedupe_key -> task_id
         self._futures: Dict[str, Future] = {}           # task_id -> Future
         
         # SSE 订阅者列表（asyncio.Queue 实例）
@@ -241,8 +258,9 @@ class AnalysisTaskQueue:
         Returns:
             True 表示正在分析中
         """
+        dedupe_key = _dedupe_stock_code_key(stock_code)
         with self._data_lock:
-            return stock_code in self._analyzing_stocks
+            return dedupe_key in self._analyzing_stocks
     
     def get_analyzing_task_id(self, stock_code: str) -> Optional[str]:
         """
@@ -254,30 +272,51 @@ class AnalysisTaskQueue:
         Returns:
             任务 ID，如果没有则返回 None
         """
+        dedupe_key = _dedupe_stock_code_key(stock_code)
         with self._data_lock:
-            return self._analyzing_stocks.get(stock_code)
+            return self._analyzing_stocks.get(dedupe_key)
+
+    def validate_selection_source(self, selection_source: Optional[str]) -> None:
+        """
+        Validate the selection source parameter.
+
+        Args:
+            selection_source: Selection source label.
+
+        Raises:
+            ValueError: Raised when the selection source is invalid.
+        """
+        if selection_source is not None and selection_source not in SELECTION_SOURCES:
+            raise ValueError(
+                f"Invalid selection_source: {selection_source}. "
+                f"Must be one of {SELECTION_SOURCES}"
+            )
     
     def submit_task(
         self,
         stock_code: str,
         stock_name: Optional[str] = None,
+        original_query: Optional[str] = None,
+        selection_source: Optional[str] = None,
         report_type: str = "detailed",
         force_refresh: bool = False,
     ) -> TaskInfo:
         """
-        提交分析任务
-        
+        Submit a single analysis task.
+
         Args:
-            stock_code: 股票代码
-            stock_name: 股票名称（可选）
-            report_type: 报告类型
-            force_refresh: 是否强制刷新
-            
+            stock_code: Stock code
+            stock_name: Optional stock name
+            original_query: Optional raw user input
+            selection_source: Optional source label
+            report_type: Report type
+            force_refresh: Whether to bypass cache
+
         Returns:
-            TaskInfo: 任务信息
-            
+            TaskInfo: Accepted task information
+
         Raises:
-            DuplicateTaskError: 股票正在分析中
+            DuplicateTaskError: Raised when the stock is already being analyzed
         """
         stock_code = canonical_stock_code(stock_code)
         if not stock_code:
@@ -286,6 +325,8 @@ class AnalysisTaskQueue:
         accepted, duplicates = self.submit_tasks_batch(
             [stock_code],
             stock_name=stock_name,
+            original_query=original_query,
+            selection_source=selection_source,
             report_type=report_type,
             force_refresh=force_refresh,
         )
@@ -297,28 +338,34 @@ class AnalysisTaskQueue:
         self,
         stock_codes: List[str],
         stock_name: Optional[str] = None,
+        original_query: Optional[str] = None,
+        selection_source: Optional[str] = None,
         report_type: str = "detailed",
         force_refresh: bool = False,
+        notify: bool = True,
     ) -> Tuple[List[TaskInfo], List[DuplicateTaskError]]:
         """
-        批量提交分析任务。
+        Submit analysis tasks in batch.
 
-        - 重复股票会被跳过并记录在 duplicates 中
-        - 如果线程池提交过程中发生异常，则回滚本次已创建任务，避免部分成功
+        - Duplicate stocks are skipped and recorded in duplicates.
+        - If executor submission fails, the current batch is rolled back.
         """
+        self.validate_selection_source(selection_source)
+
         accepted: List[TaskInfo] = []
         duplicates: List[DuplicateTaskError] = []
         created_task_ids: List[str] = []
 
-        normalized_codes = [
+        canonical_codes = [
             normalized for normalized in (canonical_stock_code(code) for code in stock_codes)
             if normalized
         ]
 
         with self._data_lock:
-            for stock_code in normalized_codes:
-                if stock_code in self._analyzing_stocks:
-                    existing_task_id = self._analyzing_stocks[stock_code]
+            for stock_code in canonical_codes:
+                dedupe_key = _dedupe_stock_code_key(stock_code)
+                if dedupe_key in self._analyzing_stocks:
+                    existing_task_id = self._analyzing_stocks[dedupe_key]
                     duplicates.append(DuplicateTaskError(stock_code, existing_task_id))
                     continue
 
@@ -330,9 +377,11 @@ class AnalysisTaskQueue:
                     status=TaskStatus.PENDING,
                     message="任务已加入队列",
                     report_type=report_type,
+                    original_query=original_query,
+                    selection_source=selection_source,
                 )
                 self._tasks[task_id] = task_info
-                self._analyzing_stocks[stock_code] = task_id
+                self._analyzing_stocks[dedupe_key] = task_id
 
                 try:
                     future = self.executor.submit(
@@ -341,9 +390,10 @@ class AnalysisTaskQueue:
                         stock_code,
                         report_type,
                         force_refresh,
+                        notify,
                     )
                 except Exception:
-                    # 回滚当前批次，避免 API 拿不到 task_id 却留下半提交任务。
+                    # Roll back the current batch to avoid partial submission.
                     self._rollback_submitted_tasks_locked(created_task_ids + [task_id])
                     raise
 
@@ -368,8 +418,10 @@ class AnalysisTaskQueue:
                 future.cancel()
 
             task = self._tasks.pop(task_id, None)
-            if task and self._analyzing_stocks.get(task.stock_code) == task_id:
-                del self._analyzing_stocks[task.stock_code]
+            if task:
+                dedupe_key = _dedupe_stock_code_key(task.stock_code)
+                if self._analyzing_stocks.get(dedupe_key) == task_id:
+                    del self._analyzing_stocks[dedupe_key]
     
     def get_task(self, task_id: str) -> Optional[TaskInfo]:
         """
@@ -443,6 +495,7 @@ class AnalysisTaskQueue:
         stock_code: str,
         report_type: str,
         force_refresh: bool,
+        notify: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """
         执行分析任务（在线程池中运行）
@@ -479,6 +532,7 @@ class AnalysisTaskQueue:
                 report_type=report_type,
                 force_refresh=force_refresh,
                 query_id=task_id,
+                send_notification=notify,
             )
             
             if result:
@@ -494,8 +548,9 @@ class AnalysisTaskQueue:
                         task.stock_name = result.get("stock_name", task.stock_name)
                         
                         # 从分析中集合移除
-                        if task.stock_code in self._analyzing_stocks:
-                            del self._analyzing_stocks[task.stock_code]
+                        dedupe_key = _dedupe_stock_code_key(task.stock_code)
+                        if dedupe_key in self._analyzing_stocks:
+                            del self._analyzing_stocks[dedupe_key]
                 
                 self._broadcast_event("task_completed", task.to_dict())
                 logger.info(f"[TaskQueue] 任务完成: {task_id} ({stock_code})")
@@ -521,8 +576,9 @@ class AnalysisTaskQueue:
                     task.message = f"分析失败: {error_msg[:50]}"
                     
                     # 从分析中集合移除
-                    if task.stock_code in self._analyzing_stocks:
-                        del self._analyzing_stocks[task.stock_code]
+                    dedupe_key = _dedupe_stock_code_key(task.stock_code)
+                    if dedupe_key in self._analyzing_stocks:
+                        del self._analyzing_stocks[dedupe_key]
             
             self._broadcast_event("task_failed", task.to_dict())
             

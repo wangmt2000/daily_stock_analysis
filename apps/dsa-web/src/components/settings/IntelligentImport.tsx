@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { getParsedApiError } from '../../api/error';
 import { stocksApi, type ExtractItem } from '../../api/stocks';
 import { systemConfigApi, SystemConfigConflictError } from '../../api/systemConfig';
@@ -107,6 +107,8 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [pasteText, setPasteText] = useState('');
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const dataFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const parseCurrentList = useCallback(() => {
     return stockListValue
@@ -224,6 +226,13 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
     [handleDataFile],
   );
 
+  const openFilePicker = useCallback((inputRef: React.RefObject<HTMLInputElement | null>) => {
+    if (disabled || isLoading) {
+      return;
+    }
+    inputRef.current?.click();
+  }, [disabled, isLoading]);
+
   const toggleChecked = useCallback((id: string) => {
     setItems((prev) => prev.map((p) => (p.id === id && p.code ? { ...p, checked: !p.checked } : p)));
   }, []);
@@ -298,18 +307,38 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
         } ${disabled || isLoading ? 'cursor-not-allowed opacity-60' : ''}`}
       >
         <div className="flex flex-wrap items-center gap-2">
-          <label className="cursor-pointer">
-            <Button type="button" variant="settings-secondary" disabled={disabled || isLoading}>
-              选择图片
-            </Button>
-            <input type="file" accept=".jpg,.jpeg,.png,.webp,.gif" className="hidden" onChange={onImageInput} disabled={disabled || isLoading} />
-          </label>
-          <label className="cursor-pointer">
-            <Button type="button" variant="settings-secondary" disabled={disabled || isLoading}>
-              选择文件
-            </Button>
-            <input type="file" accept=".csv,.xlsx,.txt" className="hidden" onChange={onDataFileInput} disabled={disabled || isLoading} />
-          </label>
+          <Button
+            type="button"
+            variant="settings-secondary"
+            disabled={disabled || isLoading}
+            onClick={() => openFilePicker(imageInputRef)}
+          >
+            选择图片
+          </Button>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept=".jpg,.jpeg,.png,.webp,.gif"
+            className="hidden"
+            onChange={onImageInput}
+            disabled={disabled || isLoading}
+          />
+          <Button
+            type="button"
+            variant="settings-secondary"
+            disabled={disabled || isLoading}
+            onClick={() => openFilePicker(dataFileInputRef)}
+          >
+            选择文件
+          </Button>
+          <input
+            ref={dataFileInputRef}
+            type="file"
+            accept=".csv,.xlsx,.txt"
+            className="hidden"
+            onChange={onDataFileInput}
+            disabled={disabled || isLoading}
+          />
         </div>
         <div className="flex flex-col gap-2 sm:flex-row">
           <textarea

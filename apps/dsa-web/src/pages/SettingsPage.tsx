@@ -1,7 +1,9 @@
 import type React from 'react';
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth, useSystemConfig } from '../hooks';
-import { ApiErrorAlert, Button } from '../components/common';
+import { createParsedApiError, getParsedApiError, type ParsedApiError } from '../api/error';
+import { systemConfigApi } from '../api/systemConfig';
+import { ApiErrorAlert, Button, ConfirmDialog } from '../components/common';
 import {
   AuthSettingsCard,
   ChangePasswordCard,
@@ -16,8 +18,29 @@ import {
 import { getCategoryDescriptionZh } from '../utils/systemConfigI18n';
 import type { SystemConfigCategory } from '../types/systemConfig';
 
+type DesktopWindow = Window & {
+  dsaDesktop?: {
+    version?: string;
+  };
+};
+
+function formatDesktopEnvFilename() {
+  const now = new Date();
+  const pad = (value: number) => value.toString().padStart(2, '0');
+  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  const time = `${pad(now.getHours())}${pad(now.getMinutes())}`;
+  return `dsa-desktop-env_${date}_${time}.env`;
+}
+
 const SettingsPage: React.FC = () => {
   const { passwordChangeable } = useAuth();
+  const [desktopActionError, setDesktopActionError] = useState<ParsedApiError | null>(null);
+  const [desktopActionSuccess, setDesktopActionSuccess] = useState<string>('');
+  const [isExportingEnv, setIsExportingEnv] = useState(false);
+  const [isImportingEnv, setIsImportingEnv] = useState(false);
+  const [showImportConfirm, setShowImportConfirm] = useState(false);
+  const desktopImportRef = useRef<HTMLInputElement | null>(null);
+  const isDesktopRuntime = typeof window !== 'undefined' && Boolean((window as DesktopWindow).dsaDesktop);
 
   // Set page title
   useEffect(() => {
@@ -128,6 +151,76 @@ const SettingsPage: React.FC = () => {
       : activeCategory === 'agent'
         ? rawActiveItems.filter((item) => !AGENT_HIDDEN_KEYS.has(item.key))
       : rawActiveItems;
+  const desktopActionDisabled = isLoading || isSaving || isExportingEnv || isImportingEnv;
+
+  const downloadDesktopEnv = async () => {
+    setDesktopActionError(null);
+    setDesktopActionSuccess('');
+    setIsExportingEnv(true);
+    try {
+      const payload = await systemConfigApi.exportDesktopEnv();
+      const blob = new Blob([payload.content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = formatDesktopEnvFilename();
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+      setDesktopActionSuccess('已导出当前已保存的 .env 备份。');
+    } catch (error: unknown) {
+      setDesktopActionError(getParsedApiError(error));
+    } finally {
+      setIsExportingEnv(false);
+    }
+  };
+
+  const beginDesktopImport = () => {
+    setDesktopActionError(null);
+    setDesktopActionSuccess('');
+    if (hasDirty) {
+      setShowImportConfirm(true);
+      return;
+    }
+    desktopImportRef.current?.click();
+  };
+
+  const handleDesktopImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    setShowImportConfirm(false);
+    if (!file) {
+      return;
+    }
+
+    setDesktopActionError(null);
+    setDesktopActionSuccess('');
+    setIsImportingEnv(true);
+    try {
+      const content = await file.text();
+      await systemConfigApi.importDesktopEnv({
+        configVersion,
+        content,
+        reloadNow: true,
+      });
+      const reloaded = await load();
+      if (!reloaded) {
+        setDesktopActionError(createParsedApiError({
+          title: '配置已导入但刷新失败',
+          message: '备份已导入，但重新加载配置失败，请手动重载页面。',
+          rawMessage: 'Desktop env import succeeded but config refresh failed',
+          category: 'http_error',
+        }));
+        return;
+      }
+      setDesktopActionSuccess('已导入 .env 备份并重新加载配置。');
+    } catch (error: unknown) {
+      setDesktopActionError(getParsedApiError(error));
+    } finally {
+      setIsImportingEnv(false);
+    }
+  };
 
   return (
     <div className="min-h-full px-4 pb-6 pt-4 md:px-6">
@@ -197,6 +290,59 @@ const SettingsPage: React.FC = () => {
 
           <section className="space-y-4">
             {activeCategory === 'system' ? <AuthSettingsCard /> : null}
+            {activeCategory === 'system' && isDesktopRuntime ? (
+              <SettingsSectionCard
+                title="配置备份"
+                description="导出当前已保存的 .env 备份，或从备份文件恢复桌面端配置。导入会覆盖备份中出现的键并立即重载。"
+              >
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button
+                      type="button"
+                      variant="settings-secondary"
+                      onClick={() => void downloadDesktopEnv()}
+                      disabled={desktopActionDisabled}
+                      isLoading={isExportingEnv}
+                      loadingText="导出中..."
+                    >
+                      导出 .env
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="settings-primary"
+                      onClick={beginDesktopImport}
+                      disabled={desktopActionDisabled}
+                      isLoading={isImportingEnv}
+                      loadingText="导入中..."
+                    >
+                      导入 .env
+                    </Button>
+                    <input
+                      ref={desktopImportRef}
+                      type="file"
+                      accept=".env,.txt"
+                      className="hidden"
+                      onChange={(event) => {
+                        void handleDesktopImportFile(event);
+                      }}
+                    />
+                  </div>
+                  <p className="text-xs leading-6 text-muted-text">
+                    导出内容仅包含当前已保存配置，不包含页面上尚未保存的本地草稿。
+                  </p>
+                  {desktopActionError ? (
+                    <ApiErrorAlert
+                      error={desktopActionError}
+                      actionLabel={desktopActionError.status === 409 ? '重新加载' : undefined}
+                      onAction={desktopActionError.status === 409 ? () => void load() : undefined}
+                    />
+                  ) : null}
+                  {!desktopActionError && desktopActionSuccess ? (
+                    <SettingsAlert title="操作成功" message={desktopActionSuccess} variant="success" />
+                  ) : null}
+                </div>
+              </SettingsSectionCard>
+            ) : null}
             {activeCategory === 'base' ? (
               <SettingsSectionCard
                 title="智能导入"
@@ -266,6 +412,20 @@ const SettingsPage: React.FC = () => {
             : <ApiErrorAlert error={toast.error} />}
         </div>
       ) : null}
+      <ConfirmDialog
+        isOpen={showImportConfirm}
+        title="导入会覆盖当前草稿"
+        message="当前页面还有未保存修改。继续导入会丢弃这些本地草稿，并立即用备份文件中的键值更新已保存配置。"
+        confirmText="继续导入"
+        cancelText="取消"
+        onConfirm={() => {
+          setShowImportConfirm(false);
+          desktopImportRef.current?.click();
+        }}
+        onCancel={() => {
+          setShowImportConfirm(false);
+        }}
+      />
     </div>
   );
 };

@@ -2,10 +2,11 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { cn } from '../utils/cn';
 import { agentApi } from '../api/agent';
 import { ApiErrorAlert, Button, ConfirmDialog, ScrollArea } from '../components/common';
 import { getParsedApiError } from '../api/error';
-import type { StrategyInfo } from '../api/agent';
+import type { SkillInfo } from '../api/agent';
 import {
   useAgentChatStore,
   type Message,
@@ -13,25 +14,32 @@ import {
 } from '../stores/agentChatStore';
 import { downloadSession, formatSessionAsMarkdown } from '../utils/chatExport';
 import type { ChatFollowUpContext } from '../utils/chatFollowUp';
-import { buildFollowUpPrompt, resolveChatFollowUpContext } from '../utils/chatFollowUp';
+import {
+  buildFollowUpPrompt,
+  parseFollowUpRecordId,
+  resolveChatFollowUpContext,
+  sanitizeFollowUpStockCode,
+  sanitizeFollowUpStockName,
+} from '../utils/chatFollowUp';
 import { isNearBottom } from '../utils/chatScroll';
+import { getReportText } from '../utils/reportLanguage';
 
 // Quick question examples shown on empty state
 const QUICK_QUESTIONS = [
-  { label: '用缠论分析茅台', strategy: 'chan_theory' },
-  { label: '波浪理论看宁德时代', strategy: 'wave_theory' },
-  { label: '分析比亚迪趋势', strategy: 'bull_trend' },
-  { label: '箱体震荡策略看中芯国际', strategy: 'box_oscillation' },
-  { label: '分析腾讯 hk00700', strategy: 'bull_trend' },
-  { label: '用情绪周期分析东方财富', strategy: 'emotion_cycle' },
+  { label: '用缠论分析茅台', skill: 'chan_theory' },
+  { label: '波浪理论看宁德时代', skill: 'wave_theory' },
+  { label: '分析比亚迪趋势', skill: 'bull_trend' },
+  { label: '箱体震荡技能看中芯国际', skill: 'box_oscillation' },
+  { label: '分析腾讯 hk00700', skill: 'bull_trend' },
+  { label: '用情绪周期分析东方财富', skill: 'emotion_cycle' },
 ];
 
 const ChatPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [input, setInput] = useState('');
-  const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
-  const [selectedStrategy, setSelectedStrategy] = useState<string>('bull_trend');
-  const [showStrategyDesc, setShowStrategyDesc] = useState<string | null>(null);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [selectedSkill, setSelectedSkill] = useState<string>('');
+  const [showSkillDesc, setShowSkillDesc] = useState<string | null>(null);
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -41,6 +49,8 @@ const ChatPage: React.FC = () => {
     type: 'success' | 'error';
     message: string;
   } | null>(null);
+  const [copiedMessages, setCopiedMessages] = useState<Set<string>>(new Set());
+  const copyResetTimerRef = useRef<Partial<Record<string, number>>>({});
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isMountedRef = useRef(true);
@@ -49,9 +59,24 @@ const ChatPage: React.FC = () => {
   const shouldStickToBottomRef = useRef(true);
   const pendingScrollBehaviorRef = useRef<ScrollBehavior>('auto');
 
+  // Get localized text (default to Chinese)
+  const text = getReportText('zh');
+
+  // Cleanup timers on unmount
+  useEffect(() => {
+    const timers = copyResetTimerRef.current;
+    return () => {
+      Object.values(timers).forEach((timerId) => {
+        if (timerId !== undefined) {
+          window.clearTimeout(timerId);
+        }
+      });
+    };
+  }, []);
+
   // Set page title
   useEffect(() => {
-    document.title = '策略问股 - DSA';
+    document.title = '问股 - DSA';
   }, []);
 
   useEffect(() => () => {
@@ -128,15 +153,22 @@ const ChatPage: React.FC = () => {
   }, [loadInitialSession]);
 
   useEffect(() => {
-    agentApi.getStrategies().then((res) => {
-      setStrategies(res.strategies);
-      const defaultId =
-        res.strategies.find((s) => s.id === 'bull_trend')?.id ||
-        res.strategies[0]?.id ||
-        '';
-      setSelectedStrategy(defaultId);
-    }).catch(() => {});
+    agentApi.getSkills()
+      .then((res) => {
+        setSkills(res.skills);
+        const defaultId =
+          res.default_skill_id ||
+          res.skills[0]?.id ||
+          '';
+        setSelectedSkill(defaultId);
+      })
+      .catch((error) => {
+        console.error('Failed to load chat skills:', error);
+      });
   }, []);
+
+  const availableSkillIds = new Set(skills.map((skill) => skill.id));
+  const quickQuestions = QUICK_QUESTIONS.filter((question) => availableSkillIds.size === 0 || availableSkillIds.has(question.skill));
 
   const handleStartNewChat = useCallback(() => {
     followUpContextRef.current = null;
@@ -153,21 +185,27 @@ const ChatPage: React.FC = () => {
 
   const confirmDelete = useCallback(() => {
     if (!deleteConfirmId) return;
-    agentApi.deleteChatSession(deleteConfirmId).then(() => {
-      loadSessions();
-      if (deleteConfirmId === sessionId) {
-        handleStartNewChat();
-      }
-    }).catch(() => {});
+    agentApi.deleteChatSession(deleteConfirmId)
+      .then(() => {
+        loadSessions();
+        if (deleteConfirmId === sessionId) {
+          handleStartNewChat();
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to delete chat session:', error);
+      });
     setDeleteConfirmId(null);
   }, [deleteConfirmId, sessionId, loadSessions, handleStartNewChat]);
 
   // Handle follow-up from report page: ?stock=600519&name=贵州茅台&recordId=xxx
   useEffect(() => {
-    const stock = searchParams.get('stock');
-    const name = searchParams.get('name');
-    const recordId = searchParams.get('recordId');
+    const stock = sanitizeFollowUpStockCode(searchParams.get('stock'));
+    const name = sanitizeFollowUpStockName(searchParams.get('name'));
+    const recordId = parseFollowUpRecordId(searchParams.get('recordId'));
+
     if (!stock) {
+      setSearchParams({}, { replace: true });
       return;
     }
 
@@ -177,13 +215,13 @@ const ChatPage: React.FC = () => {
       stock_code: stock,
       stock_name: name,
     };
-    if (recordId) {
+    if (recordId !== undefined) {
       setIsFollowUpContextLoading(true);
     }
     void resolveChatFollowUpContext({
       stockCode: stock,
       stockName: name,
-      recordId: recordId ? Number(recordId) : undefined,
+      recordId,
     }).then((context) => {
       if (!isMountedRef.current || followUpHydrationTokenRef.current !== hydrationToken) {
         return;
@@ -198,18 +236,18 @@ const ChatPage: React.FC = () => {
   }, [searchParams, setSearchParams]);
 
   const handleSend = useCallback(
-    async (overrideMessage?: string, overrideStrategy?: string) => {
+    async (overrideMessage?: string, overrideSkill?: string) => {
       const msgText = overrideMessage || input.trim();
       if (!msgText || loading) return;
-      const usedStrategy = overrideStrategy || selectedStrategy;
-      const usedStrategyName =
-        strategies.find((s) => s.id === usedStrategy)?.name ||
-        (usedStrategy ? usedStrategy : '通用');
+      const usedSkill = overrideSkill || selectedSkill;
+      const usedSkillName =
+        skills.find((s) => s.id === usedSkill)?.name ||
+        (usedSkill ? usedSkill : '通用');
 
       const payload = {
         message: msgText,
         session_id: sessionId,
-        strategies: usedStrategy ? [usedStrategy] : undefined,
+        skills: usedSkill ? [usedSkill] : undefined,
         context: followUpContextRef.current ?? undefined,
       };
       followUpHydrationTokenRef.current += 1;
@@ -218,9 +256,9 @@ const ChatPage: React.FC = () => {
 
       setInput('');
       requestScrollToBottom('smooth');
-      await startStream(payload, { strategyName: usedStrategyName });
+      await startStream(payload, { skillName: usedSkillName });
     },
-    [input, loading, requestScrollToBottom, selectedStrategy, strategies, sessionId, startStream],
+    [input, loading, requestScrollToBottom, selectedSkill, skills, sessionId, startStream],
   );
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -231,8 +269,8 @@ const ChatPage: React.FC = () => {
   };
 
   const handleQuickQuestion = (q: (typeof QUICK_QUESTIONS)[0]) => {
-    setSelectedStrategy(q.strategy);
-    handleSend(q.label, q.strategy);
+    setSelectedSkill(q.skill);
+    handleSend(q.label, q.skill);
   };
 
   const toggleThinking = (msgId: string) => {
@@ -242,6 +280,27 @@ const ChatPage: React.FC = () => {
       else next.add(msgId);
       return next;
     });
+  };
+
+  const copyMessageToClipboard = async (msgId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessages((prev) => new Set(prev).add(msgId));
+      const existingTimer = copyResetTimerRef.current[msgId];
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+      copyResetTimerRef.current[msgId] = window.setTimeout(() => {
+        setCopiedMessages((prev) => {
+          const next = new Set(prev);
+          next.delete(msgId);
+          return next;
+        });
+        delete copyResetTimerRef.current[msgId];
+      }, 2000);
+    } catch (err) {
+      console.error('Copy failed:', err);
+    }
   };
 
   const getCurrentStage = (steps: ProgressStep[]): string => {
@@ -333,8 +392,8 @@ const ChatPage: React.FC = () => {
   const sidebarContent = (
     <>
       <div className="flex items-center justify-between border-b border-white/5 bg-white/2 p-3.5">
-        <h2 className="text-[11px] font-semibold text-cyan uppercase tracking-[0.2em] flex items-center gap-2">
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <h2 className="text-sm font-semibold text-cyan uppercase tracking-[0.2em] flex items-center gap-2">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           历史对话
@@ -367,78 +426,54 @@ const ChatPage: React.FC = () => {
         ) : (
           <div className="space-y-2 p-3">
             {sessions.map((s) => (
-              <div
-                key={s.session_id}
-                role="button"
-                tabIndex={0}
-                onClick={() => handleSwitchSession(s.session_id)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    handleSwitchSession(s.session_id);
-                  }
-                }}
-                className={`group relative flex w-full cursor-pointer items-start gap-3 overflow-hidden rounded-xl border p-2.5 transition-all duration-200 ${
-                  s.session_id === sessionId
-                    ? 'border-cyan bg-cyan/10 shadow-[0_0_15px_rgba(0,212,255,0.1)]'
-                    : 'border-white/5 bg-white/2 hover:border-white/10 hover:bg-white/5'
-                }`}
-                aria-label={`切换到对话 ${s.title}`}
-              >
-                {/* 装饰条 */}
-                <div
-                  className={`h-10 w-1 rounded-full flex-shrink-0 transition-colors ${
-                    s.session_id === sessionId ? 'bg-cyan' : 'bg-white/10'
-                  }`}
-                />
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <span className={`block truncate text-sm font-semibold tracking-tight transition-colors ${
-                        s.session_id === sessionId ? 'text-foreground' : 'text-secondary-text group-hover:text-foreground'
-                      }`}>
-                        {s.title}
+              <div key={s.session_id} className="session-item-row">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchSession(s.session_id)}
+                  className={`session-item ${s.session_id === sessionId ? 'active' : ''}`}
+                  aria-label={`切换到对话 ${s.title}`}
+                >
+                  <div className="indicator" />
+                  <div className="content">
+                    <span className="title">{s.title}</span>
+                    <div className="mt-0.5 flex items-center gap-2">
+                      <span className="meta">
+                        {s.message_count} 条对话
                       </span>
+                      {s.last_active && (
+                        <>
+                          <span className="separator" />
+                          <span className="meta">
+                            {new Date(s.last_active).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
+                          </span>
+                        </>
+                      )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteConfirmId(s.session_id);
-                      }}
-                      className="flex-shrink-0 rounded p-1 text-muted-text opacity-0 transition-all hover:bg-white/10 hover:text-rose-400 group-hover:opacity-100"
-                      title="删除"
-                    >
-                      <svg
-                        className="w-3.5 h-3.5"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                        />
-                      </svg>
-                    </button>
                   </div>
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="text-[11px] text-muted-text">
-                      {s.message_count} 条对话
-                    </span>
-                    {s.last_active && (
-                      <>
-                        <span className="h-1 w-1 rounded-full bg-white/10" />
-                        <span className="text-[11px] text-muted-text">
-                          {new Date(s.last_active).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
-                        </span>
-                      </>
-                    )}
-                  </div>
-                </div>
+                </button>
+                <button
+                  type="button"
+                  className="delete-btn"
+                  onClick={() => {
+                    setDeleteConfirmId(s.session_id);
+                  }}
+                  aria-label={`删除对话 ${s.title}`}
+                  title="删除"
+                >
+                  <svg
+                    className="w-3.5 h-3.5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
+                  </svg>
+                </button>
               </div>
             ))}
           </div>
@@ -488,54 +523,15 @@ const ChatPage: React.FC = () => {
       {/* Main chat area */}
       <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
         <header className="mb-4 flex-shrink-0">
-          <h1 className="text-2xl font-bold text-foreground mb-2 flex items-center gap-2">
-            <button
-              onClick={() => setSidebarOpen(true)}
-              className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-hover transition-colors text-secondary-text hover:text-foreground"
-              title="历史对话"
-            >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 6h16M4 12h16M4 18h16"
-                />
-              </svg>
-            </button>
-            <svg
-              className="w-6 h-6 text-cyan"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
-              />
-            </svg>
-            问股
-          </h1>
-          <p className="text-secondary-text text-sm">
-            向 AI 询问个股分析，获取基于策略的交易建议与实时决策报告。
-          </p>
-          {messages.length > 0 && (
-            <div className="mt-2 flex gap-2 items-center">
+          <div className="flex items-center justify-between gap-4 mb-2">
+            <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
               <button
-                type="button"
-                onClick={() => downloadSession(messages)}
-                className="px-3 py-1.5 rounded-lg text-sm text-secondary-text hover:text-foreground hover:bg-hover border border-border/70 transition-colors flex items-center gap-1.5"
-                title="导出会话为 Markdown 文件"
+                onClick={() => setSidebarOpen(true)}
+                className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-hover transition-colors text-secondary-text hover:text-foreground"
+                title="历史对话"
               >
                 <svg
-                  className="w-4 h-4"
+                  className="w-5 h-5"
                   fill="none"
                   stroke="currentColor"
                   viewBox="0 0 24 24"
@@ -544,58 +540,33 @@ const ChatPage: React.FC = () => {
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth={2}
-                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                    d="M4 6h16M4 12h16M4 18h16"
                   />
                 </svg>
-                导出会话
               </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  if (sending) return;
-                  setSending(true);
-                  setSendToast(null);
-                  try {
-                    const content = formatSessionAsMarkdown(messages);
-                    await agentApi.sendChat(content);
-                    setSendToast({ type: 'success', message: '已发送到通知渠道' });
-                    setTimeout(() => setSendToast(null), 3000);
-                  } catch (err) {
-                    const parsed = getParsedApiError(err);
-                    setSendToast({
-                      type: 'error',
-                      message: parsed.message || '发送失败',
-                    });
-                    setTimeout(() => setSendToast(null), 5000);
-                  } finally {
-                    setSending(false);
-                  }
-                }}
-                disabled={sending}
-                className="px-3 py-1.5 rounded-lg text-sm text-secondary-text hover:text-foreground hover:bg-hover border border-border/70 transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="发送到已配置的通知机器人/邮箱"
+              <svg
+                className="w-6 h-6 text-cyan"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
               >
-                {sending ? (
-                  <svg
-                    className="w-4 h-4 animate-spin"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                    />
-                  </svg>
-                ) : (
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
+                />
+              </svg>
+              问股
+            </h1>
+            {messages.length > 0 && (
+              <div className="flex gap-2 items-center flex-shrink-0">
+                <Button
+                  variant="action-primary"
+                  size="sm"
+                  onClick={() => downloadSession(messages)}
+                  title="导出会话为 Markdown 文件"
+                >
                   <svg
                     className="w-4 h-4"
                     fill="none"
@@ -606,21 +577,87 @@ const ChatPage: React.FC = () => {
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       strokeWidth={2}
-                      d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                      d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
                     />
                   </svg>
-                )}
-                发送
-              </button>
-              {sendToast && (
-                <span
-                  className={`text-sm ${sendToast.type === 'success' ? 'text-green-400' : 'text-red-400'}`}
+                  导出会话
+                </Button>
+                <Button
+                  variant="action-primary"
+                  size="sm"
+                  disabled={sending}
+                  onClick={async () => {
+                    if (sending) return;
+                    setSending(true);
+                    setSendToast(null);
+                    try {
+                      const content = formatSessionAsMarkdown(messages);
+                      await agentApi.sendChat(content);
+                      setSendToast({ type: 'success', message: '已发送到通知渠道' });
+                      setTimeout(() => setSendToast(null), 3000);
+                    } catch (err) {
+                      const parsed = getParsedApiError(err);
+                      setSendToast({
+                        type: 'error',
+                        message: parsed.message || '发送失败',
+                      });
+                      setTimeout(() => setSendToast(null), 5000);
+                    } finally {
+                      setSending(false);
+                    }
+                  }}
+                  title="发送到已配置的通知机器人/邮箱"
                 >
-                  {sendToast.message}
-                </span>
-              )}
-            </div>
-          )}
+                  {sending ? (
+                    <svg
+                      className="w-4 h-4 animate-spin"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                      />
+                    </svg>
+                  ) : (
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                      />
+                    </svg>
+                  )}
+                  发送
+                </Button>
+                {sendToast && (
+                  <span
+                    className={`text-sm ${sendToast.type === 'success' ? 'text-green-400' : 'text-red-400'}`}
+                  >
+                    {sendToast.message}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+          <p className="text-secondary-text text-sm">
+            向 AI 询问个股分析，获取基于技能视角的交易建议与实时决策报告。
+          </p>
         </header>
 
         <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden border border-white/6 bg-card/78 glass-card">
@@ -657,11 +694,11 @@ const ChatPage: React.FC = () => {
                   将调用实时数据工具为您生成决策报告。
                 </p>
                 <div className="flex flex-wrap gap-2 justify-center max-w-lg">
-                  {QUICK_QUESTIONS.map((q, i) => (
+                  {quickQuestions.map((q, i) => (
                     <button
                       key={i}
                       onClick={() => handleQuickQuestion(q)}
-                      className="px-3 py-1.5 rounded-full bg-card/70 border border-border/70 text-sm text-secondary-text hover:text-foreground hover:border-cyan/40 hover:bg-cyan/5 transition-all"
+                      className="quick-question-btn"
                     >
                       {q.label}
                     </button>
@@ -675,22 +712,20 @@ const ChatPage: React.FC = () => {
                   className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
                 >
                   <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold ${
-                      msg.role === 'user'
-                        ? 'bg-cyan text-black'
-                        : 'bg-elevated text-foreground'
-                    }`}
+                    className={cn(
+                      'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-bold shadow-sm transition-all',
+                      msg.role === 'user' ? 'chat-avatar-user' : 'chat-avatar-ai'
+                    )}
                   >
                     {msg.role === 'user' ? 'U' : 'AI'}
                   </div>
                   <div
-                    className={`min-w-0 w-fit max-w-[min(100%,48rem)] overflow-hidden rounded-2xl px-5 py-3.5 ${
-                      msg.role === 'user'
-                        ? 'bg-cyan/10 text-foreground border border-cyan/20 rounded-tr-sm'
-                        : 'bg-card/72 text-secondary-text border border-white/30 rounded-tl-sm'
-                    }`}
+                    className={cn(
+                      'min-w-0 w-fit max-w-[min(100%,48rem)] overflow-hidden px-5 py-3.5 transition-colors',
+                      msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai'
+                    )}
                   >
-                    {msg.role === 'assistant' && msg.strategyName && (
+                    {msg.role === 'assistant' && msg.skillName && (
                       <div className="mb-2">
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan/10 border border-cyan/20 text-xs text-cyan">
                           <svg
@@ -706,7 +741,7 @@ const ChatPage: React.FC = () => {
                               d="M13 10V3L4 14h7v7l9-11h-7z"
                             />
                           </svg>
-                          {msg.strategyName}
+                          {msg.skillName}
                         </span>
                       </div>
                     )}
@@ -716,28 +751,19 @@ const ChatPage: React.FC = () => {
                       msg.thinkingSteps &&
                       renderThinkingDetails(msg.thinkingSteps)}
                     {msg.role === 'assistant' ? (
-                      <div
-                        className="prose prose-invert prose-sm max-w-none
-                      prose-headings:text-foreground prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1.5
-                      prose-h1:text-lg prose-h2:text-base prose-h3:text-sm
-                      prose-p:mb-2 prose-p:last:mb-0 prose-p:leading-7 prose-p:break-words
-                      prose-strong:text-foreground prose-strong:font-semibold
-                      prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-li:break-words
-                      prose-code:text-cyan prose-code:bg-card/70 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:break-all
-                      prose-pre:max-w-full prose-pre:overflow-x-auto prose-pre:bg-black/30 prose-pre:border prose-pre:border-border/70 prose-pre:rounded-lg prose-pre:p-3
-                      prose-table:w-full prose-table:text-sm
-                      prose-th:text-foreground prose-th:font-medium prose-th:border-border prose-th:px-3 prose-th:py-1.5 prose-th:bg-card/70
-                      prose-td:border-border/70 prose-td:px-3 prose-td:py-1.5
-                      prose-hr:border-border/70 prose-hr:my-3
-                      prose-a:text-cyan prose-a:no-underline hover:prose-a:underline
-                      prose-blockquote:border-cyan/30 prose-blockquote:text-secondary-text
-                      [&_table]:block [&_table]:overflow-x-auto [&_table]:whitespace-nowrap
-                      [&_img]:max-w-full
-                    "
-                      >
-                        <Markdown remarkPlugins={[remarkGfm]}>
-                          {msg.content}
-                        </Markdown>
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => copyMessageToClipboard(msg.id, msg.content)}
+                          className="chat-copy-btn absolute right-0 z-10"
+                        >
+                          {copiedMessages.has(msg.id) ? text.copied : text.copy}
+                        </button>
+                        <div className="chat-prose">
+                          <Markdown remarkPlugins={[remarkGfm]}>
+                            {msg.content}
+                          </Markdown>
+                        </div>
                       </div>
                     ) : (
                       msg.content
@@ -783,7 +809,7 @@ const ChatPage: React.FC = () => {
             {chatError ? (
               <ApiErrorAlert error={chatError} className="mb-3" />
             ) : null}
-            {strategies.length > 0 && (
+            {skills.length > 0 && (
               <div className="mb-3 flex flex-wrap gap-x-5 gap-y-2 items-start">
                 <span className="text-xs text-muted-text font-medium uppercase tracking-wider flex-shrink-0 mt-1">
                   策略
@@ -791,41 +817,41 @@ const ChatPage: React.FC = () => {
                 <label className="flex items-center gap-1.5 text-sm cursor-pointer group mt-0.5">
                   <input
                     type="radio"
-                    name="strategy"
+                    name="skill"
                     value=""
-                    checked={selectedStrategy === ''}
-                    onChange={() => setSelectedStrategy('')}
+                    checked={selectedSkill === ''}
+                    onChange={() => setSelectedSkill('')}
                     className="w-3.5 h-3.5 accent-cyan"
                   />
                   <span
-                    className={`transition-colors text-sm ${selectedStrategy === '' ? 'text-foreground font-medium' : 'text-secondary-text group-hover:text-foreground'}`}
+                    className={`transition-colors text-sm ${selectedSkill === '' ? 'text-foreground font-medium' : 'text-secondary-text group-hover:text-foreground'}`}
                   >
                     通用分析
                   </span>
                 </label>
-                {strategies.map((s) => (
+                {skills.map((s) => (
                   <label
                     key={s.id}
                     className="flex items-center gap-1.5 cursor-pointer group relative mt-0.5"
-                    onMouseEnter={() => setShowStrategyDesc(s.id)}
-                    onMouseLeave={() => setShowStrategyDesc(null)}
+                    onMouseEnter={() => setShowSkillDesc(s.id)}
+                    onMouseLeave={() => setShowSkillDesc(null)}
                   >
                     <input
                       type="radio"
-                      name="strategy"
+                      name="skill"
                       value={s.id}
-                      checked={selectedStrategy === s.id}
-                      onChange={() => setSelectedStrategy(s.id)}
+                      checked={selectedSkill === s.id}
+                      onChange={() => setSelectedSkill(s.id)}
                       className="w-3.5 h-3.5 accent-cyan"
                     />
                     <span
-                      className={`transition-colors text-sm ${selectedStrategy === s.id ? 'text-foreground font-medium' : 'text-secondary-text group-hover:text-foreground'}`}
+                      className={`transition-colors text-sm ${selectedSkill === s.id ? 'text-foreground font-medium' : 'text-secondary-text group-hover:text-foreground'}`}
                     >
                       {s.name}
                     </span>
-                    {showStrategyDesc === s.id && s.description && (
-                      <div className="absolute left-0 bottom-full mb-2 z-50 w-64 p-2.5 rounded-lg bg-elevated border border-border/70 shadow-xl text-xs text-secondary-text leading-relaxed pointer-events-none animate-fade-in">
-                        <p className="font-medium text-foreground mb-1">{s.name}</p>
+                    {showSkillDesc === s.id && s.description && (
+                      <div className="skill-desc-tooltip">
+                        <p className="skill-title">{s.name}</p>
                         <p>{s.description}</p>
                       </div>
                     )}
@@ -855,7 +881,7 @@ const ChatPage: React.FC = () => {
                 onClick={() => handleSend()}
                 disabled={!input.trim() || loading}
                 isLoading={loading}
-                className="h-[44px] px-6 flex-shrink-0"
+                className="btn-primary flex-shrink-0"
               >
                 发送
               </Button>

@@ -507,6 +507,15 @@ def start_bot_stream_clients(config: Config) -> None:
             logger.error(f"[Main] Failed to start Feishu Stream client: {exc}")
 
 
+def _resolve_scheduled_stock_codes(stock_codes: Optional[List[str]]) -> Optional[List[str]]:
+    """Scheduled runs should always read the latest persisted watchlist."""
+    if stock_codes is not None:
+        logger.warning(
+            "定时模式下检测到 --stocks 参数；计划执行将忽略启动时股票快照，并在每次运行前重新读取最新的 STOCK_LIST。"
+        )
+    return None
+
+
 def main() -> int:
     """
     主入口函数
@@ -678,9 +687,10 @@ def main() -> int:
             logger.info(f"启动时立即执行: {should_run_immediately}")
 
             from src.scheduler import run_with_schedule
+            scheduled_stock_codes = _resolve_scheduled_stock_codes(stock_codes)
 
             def scheduled_task():
-                run_full_analysis(config, args, stock_codes)
+                run_full_analysis(config, args, scheduled_stock_codes)
 
             run_with_schedule(
                 task=scheduled_task,

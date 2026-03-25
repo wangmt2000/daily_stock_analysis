@@ -58,7 +58,7 @@ describe('agentChatStore.startStream', () => {
 
     await useAgentChatStore
       .getState()
-      .startStream({ message: '分析茅台', session_id: 'session-test' }, { strategyName: '趋势策略' });
+      .startStream({ message: '分析茅台', session_id: 'session-test' }, { skillName: '趋势技能' });
 
     const state = useAgentChatStore.getState();
     expect(state.loading).toBe(false);
@@ -67,12 +67,12 @@ describe('agentChatStore.startStream', () => {
     expect(state.messages[0]).toMatchObject({
       role: 'user',
       content: '分析茅台',
-      strategyName: '趋势策略',
+      skillName: '趋势技能',
     });
     expect(state.messages[1]).toMatchObject({
       role: 'assistant',
       content: '最终分析结果',
-      strategyName: '趋势策略',
+      skillName: '趋势技能',
     });
     expect(state.messages[1].thinkingSteps).toHaveLength(2);
     expect(state.progressSteps).toEqual([]);

@@ -269,7 +269,14 @@ class TavilySearchProvider(BaseSearchProvider):
     def __init__(self, api_keys: List[str]):
         super().__init__(api_keys, "Tavily")
     
-    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+        topic: Optional[str] = None,
+    ) -> SearchResponse:
         """执行 Tavily 搜索"""
         try:
             from tavily import TavilyClient
@@ -286,13 +293,19 @@ class TavilySearchProvider(BaseSearchProvider):
             client = TavilyClient(api_key=api_key)
             
             # 执行搜索（优化：使用advanced深度、限制最近几天）
+            search_kwargs: Dict[str, Any] = {
+                "query": query,
+                "search_depth": "advanced",  # advanced 获取更多结果
+                "max_results": max_results,
+                "include_answer": False,
+                "include_raw_content": False,
+                "days": days,  # 搜索最近天数的内容
+            }
+            if topic is not None:
+                search_kwargs["topic"] = topic
+
             response = client.search(
-                query=query,
-                search_depth="advanced",  # advanced 获取更多结果
-                max_results=max_results,
-                include_answer=False,
-                include_raw_content=False,
-                days=days,  # 搜索最近天数的内容
+                **search_kwargs,
             )
             
             # 记录原始响应到日志
@@ -307,7 +320,7 @@ class TavilySearchProvider(BaseSearchProvider):
                     snippet=item.get('content', '')[:500],  # 截取前500字
                     url=item.get('url', ''),
                     source=self._extract_domain(item.get('url', '')),
-                    published_date=item.get('published_date'),
+                    published_date=item.get('published_date') or item.get('publishedDate'),
                 ))
             
             return SearchResponse(
@@ -329,6 +342,53 @@ class TavilySearchProvider(BaseSearchProvider):
                 provider=self.name,
                 success=False,
                 error_message=error_msg
+            )
+
+    def search(
+        self,
+        query: str,
+        max_results: int = 5,
+        days: int = 7,
+        topic: Optional[str] = None,
+    ) -> SearchResponse:
+        """执行 Tavily 搜索，可按调用方选择是否启用新闻 topic。"""
+        if topic is None:
+            return super().search(query, max_results=max_results, days=days)
+
+        api_key = self._get_next_key()
+        if not api_key:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message=f"{self._name} 未配置 API Key"
+            )
+
+        start_time = time.time()
+        try:
+            response = self._do_search(query, api_key, max_results, days=days, topic=topic)
+            response.search_time = time.time() - start_time
+
+            if response.success:
+                self._record_success(api_key)
+                logger.info(f"[{self._name}] 搜索 '{query}' 成功，返回 {len(response.results)} 条结果，耗时 {response.search_time:.2f}s")
+            else:
+                self._record_error(api_key)
+
+            return response
+
+        except Exception as e:
+            self._record_error(api_key)
+            elapsed = time.time() - start_time
+            logger.error(f"[{self._name}] 搜索 '{query}' 失败: {e}")
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message=str(e),
+                search_time=elapsed
             )
     
     @staticmethod
@@ -1975,6 +2035,40 @@ class SearchService:
             error_message=response.error_message,
             search_time=response.search_time,
         )
+
+    def _normalize_and_limit_response(
+        self,
+        response: SearchResponse,
+        *,
+        max_results: int,
+    ) -> SearchResponse:
+        """Normalize parseable dates without enforcing freshness filtering."""
+        if not response.success or not response.results:
+            return response
+
+        normalized_results: List[SearchResult] = []
+        for item in response.results[:max_results]:
+            normalized_date = self._normalize_news_publish_date(item.published_date)
+            normalized_results.append(
+                SearchResult(
+                    title=item.title,
+                    snippet=item.snippet,
+                    url=item.url,
+                    source=item.source,
+                    published_date=(
+                        normalized_date.isoformat() if normalized_date is not None else item.published_date
+                    ),
+                )
+            )
+
+        return SearchResponse(
+            query=response.query,
+            results=normalized_results,
+            provider=response.provider,
+            success=response.success,
+            error_message=response.error_message,
+            search_time=response.search_time,
+        )
     
     def search_stock_news(
         self,
@@ -2039,8 +2133,12 @@ class SearchService:
         for provider in self._providers:
             if not provider.is_available:
                 continue
-            
-            response = provider.search(query, provider_max_results, days=search_days)
+
+            search_kwargs: Dict[str, Any] = {}
+            if isinstance(provider, TavilySearchProvider):
+                search_kwargs["topic"] = "news"
+
+            response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
             filtered_response = self._filter_news_response(
                 response,
                 search_days=search_days,
@@ -2163,37 +2261,97 @@ class SearchService:
 
         if is_foreign:
             search_dimensions = [
-                {'name': 'latest_news', 'query': f"{stock_name} {stock_code} latest news events", 'desc': '最新消息'},
-                {'name': 'market_analysis', 'query': f"{stock_name} analyst rating target price report", 'desc': '机构分析'},
-                {'name': 'risk_check', 'query': (
-                    f"{stock_name} {stock_code} index performance outlook tracking error"
-                    if is_index_etf else f"{stock_name} risk insider selling lawsuit litigation"
-                ), 'desc': '风险排查'},
-                {'name': 'earnings', 'query': (
-                    f"{stock_name} {stock_code} index performance composition outlook"
-                    if is_index_etf else f"{stock_name} earnings revenue profit growth forecast"
-                ), 'desc': '业绩预期'},
-                {'name': 'industry', 'query': (
-                    f"{stock_name} {stock_code} index sector allocation holdings"
-                    if is_index_etf else f"{stock_name} industry competitors market share outlook"
-                ), 'desc': '行业分析'},
+                {
+                    'name': 'latest_news',
+                    'query': f"{stock_name} {stock_code} latest news events",
+                    'desc': '最新消息',
+                    'tavily_topic': 'news',
+                    'strict_freshness': True,
+                },
+                {
+                    'name': 'market_analysis',
+                    'query': f"{stock_name} analyst rating target price report",
+                    'desc': '机构分析',
+                    'tavily_topic': None,
+                    'strict_freshness': False,
+                },
+                {
+                    'name': 'risk_check',
+                    'query': (
+                        f"{stock_name} {stock_code} index performance outlook tracking error"
+                        if is_index_etf else f"{stock_name} risk insider selling lawsuit litigation"
+                    ),
+                    'desc': '风险排查',
+                    'tavily_topic': None if is_index_etf else 'news',
+                    'strict_freshness': not is_index_etf,
+                },
+                {
+                    'name': 'earnings',
+                    'query': (
+                        f"{stock_name} {stock_code} index performance composition outlook"
+                        if is_index_etf else f"{stock_name} earnings revenue profit growth forecast"
+                    ),
+                    'desc': '业绩预期',
+                    'tavily_topic': None,
+                    'strict_freshness': False,
+                },
+                {
+                    'name': 'industry',
+                    'query': (
+                        f"{stock_name} {stock_code} index sector allocation holdings"
+                        if is_index_etf else f"{stock_name} industry competitors market share outlook"
+                    ),
+                    'desc': '行业分析',
+                    'tavily_topic': None,
+                    'strict_freshness': False,
+                },
             ]
         else:
             search_dimensions = [
-                {'name': 'latest_news', 'query': f"{stock_name} {stock_code} 最新 新闻 重大 事件", 'desc': '最新消息'},
-                {'name': 'market_analysis', 'query': f"{stock_name} 研报 目标价 评级 深度分析", 'desc': '机构分析'},
-                {'name': 'risk_check', 'query': (
-                    f"{stock_name} 指数走势 跟踪误差 净值 表现"
-                    if is_index_etf else f"{stock_name} 减持 处罚 违规 诉讼 利空 风险"
-                ), 'desc': '风险排查'},
-                {'name': 'earnings', 'query': (
-                    f"{stock_name} 指数成分 净值 跟踪表现"
-                    if is_index_etf else f"{stock_name} 业绩预告 财报 营收 净利润 同比增长"
-                ), 'desc': '业绩预期'},
-                {'name': 'industry', 'query': (
-                    f"{stock_name} 指数成分股 行业配置 权重"
-                    if is_index_etf else f"{stock_name} 所在行业 竞争对手 市场份额 行业前景"
-                ), 'desc': '行业分析'},
+                {
+                    'name': 'latest_news',
+                    'query': f"{stock_name} {stock_code} 最新 新闻 重大 事件",
+                    'desc': '最新消息',
+                    'tavily_topic': 'news',
+                    'strict_freshness': True,
+                },
+                {
+                    'name': 'market_analysis',
+                    'query': f"{stock_name} 研报 目标价 评级 深度分析",
+                    'desc': '机构分析',
+                    'tavily_topic': None,
+                    'strict_freshness': False,
+                },
+                {
+                    'name': 'risk_check',
+                    'query': (
+                        f"{stock_name} 指数走势 跟踪误差 净值 表现"
+                        if is_index_etf else f"{stock_name} 减持 处罚 违规 诉讼 利空 风险"
+                    ),
+                    'desc': '风险排查',
+                    'tavily_topic': None if is_index_etf else 'news',
+                    'strict_freshness': not is_index_etf,
+                },
+                {
+                    'name': 'earnings',
+                    'query': (
+                        f"{stock_name} 指数成分 净值 跟踪表现"
+                        if is_index_etf else f"{stock_name} 业绩预告 财报 营收 净利润 同比增长"
+                    ),
+                    'desc': '业绩预期',
+                    'tavily_topic': None,
+                    'strict_freshness': False,
+                },
+                {
+                    'name': 'industry',
+                    'query': (
+                        f"{stock_name} 指数成分股 行业配置 权重"
+                        if is_index_etf else f"{stock_name} 所在行业 竞争对手 市场份额 行业前景"
+                    ),
+                    'desc': '行业分析',
+                    'tavily_topic': None,
+                    'strict_freshness': False,
+                },
             ]
         
         search_days = self._effective_news_window_days()
@@ -2230,18 +2388,32 @@ class SearchService:
             provider_index += 1
             
             logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
-            
-            response = provider.search(
-                dim['query'],
-                max_results=provider_max_results,
-                days=search_days,
-            )
-            filtered_response = self._filter_news_response(
-                response,
-                search_days=search_days,
-                max_results=target_per_dimension,
-                log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
-            )
+
+            if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
+                response = provider.search(
+                    dim['query'],
+                    max_results=provider_max_results,
+                    days=search_days,
+                    topic=dim['tavily_topic'],
+                )
+            else:
+                response = provider.search(
+                    dim['query'],
+                    max_results=provider_max_results,
+                    days=search_days,
+                )
+            if dim['strict_freshness']:
+                filtered_response = self._filter_news_response(
+                    response,
+                    search_days=search_days,
+                    max_results=target_per_dimension,
+                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                )
+            else:
+                filtered_response = self._normalize_and_limit_response(
+                    response,
+                    max_results=target_per_dimension,
+                )
             results[dim['name']] = filtered_response
             search_count += 1
             

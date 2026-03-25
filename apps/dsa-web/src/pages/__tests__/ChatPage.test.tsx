@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router-dom';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createParsedApiError } from '../../api/error';
 import { historyApi } from '../../api/history';
+import type { Message } from '../../stores/agentChatStore';
 import ChatPage from '../ChatPage';
 
 function createDeferred<T>() {
@@ -14,6 +16,20 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+const {
+  mockGetSkills,
+  mockDeleteChatSession,
+  mockSendChat,
+  mockDownloadSession,
+  mockFormatSessionAsMarkdown,
+} = vi.hoisted(() => ({
+  mockGetSkills: vi.fn(),
+  mockDeleteChatSession: vi.fn(),
+  mockSendChat: vi.fn(),
+  mockDownloadSession: vi.fn(),
+  mockFormatSessionAsMarkdown: vi.fn(),
+}));
+
 const mockLoadSessions = vi.fn();
 const mockLoadInitialSession = vi.fn();
 const mockSwitchSession = vi.fn();
@@ -22,7 +38,7 @@ const mockClearCompletionBadge = vi.fn();
 const mockStartNewChat = vi.fn();
 
 const mockStoreState = {
-  messages: [],
+  messages: [] as Message[],
   loading: false,
   progressSteps: [],
   sessionId: 'session-1',
@@ -46,14 +62,15 @@ const mockStoreState = {
 
 vi.mock('../../api/agent', () => ({
   agentApi: {
-    getStrategies: vi.fn().mockResolvedValue({
-      strategies: [
-        { id: 'bull_trend', name: '趋势分析', description: '测试策略' },
-      ],
-    }),
-    deleteChatSession: vi.fn().mockResolvedValue(undefined),
-    sendChat: vi.fn().mockResolvedValue({ success: true }),
+    getSkills: mockGetSkills,
+    deleteChatSession: mockDeleteChatSession,
+    sendChat: mockSendChat,
   },
+}));
+
+vi.mock('../../utils/chatExport', () => ({
+  downloadSession: mockDownloadSession,
+  formatSessionAsMarkdown: mockFormatSessionAsMarkdown,
 }));
 
 vi.mock('../../api/history', () => ({
@@ -107,6 +124,31 @@ beforeAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockStoreState.messages = [];
+  mockStoreState.loading = false;
+  mockStoreState.progressSteps = [];
+  mockStoreState.chatError = null;
+  mockStoreState.sessionsLoading = false;
+  mockStoreState.sessionId = 'session-1';
+  mockStoreState.sessions = [
+    {
+      session_id: 'session-1',
+      title: '请简要分析 600519',
+      message_count: 2,
+      created_at: '2026-03-15T09:00:00Z',
+      last_active: '2026-03-15T09:05:00Z',
+    },
+  ];
+  mockGetSkills.mockResolvedValue({
+    skills: [
+      { id: 'bull_trend', name: '趋势分析', description: '测试技能' },
+    ],
+    default_skill_id: 'bull_trend',
+  });
+  mockDeleteChatSession.mockResolvedValue(undefined);
+  mockSendChat.mockResolvedValue({ success: true });
+  mockDownloadSession.mockImplementation(() => {});
+  mockFormatSessionAsMarkdown.mockReturnValue('# exported session');
 });
 
 describe('ChatPage', () => {
@@ -139,6 +181,133 @@ describe('ChatPage', () => {
     expect(mockSwitchSession).toHaveBeenCalledWith('session-1');
   });
 
+  it('renders a separate delete button for each session and opens confirmation without switching', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    const deleteButton = await screen.findByRole('button', {
+      name: /删除对话 请简要分析 600519/,
+    });
+
+    fireEvent.click(deleteButton);
+
+    expect(mockSwitchSession).not.toHaveBeenCalled();
+    expect(await screen.findByText('删除后，该对话将不可恢复，确认删除吗？')).toBeInTheDocument();
+  });
+
+  it('hides header actions when there are no messages', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByRole('heading', { name: '问股' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '导出会话' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('发送到已配置的通知机器人/邮箱')).not.toBeInTheDocument();
+    expect(screen.getByTitle('历史对话')).toBeInTheDocument();
+  });
+
+  it('exports the current session from the header action', async () => {
+    mockStoreState.messages = [
+      { id: 'user-1', role: 'user', content: '请分析 600519' },
+      { id: 'assistant-1', role: 'assistant', content: '趋势偏强', skillName: '趋势分析' },
+    ];
+
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '导出会话' }));
+
+    expect(mockDownloadSession).toHaveBeenCalledWith(mockStoreState.messages);
+    expect(mockFormatSessionAsMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('sends exported markdown to notification channel and shows success feedback', async () => {
+    mockStoreState.messages = [
+      { id: 'user-1', role: 'user', content: '请分析 600519' },
+      { id: 'assistant-1', role: 'assistant', content: '趋势偏强', skillName: '趋势分析' },
+    ];
+    mockFormatSessionAsMarkdown.mockReturnValue('# exported markdown');
+
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(await screen.findByTitle('发送到已配置的通知机器人/邮箱'));
+
+    await waitFor(() => {
+      expect(mockFormatSessionAsMarkdown).toHaveBeenCalledWith(mockStoreState.messages);
+      expect(mockSendChat).toHaveBeenCalledWith('# exported markdown');
+    });
+
+    expect(await screen.findByText('已发送到通知渠道')).toBeInTheDocument();
+  });
+
+  it('shows parsed error feedback when notification delivery fails', async () => {
+    mockStoreState.messages = [
+      { id: 'user-1', role: 'user', content: '请分析 AAPL' },
+      { id: 'assistant-1', role: 'assistant', content: '短线震荡', skillName: '趋势分析' },
+    ];
+    mockSendChat.mockRejectedValue(
+      createParsedApiError({
+        title: '发送失败',
+        message: '通知渠道不可用',
+        category: 'unknown',
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(await screen.findByTitle('发送到已配置的通知机器人/邮箱'));
+
+    expect(await screen.findByText('通知渠道不可用')).toBeInTheDocument();
+  });
+
+  it('prevents duplicate notification sends while the request is in flight', async () => {
+    mockStoreState.messages = [
+      { id: 'user-1', role: 'user', content: '请分析 TSLA' },
+      { id: 'assistant-1', role: 'assistant', content: '波动较大', skillName: '趋势分析' },
+    ];
+    const deferred = createDeferred<{ success: boolean }>();
+    mockSendChat.mockImplementation(() => deferred.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    const sendButton = await screen.findByTitle('发送到已配置的通知机器人/邮箱');
+    fireEvent.click(sendButton);
+
+    await waitFor(() => {
+      expect(mockSendChat).toHaveBeenCalledTimes(1);
+      expect(sendButton).toBeDisabled();
+    });
+
+    fireEvent.click(sendButton);
+    expect(mockSendChat).toHaveBeenCalledTimes(1);
+
+    deferred.resolve({ success: true });
+
+    await waitFor(() => {
+      expect(sendButton).not.toBeDisabled();
+    });
+  });
+
   it('allows sending with base follow-up context before report hydration completes', async () => {
     const deferred = createDeferred<Awaited<ReturnType<typeof historyApi.getDetail>>>();
 
@@ -168,7 +337,7 @@ describe('ChatPage', () => {
           },
         }),
         expect.objectContaining({
-          strategyName: '趋势分析',
+          skillName: '趋势分析',
         }),
       );
     });
@@ -211,7 +380,7 @@ describe('ChatPage', () => {
           context: undefined,
         }),
         expect.objectContaining({
-          strategyName: '趋势分析',
+          skillName: '趋势分析',
         }),
       );
     });
@@ -269,7 +438,7 @@ describe('ChatPage', () => {
           }),
         }),
         expect.objectContaining({
-          strategyName: '趋势分析',
+          skillName: '趋势分析',
         }),
       );
     });
@@ -296,10 +465,22 @@ describe('ChatPage', () => {
           },
         }),
         expect.objectContaining({
-          strategyName: '趋势分析',
+          skillName: '趋势分析',
         }),
       );
     });
+    expect(historyApi.getDetail).not.toHaveBeenCalled();
+  });
+
+  it('ignores malformed follow-up query params', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat?stock=%3Cscript%3E&name=Bad%0AName&recordId=abc']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByRole('heading', { name: '问股' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/分析 600519/)).toHaveValue('');
     expect(historyApi.getDetail).not.toHaveBeenCalled();
   });
 
@@ -392,7 +573,7 @@ describe('ChatPage', () => {
           }),
         }),
         expect.objectContaining({
-          strategyName: '趋势分析',
+          skillName: '趋势分析',
         }),
       );
     });

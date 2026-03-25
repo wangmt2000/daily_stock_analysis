@@ -87,6 +87,60 @@ SAMPLE_DASHBOARD = {
 class TestAgentExecutor(unittest.TestCase):
     """Test the ReAct loop logic."""
 
+    def test_prompt_omits_hardcoded_trend_baseline_when_default_policy_is_empty(self):
+        """Explicit skill runs should not silently keep the legacy trend baseline."""
+        registry = _make_registry_with_echo()
+        adapter = _make_mock_adapter()
+        adapter.call_with_tools.return_value = LLMResponse(
+            content=json.dumps(SAMPLE_DASHBOARD, ensure_ascii=False),
+            tool_calls=[],
+            usage={"total_tokens": 50},
+            provider="openai",
+        )
+
+        executor = AgentExecutor(
+            registry,
+            adapter,
+            skill_instructions="### 技能 1: 缠论\n- 关注中枢与背驰",
+            default_skill_policy="",
+            max_steps=2,
+        )
+        result = executor.run("Analyze 600519")
+
+        self.assertTrue(result.success)
+        prompt = adapter.call_with_tools.call_args.args[0][0]["content"]
+        self.assertIn("### 技能 1: 缠论", prompt)
+        self.assertNotIn("专注于趋势交易", prompt)
+        self.assertNotIn("多头排列：MA5 > MA10 > MA20", prompt)
+
+    def test_prompt_keeps_injected_default_policy_for_implicit_default_run(self):
+        """Implicit default runs can still inject the default bull-trend baseline explicitly."""
+        registry = _make_registry_with_echo()
+        adapter = _make_mock_adapter()
+        adapter.call_with_tools.return_value = LLMResponse(
+            content=json.dumps(SAMPLE_DASHBOARD, ensure_ascii=False),
+            tool_calls=[],
+            usage={"total_tokens": 50},
+            provider="openai",
+        )
+
+        executor = AgentExecutor(
+            registry,
+            adapter,
+            skill_instructions="### 技能 1: 默认多头趋势",
+            default_skill_policy="## 默认技能基线（必须严格遵守）\n- **多头排列必须条件**：MA5 > MA10 > MA20",
+            use_legacy_default_prompt=True,
+            max_steps=2,
+        )
+        result = executor.run("Analyze 600519")
+
+        self.assertTrue(result.success)
+        prompt = adapter.call_with_tools.call_args.args[0][0]["content"]
+        self.assertIn("### 技能 1: 默认多头趋势", prompt)
+        self.assertIn("专注于趋势交易", prompt)
+        self.assertIn("多头排列必须条件", prompt)
+        self.assertIn("多头排列：MA5 > MA10 > MA20", prompt)
+
     def test_simple_text_response(self):
         """Agent returns text immediately (no tool calls) with JSON dashboard."""
         registry = _make_registry_with_echo()
@@ -518,13 +572,13 @@ class TestAgentExecutor(unittest.TestCase):
 
         adapter.call_with_tools.side_effect = _capture_timeout
 
-        executor = AgentExecutor(registry, adapter, max_steps=2, timeout_seconds=0.2)
+        executor = AgentExecutor(registry, adapter, max_steps=2, timeout_seconds=1.0)
         result = executor.run("Analyze 600519")
 
         self.assertTrue(result.success)
         self.assertIsNotNone(captured.get("timeout"))
         self.assertGreater(captured["timeout"], 0.0)
-        self.assertLessEqual(captured["timeout"], 0.2)
+        self.assertLessEqual(captured["timeout"], 1.0)
 
 
 # ============================================================

@@ -158,6 +158,8 @@ class ReportDetails(BaseModel):
     context_snapshot: Optional[Any] = Field(None, description="分析时上下文快照（JSON）")
     financial_report: Optional[Any] = Field(None, description="结构化财报摘要（来自 fundamental_context）")
     dividend_metrics: Optional[Any] = Field(None, description="结构化分红指标（含 TTM 口径）")
+    belong_boards: Optional[Any] = Field(None, description="关联板块列表")
+    sector_rankings: Optional[Any] = Field(None, description="板块涨跌榜（结构 {top, bottom}）")
 
 
 class AnalysisReport(BaseModel):

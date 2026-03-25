@@ -52,7 +52,7 @@ test.describe('web smoke', () => {
   test('home page shows analysis entry and history panel after login', async ({ page }) => {
     await login(page);
 
-    const stockInput = page.getByPlaceholder('输入股票代码，如 600519、HK00700、AAPL');
+    const stockInput = page.getByPlaceholder('输入股票代码或名称，如 600519、贵州茅台、AAPL');
     await expect(stockInput).toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole('link', { name: '首页' })).toBeVisible();
     await expect(page.getByRole('link', { name: '问股' })).toBeVisible();

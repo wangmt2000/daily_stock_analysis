@@ -42,6 +42,7 @@ from src.notification_sender import (
     PushoverSender,
     PushplusSender,
     Serverchan3Sender,
+    SlackSender,
     TelegramSender,
     WechatSender,
     WECHAT_IMAGE_MAX_BYTES
@@ -61,6 +62,7 @@ class NotificationChannel(Enum):
     SERVERCHAN3 = "serverchan3"  # Server酱3（手机APP推送服务）
     CUSTOM = "custom"      # 自定义 Webhook
     DISCORD = "discord"    # Discord 机器人 (Bot)
+    SLACK = "slack"        # Slack
     ASTRBOT = "astrbot"
     UNKNOWN = "unknown"    # 未知
 
@@ -85,6 +87,7 @@ class ChannelDetector:
             NotificationChannel.SERVERCHAN3: "Server酱3",
             NotificationChannel.CUSTOM: "自定义Webhook",
             NotificationChannel.DISCORD: "Discord机器人",
+            NotificationChannel.SLACK: "Slack",
             NotificationChannel.ASTRBOT: "ASTRBOT机器人",
             NotificationChannel.UNKNOWN: "未知渠道",
         }
@@ -100,6 +103,7 @@ class NotificationService(
     PushoverSender,
     PushplusSender,
     Serverchan3Sender,
+    SlackSender,
     TelegramSender,
     WechatSender
 ):
@@ -152,6 +156,7 @@ class NotificationService(
         PushoverSender.__init__(self, config)
         PushplusSender.__init__(self, config)
         Serverchan3Sender.__init__(self, config)
+        SlackSender.__init__(self, config)
         TelegramSender.__init__(self, config)
         WechatSender.__init__(self, config)
 
@@ -295,6 +300,9 @@ class NotificationService(
         # Discord
         if self._is_discord_configured():
             channels.append(NotificationChannel.DISCORD)
+        # Slack
+        if self._is_slack_configured():
+            channels.append(NotificationChannel.SLACK)
         # AstrBot
         if self._is_astrbot_configured():
             channels.append(NotificationChannel.ASTRBOT)
@@ -1220,9 +1228,9 @@ class NotificationService(
             lines.append(f"*{labels['analysis_model_label']}: {', '.join(models)}*")
 
         content = "\n".join(lines)
-        
+
         return content
-    
+
     def generate_wechat_summary(self, results: List[AnalysisResult]) -> str:
         """
         生成企业微信精简版日报（控制在4000字符内）
@@ -1658,6 +1666,13 @@ class NotificationService(
                         result = self.send_to_custom(content)
                 elif channel == NotificationChannel.DISCORD:
                     result = self.send_to_discord(content)
+                elif channel == NotificationChannel.SLACK:
+                    if use_image:
+                        result = self._send_slack_image(
+                            image_bytes, fallback_content=content
+                        )
+                    else:
+                        result = self.send_to_slack(content)
                 elif channel == NotificationChannel.ASTRBOT:
                     result = self.send_to_astrbot(content)
                 else:

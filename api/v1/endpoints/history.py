@@ -39,7 +39,11 @@ from src.report_language import (
     normalize_report_language,
 )
 from src.services.history_service import HistoryService, MarkdownReportGenerationError
-from src.utils.data_processing import normalize_model_used, extract_fundamental_detail_fields
+from src.utils.data_processing import (
+    normalize_model_used,
+    extract_fundamental_detail_fields,
+    extract_board_detail_fields,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +302,10 @@ def get_history_detail(
             context_snapshot=result.get("context_snapshot"),
             fallback_fundamental_payload=fallback_fundamental,
         )
+        extracted_boards = extract_board_detail_fields(
+            context_snapshot=result.get("context_snapshot"),
+            fallback_fundamental_payload=fallback_fundamental,
+        )
 
         details = ReportDetails(
             news_content=result.get("news_content"),
@@ -305,6 +313,8 @@ def get_history_detail(
             context_snapshot=result.get("context_snapshot"),
             financial_report=extracted_fundamental.get("financial_report"),
             dividend_metrics=extracted_fundamental.get("dividend_metrics"),
+            belong_boards=extracted_boards.get("belong_boards"),
+            sector_rankings=extracted_boards.get("sector_rankings"),
         )
         
         return AnalysisReport(

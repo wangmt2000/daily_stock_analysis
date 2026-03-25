@@ -214,7 +214,7 @@ export function useSystemConfig() {
     [],
   );
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<boolean> => {
     setIsLoading(true);
     setLoadError(null);
     setRetryAction(null);
@@ -223,9 +223,11 @@ export function useSystemConfig() {
       const config = await systemConfigApi.getConfig(true);
       applyServerPayload(config.items, config.configVersion, config.maskToken);
       setToast(null);
+      return true;
     } catch (error: unknown) {
       setLoadError(getParsedApiError(error));
       setRetryAction('load');
+      return false;
     } finally {
       setIsLoading(false);
     }
