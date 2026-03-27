@@ -631,8 +631,10 @@ body {
 .input-surface {
   background: var(--input-surface-bg);
   border-color: var(--input-surface-border);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-soft-card);
+  color: var(--input-surface-text, var(--text-primary));
+  caret-color: var(--input-surface-caret, var(--input-surface-text, var(--text-primary)));
+  -webkit-text-fill-color: var(--input-surface-fill, var(--input-surface-text, var(--text-primary)));
+  box-shadow: var(--input-surface-shadow, var(--shadow-soft-card));
   transition:
     border-color 0.2s ease,
     box-shadow 0.2s ease,
@@ -641,7 +643,8 @@ body {
 }
 
 .input-surface::placeholder {
-  color: var(--text-muted-text);
+  color: var(--input-surface-placeholder, var(--text-muted-text));
+  opacity: 1;
 }
 
 .input-surface:hover:not(:focus):not(:disabled) {
@@ -656,7 +659,20 @@ body {
 .input-focus-glow:focus,
 .input-focus-glow:focus-within {
   border-color: var(--input-surface-border-focus);
-  box-shadow: var(--shadow-soft-card), var(--input-surface-focus-ring);
+  box-shadow: var(--input-surface-shadow, var(--shadow-soft-card)), var(--input-surface-focus-ring);
+}
+
+.input-appearance-login {
+  --input-surface-bg: var(--login-input-surface);
+  --input-surface-border: var(--login-input-border);
+  --input-surface-border-hover: var(--login-input-border-hover);
+  --input-surface-border-focus: var(--login-input-border-focus);
+  --input-surface-focus-ring: var(--login-input-focus-ring);
+  --input-surface-text: var(--login-input-text);
+  --input-surface-placeholder: var(--login-input-placeholder);
+  --input-surface-caret: var(--login-input-caret);
+  --input-surface-fill: var(--login-input-fill);
+  --input-surface-shadow: var(--login-input-shadow, var(--shadow-soft-card));
 }
 
 /* ============ Badge Styles ============ */

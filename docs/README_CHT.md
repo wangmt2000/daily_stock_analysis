@@ -311,15 +311,9 @@ daily_stock_analysis/
 
 ## ☕ 支持項目
 
-<div align="center">
-  <a href="https://ko-fi.com/mumu157" target="_blank">
-    <img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" alt="Buy Me a Coffee at ko-fi.com" style="height: 40px !important;">
-  </a>
-</div>
-
-| 支付寶 (Alipay) | 微信支付 (WeChat) | Ko-fi |
+| 支付寶 (Alipay) | 微信支付 (WeChat) | 小紅書 |
 | :---: | :---: | :---: |
-| <img src="../sources/alipay.jpg" width="200" alt="Alipay"> | <img src="../sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <a href="https://ko-fi.com/mumu157" target="_blank"><img src="../sources/ko-fi.png" width="200" alt="Ko-fi"></a> |
+| <img src="../sources/alipay.jpg" width="200" alt="Alipay"> | <img src="../sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <img src="../sources/xiaohongshu.png" width="200" alt="小紅書"> |
 
 ## 貢獻
 

@@ -75,23 +75,46 @@ const LoginPage: React.FC = () => {
         '--login-bg-card': 'hsl(222 34% 8%)',
         '--login-border-card': 'hsl(0 0% 100% / 0.05)',
         '--login-border-input': 'hsl(0 0% 100% / 0.1)',
-        '--login-border-focus': 'hsl(var(--primary) / 0.5)',
+        '--login-border-focus': 'hsl(190 100% 50% / 0.5)',
         '--login-error-text': 'hsl(var(--destructive))',
         '--login-error-bg': 'hsl(var(--destructive) / 0.1)',
         '--login-error-border': 'hsl(var(--destructive) / 0.2)',
         '--login-text-primary': 'hsl(0 0% 100%)',
         '--login-text-secondary': 'hsl(215 20% 65%)',
         '--login-text-muted': 'hsl(215 16% 45%)',
-        '--login-accent-soft': 'hsl(var(--primary) / 0.08)',
-        '--login-accent-border': 'hsl(var(--primary) / 0.28)',
-        '--login-accent-text': 'hsl(var(--primary) / 0.92)',
-        '--login-accent-glow': 'hsl(var(--primary) / 0.2)',
-        '--login-brand-start': 'hsl(var(--primary))',
+        '--login-accent-soft': 'hsl(190 100% 50% / 0.08)',
+        '--login-accent-border': 'hsl(190 100% 50% / 0.28)',
+        '--login-accent-text': 'hsl(190 100% 68%)',
+        '--login-accent-glow': 'hsl(190 100% 50% / 0.2)',
+        '--login-brand-start': 'hsl(190 100% 50%)',
         '--login-brand-end': 'hsl(214 100% 62%)',
         '--login-brand-button-start': 'hsl(194 96% 45%)',
         '--login-brand-button-end': 'hsl(214 100% 56%)',
         '--login-brand-button-start-hover': 'hsl(194 96% 50%)',
         '--login-brand-button-end-hover': 'hsl(214 100% 62%)',
+        '--login-button-text': 'hsl(210 33% 98%)',
+        '--login-label-text': 'hsl(0 0% 100%)',
+        '--login-hint-text': 'hsl(215 20% 65%)',
+        '--login-input-surface': 'hsl(222 30% 12% / 0.92)',
+        '--login-input-border': 'hsl(0 0% 100% / 0.12)',
+        '--login-input-border-hover': 'hsl(190 100% 50% / 0.32)',
+        '--login-input-border-focus': 'hsl(190 100% 50% / 0.58)',
+        '--login-input-focus-ring': '0 0 0 4px hsl(190 100% 50% / 0.16)',
+        '--login-input-text': 'hsl(190 100% 74%)',
+        '--login-input-placeholder': 'hsl(215 18% 64%)',
+        '--login-input-caret': 'hsl(190 100% 50%)',
+        '--login-input-fill': 'hsl(190 100% 74%)',
+        '--login-input-icon': 'hsl(190 100% 68% / 0.88)',
+        '--login-input-toggle-bg': 'hsl(223 28% 14% / 0.92)',
+        '--login-input-toggle-border': 'hsl(0 0% 100% / 0.10)',
+        '--login-input-toggle-text': 'hsl(190 100% 78% / 0.82)',
+        '--login-input-toggle-border-hover': 'hsl(190 100% 50% / 0.34)',
+        '--login-input-toggle-bg-hover': 'hsl(190 100% 50% / 0.12)',
+        '--login-input-toggle-text-hover': 'hsl(190 100% 82%)',
+        '--login-input-toggle-ring': 'hsl(190 100% 50% / 0.24)',
+        '--login-input-toggle-active-bg': 'hsl(190 100% 50% / 0.18)',
+        '--login-input-toggle-active-border': 'hsl(190 100% 50% / 0.46)',
+        '--login-input-toggle-active-text': 'hsl(190 100% 88%)',
         '--login-grid-line': 'hsl(0 0% 50% / 0.04)',
         '--login-grid-mask': 'radial-gradient(ellipse 80% 50% at 50% 50%, #000 70%, transparent 100%)',
       } as React.CSSProperties}
@@ -202,6 +225,7 @@ const LoginPage: React.FC = () => {
                 <Input
                   id="password"
                   type="password"
+                  appearance="login"
                   allowTogglePassword
                   iconType="password"
                   label={isFirstTime ? '管理员密码' : '登录密码'}
@@ -211,13 +235,13 @@ const LoginPage: React.FC = () => {
                   disabled={isSubmitting}
                   autoFocus
                   autoComplete={isFirstTime ? 'new-password' : 'current-password'}
-                  className="!bg-[var(--login-border-card)] !border-[var(--login-border-input)] focus:!border-[var(--login-border-focus)]"
                 />
 
                 {isFirstTime && (
                   <Input
                     id="passwordConfirm"
                     type="password"
+                    appearance="login"
                     allowTogglePassword
                     iconType="password"
                     label="确认密码"
@@ -226,7 +250,6 @@ const LoginPage: React.FC = () => {
                     onChange={(e) => setPasswordConfirm(e.target.value)}
                     disabled={isSubmitting}
                     autoComplete="new-password"
-                    className="!bg-[var(--login-border-card)] !border-[var(--login-border-input)] focus:!border-[var(--login-border-focus)]"
                   />
                 )}
               </div>
@@ -250,7 +273,7 @@ const LoginPage: React.FC = () => {
                 type="submit"
                 variant="primary"
                 size="lg"
-                className="group/btn relative h-12 w-full overflow-hidden rounded-xl border-0 bg-gradient-to-r from-[var(--login-brand-button-start)] to-[var(--login-brand-button-end)] font-medium text-foreground shadow-lg shadow-[0_18px_36px_hsl(214_100%_8%_/_0.24)] hover:from-[var(--login-brand-button-start-hover)] hover:to-[var(--login-brand-button-end-hover)]"
+                className="group/btn relative h-12 w-full overflow-hidden rounded-xl border-0 bg-gradient-to-r from-[var(--login-brand-button-start)] to-[var(--login-brand-button-end)] font-medium text-[var(--login-button-text)] shadow-lg shadow-[0_18px_36px_hsl(214_100%_8%_/_0.24)] hover:from-[var(--login-brand-button-start-hover)] hover:to-[var(--login-brand-button-end-hover)]"
                 disabled={isSubmitting}
               >
                 <div className="relative z-10 flex items-center justify-center gap-2">

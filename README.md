@@ -429,9 +429,9 @@ LITELLM_MODEL=openai/deepseek-chat
 如果本项目对你有帮助，欢迎支持项目的持续维护与迭代，感谢支持 🙏  
 赞赏可备注联系方式，祝股市长虹
 
-| 支付宝 (Alipay) | 微信支付 (WeChat) | Ko-fi |
+| 支付宝 (Alipay) | 微信支付 (WeChat) | 小红书 |
 | :---: | :---: | :---: |
-| <img src="./sources/alipay.jpg" width="200" alt="Alipay"> | <img src="./sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <a href="https://ko-fi.com/mumu157" target="_blank"><img src="./sources/ko-fi.png" width="200" alt="Ko-fi"></a> |
+| <img src="./sources/alipay.jpg" width="200" alt="Alipay"> | <img src="./sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <img src="./sources/xiaohongshu.png" width="200" alt="小红书"> |
 
 ---
 

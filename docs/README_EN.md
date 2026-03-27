@@ -491,15 +491,9 @@ The home analysis input now behaves more like a search box, reducing the need to
 
 ## ☕ Support the Project
 
-<div align="center">
-  <a href="https://ko-fi.com/mumu157" target="_blank">
-    <img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" alt="Buy Me a Coffee at ko-fi.com" style="height: 40px !important;">
-  </a>
-</div>
-
-| Alipay | WeChat Pay | Ko-fi |
+| Alipay | WeChat Pay | Xiaohongshu |
 | :---: | :---: | :---: |
-| <img src="../sources/alipay.jpg" width="200" alt="Alipay"> | <img src="../sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <a href="https://ko-fi.com/mumu157" target="_blank"><img src="../sources/ko-fi.png" width="200" alt="Ko-fi"></a> |
+| <img src="../sources/alipay.jpg" width="200" alt="Alipay"> | <img src="../sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <img src="../sources/xiaohongshu.png" width="200" alt="Xiaohongshu"> |
 
 ## 🤝 Contributing
 
