@@ -22,7 +22,13 @@ A股自选股智能分析系统 - 主调度程序
 - 买点偏好：缩量回踩 MA5/MA10 支撑
 """
 import os
+from pathlib import Path
+from typing import Dict, Optional
+
+from dotenv import dotenv_values
 from src.config import setup_env
+
+_INITIAL_PROCESS_ENV = dict(os.environ)
 setup_env()
 
 # 代理配置 - 通过 USE_PROXY 环境变量控制，默认关闭
@@ -41,7 +47,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from data_provider.base import canonical_stock_code
 from src.core.pipeline import StockAnalysisPipeline
@@ -52,6 +58,61 @@ from src.logging_config import setup_logging
 
 
 logger = logging.getLogger(__name__)
+_RUNTIME_ENV_FILE_KEYS = set()
+
+
+def _get_active_env_path() -> Path:
+    env_file = os.getenv("ENV_FILE")
+    if env_file:
+        return Path(env_file)
+    return Path(__file__).resolve().parent / ".env"
+
+
+def _read_active_env_values() -> Optional[Dict[str, str]]:
+    env_path = _get_active_env_path()
+    if not env_path.exists():
+        return {}
+
+    try:
+        values = dotenv_values(env_path)
+    except Exception as exc:  # pragma: no cover - defensive branch
+        logger.warning("读取配置文件 %s 失败，继续沿用当前环境变量: %s", env_path, exc)
+        return None
+
+    return {
+        str(key): "" if value is None else str(value)
+        for key, value in values.items()
+        if key is not None
+    }
+
+
+_ACTIVE_ENV_FILE_VALUES = _read_active_env_values() or {}
+_RUNTIME_ENV_FILE_KEYS = {
+    key for key in _ACTIVE_ENV_FILE_VALUES
+    if key not in _INITIAL_PROCESS_ENV
+}
+
+
+def _reload_env_file_values_preserving_overrides() -> None:
+    """Refresh `.env`-managed env vars without clobbering process env overrides."""
+    global _RUNTIME_ENV_FILE_KEYS
+
+    latest_values = _read_active_env_values()
+    if latest_values is None:
+        return
+
+    managed_keys = {
+        key for key in latest_values
+        if key not in _INITIAL_PROCESS_ENV
+    }
+
+    for key in _RUNTIME_ENV_FILE_KEYS - managed_keys:
+        os.environ.pop(key, None)
+
+    for key in managed_keys:
+        os.environ[key] = latest_values[key]
+
+    _RUNTIME_ENV_FILE_KEYS = managed_keys
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -445,7 +506,7 @@ def run_full_analysis(
 def start_api_server(host: str, port: int, config: Config) -> None:
     """
     在后台线程启动 FastAPI 服务
-    
+
     Args:
         host: 监听地址
         port: 监听端口
@@ -473,6 +534,7 @@ def _is_truthy_env(var_name: str, default: str = "true") -> bool:
     """Parse common truthy / falsy environment values."""
     value = os.getenv(var_name, default).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
 
 def start_bot_stream_clients(config: Config) -> None:
     """Start bot stream clients when enabled in config."""
@@ -514,6 +576,40 @@ def _resolve_scheduled_stock_codes(stock_codes: Optional[List[str]]) -> Optional
             "定时模式下检测到 --stocks 参数；计划执行将忽略启动时股票快照，并在每次运行前重新读取最新的 STOCK_LIST。"
         )
     return None
+
+
+def _reload_runtime_config() -> Config:
+    """Reload config from the latest persisted `.env` values for scheduled runs."""
+    _reload_env_file_values_preserving_overrides()
+    Config.reset_instance()
+    return get_config()
+
+
+def _build_schedule_time_provider(default_schedule_time: str):
+    """Read the latest schedule time directly from the active config file.
+
+    Fallback order:
+    1. Process-level env override (set before launch) → honour it.
+    2. Persisted config file value (written by WebUI) → use it.
+    3. Documented system default ``"18:00"`` → always fall back here so
+       that clearing SCHEDULE_TIME in WebUI correctly resets the schedule.
+    """
+    from src.core.config_manager import ConfigManager
+
+    _SYSTEM_DEFAULT_SCHEDULE_TIME = "18:00"
+    manager = ConfigManager()
+
+    def _provider() -> str:
+        if "SCHEDULE_TIME" in _INITIAL_PROCESS_ENV:
+            return os.getenv("SCHEDULE_TIME", default_schedule_time)
+
+        config_map = manager.read_config_map()
+        schedule_time = (config_map.get("SCHEDULE_TIME", "") or "").strip()
+        if schedule_time:
+            return schedule_time
+        return _SYSTEM_DEFAULT_SCHEDULE_TIME
+
+    return _provider
 
 
 def main() -> int:
@@ -688,14 +784,40 @@ def main() -> int:
 
             from src.scheduler import run_with_schedule
             scheduled_stock_codes = _resolve_scheduled_stock_codes(stock_codes)
+            schedule_time_provider = _build_schedule_time_provider(config.schedule_time)
 
             def scheduled_task():
-                run_full_analysis(config, args, scheduled_stock_codes)
+                runtime_config = _reload_runtime_config()
+                run_full_analysis(runtime_config, args, scheduled_stock_codes)
+
+            background_tasks = []
+            if getattr(config, 'agent_event_monitor_enabled', False):
+                from src.agent.events import build_event_monitor_from_config, run_event_monitor_once
+
+                monitor = build_event_monitor_from_config(config)
+                if monitor is not None:
+                    interval_minutes = max(1, getattr(config, 'agent_event_monitor_interval_minutes', 5))
+
+                    def event_monitor_task():
+                        triggered = run_event_monitor_once(monitor)
+                        if triggered:
+                            logger.info("[EventMonitor] 本轮触发 %d 条提醒", len(triggered))
+
+                    background_tasks.append({
+                        "task": event_monitor_task,
+                        "interval_seconds": interval_minutes * 60,
+                        "run_immediately": True,
+                        "name": "agent_event_monitor",
+                    })
+                else:
+                    logger.info("EventMonitor 已启用，但未加载到有效规则，跳过后台提醒任务")
 
             run_with_schedule(
                 task=scheduled_task,
                 schedule_time=config.schedule_time,
-                run_immediately=should_run_immediately
+                run_immediately=should_run_immediately,
+                background_tasks=background_tasks,
+                schedule_time_provider=schedule_time_provider,
             )
             return 0
 

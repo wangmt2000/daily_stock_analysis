@@ -150,6 +150,13 @@ def prepare_webui_frontend_assets() -> bool:
         logger.warning("如需启动时自动构建，可设置 WEBUI_AUTO_BUILD=true")
         return False
 
+    force_build = _is_truthy_env("WEBUI_FORCE_BUILD", "false")
+    needs_build, artifact_index = _needs_frontend_build(frontend_dir=frontend_dir, force_build=force_build)
+
+    if not needs_build:
+        logger.info("检测到可直接复用的前端静态产物，跳过运行时自动构建: %s", artifact_index)
+        return True
+
     package_json = frontend_dir / "package.json"
     if not package_json.exists():
         logger.warning("未找到前端项目，无法自动构建: %s", package_json)
@@ -162,8 +169,6 @@ def prepare_webui_frontend_assets() -> bool:
         logger.warning("请先手动构建前端静态资源: %s", _manual_build_command(frontend_dir))
         return False
 
-    force_build = _is_truthy_env("WEBUI_FORCE_BUILD", "false")
-
     lock_file = frontend_dir / "package-lock.json"
     needs_install = _needs_dependency_install(
         frontend_dir=frontend_dir,
@@ -171,12 +176,6 @@ def prepare_webui_frontend_assets() -> bool:
         lock_file=lock_file,
         force_build=force_build,
     )
-
-    needs_build, artifact_index = _needs_frontend_build(frontend_dir=frontend_dir, force_build=force_build)
-
-    if not needs_install and not needs_build:
-        logger.info("前端静态资源已是最新，跳过 npm install/build")
-        return True
 
     commands = []
     if needs_install:

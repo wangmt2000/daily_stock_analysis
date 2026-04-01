@@ -63,4 +63,18 @@ describe('LoginPage', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith('/settings', { replace: true }));
     expect(screen.getByLabelText('登录密码')).toHaveAttribute('data-appearance', 'login');
   });
+
+  it('does not override login theme tokens inline so light mode can take effect', () => {
+    useAuthMock.mockReturnValue({
+      login: vi.fn(),
+      passwordSet: true,
+      setupState: 'enabled',
+    });
+
+    const { container } = render(<LoginPage />);
+    const pageRoot = container.firstElementChild as HTMLElement | null;
+
+    expect(pageRoot).not.toBeNull();
+    expect(pageRoot?.getAttribute('style') ?? '').not.toContain('--login-bg-main');
+  });
 });

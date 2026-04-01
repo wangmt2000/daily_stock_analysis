@@ -298,8 +298,8 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(report_language_schema["options"][1]["value"], "en")
 
         self.assertEqual(items["AGENT_ORCHESTRATOR_TIMEOUT_S"]["schema"]["default_value"], "600")
-        self.assertFalse(items["AGENT_DEEP_RESEARCH_BUDGET"]["schema"]["is_editable"])
-        self.assertFalse(items["AGENT_EVENT_MONITOR_ENABLED"]["schema"]["is_editable"])
+        self.assertTrue(items["AGENT_DEEP_RESEARCH_BUDGET"]["schema"]["is_editable"])
+        self.assertTrue(items["AGENT_EVENT_MONITOR_ENABLED"]["schema"]["is_editable"])
 
     def test_validate_reports_invalid_select_option(self) -> None:
         validation = self.service.validate(items=[{"key": "AGENT_ARCH", "value": "invalid-mode"}])
@@ -312,6 +312,52 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["issues"], [])
+
+    def test_validate_reports_invalid_json(self) -> None:
+        validation = self.service.validate(items=[{"key": "AGENT_EVENT_ALERT_RULES_JSON", "value": "[invalid"}])
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any(issue["code"] == "invalid_json" for issue in validation["issues"]))
+
+    def test_validate_accepts_blank_optional_json(self) -> None:
+        validation = self.service.validate(items=[{"key": "AGENT_EVENT_ALERT_RULES_JSON", "value": ""}])
+
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["issues"], [])
+
+    def test_validate_accepts_multiline_json(self) -> None:
+        validation = self.service.validate(items=[{
+            "key": "AGENT_EVENT_ALERT_RULES_JSON",
+            "value": (
+                "[\n"
+                '  {"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800}\n'
+                "]"
+            ),
+        }])
+
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["issues"], [])
+
+    def test_update_minifies_multiline_json_before_storage(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[{
+                "key": "AGENT_EVENT_ALERT_RULES_JSON",
+                "value": (
+                    "[\n"
+                    '  {"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800}\n'
+                    "]"
+                ),
+            }],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        current_map = self.manager.read_config_map()
+        self.assertEqual(
+            current_map["AGENT_EVENT_ALERT_RULES_JSON"],
+            '[{"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800}]',
+        )
 
     def test_validate_accepts_legacy_agent_orchestrator_mode_alias(self) -> None:
         validation = self.service.validate(items=[{"key": "AGENT_ORCHESTRATOR_MODE", "value": "strategy"}])
@@ -358,7 +404,6 @@ class SystemConfigServiceTestCase(unittest.TestCase):
             items["AGENT_ORCHESTRATOR_MODE"]["schema"]["validation"]["enum"],
             ["quick", "standard", "full", "specialist", "strategy", "skill"],
         )
-
     @patch.object(
         Config,
         "_parse_litellm_yaml",
@@ -404,6 +449,21 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         self.assertFalse(validation["valid"])
         self.assertTrue(any(issue["key"] == "LITELLM_MODEL" and issue["code"] == "missing_runtime_source" for issue in validation["issues"]))
+
+    def test_validate_accepts_minimax_model_as_direct_env_provider(self) -> None:
+        """minimax is NOT a managed key provider; it uses LiteLLM direct-env routing."""
+        validation = self.service.validate(
+            items=[
+                {"key": "LLM_CHANNELS", "value": "primary"},
+                {"key": "LLM_PRIMARY_PROTOCOL", "value": "openai"},
+                {"key": "LLM_PRIMARY_API_KEY", "value": "sk-test-value"},
+                {"key": "LLM_PRIMARY_MODELS", "value": "minimax/MiniMax-M1"},
+                {"key": "LLM_PRIMARY_ENABLED", "value": "false"},
+                {"key": "LITELLM_MODEL", "value": "minimax/MiniMax-M1"},
+            ]
+        )
+
+        self.assertFalse(any(issue.get("key") == "LITELLM_MODEL" and issue["code"] == "missing_runtime_source" for issue in validation.get("issues", [])))
 
     def test_validate_reports_stale_agent_primary_model_when_all_channels_disabled(self) -> None:
         validation = self.service.validate(
@@ -457,6 +517,24 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(payload["resolved_protocol"], "openai")
         self.assertEqual(payload["resolved_model"], "openai/deepseek-chat")
+
+    def test_validate_reports_invalid_event_rule_semantics(self) -> None:
+        validation = self.service.validate(items=[{
+            "key": "AGENT_EVENT_ALERT_RULES_JSON",
+            "value": '[{"stock_code":"600519","alert_type":"price_cross","status":"bad","direction":"above","price":1800}]',
+        }])
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any(issue["code"] == "invalid_event_rule" for issue in validation["issues"]))
+
+    def test_validate_rejects_unsupported_event_rule_type(self) -> None:
+        validation = self.service.validate(items=[{
+            "key": "AGENT_EVENT_ALERT_RULES_JSON",
+            "value": '[{"stock_code":"600519","alert_type":"sentiment_shift"}]',
+        }])
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any(issue["code"] == "invalid_event_rule" for issue in validation["issues"]))
 
     @patch.object(SystemConfigService, "_reload_runtime_singletons")
     def test_update_with_reload_resets_runtime_singletons(

@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any, Optional, Tuple
 from itertools import cycle
+from urllib.parse import parse_qsl, unquote, urlparse
 import requests
 from newspaper import Article, Config
 from tenacity import (
@@ -157,6 +158,7 @@ class BaseSearchProvider(ABC):
         self._key_cycle = cycle(api_keys) if api_keys else None
         self._key_usage: Dict[str, int] = {key: 0 for key in api_keys}
         self._key_errors: Dict[str, int] = {key: 0 for key in api_keys}
+        self._state_lock = threading.RLock()
     
     @property
     def name(self) -> str:
@@ -173,32 +175,36 @@ class BaseSearchProvider(ABC):
         
         策略：轮询 + 跳过错误过多的 key
         """
-        if not self._key_cycle:
-            return None
-        
-        # 最多尝试所有 key
-        for _ in range(len(self._api_keys)):
-            key = next(self._key_cycle)
-            # 跳过错误次数过多的 key（超过 3 次）
-            if self._key_errors.get(key, 0) < 3:
-                return key
-        
-        # 所有 key 都有问题，重置错误计数并返回第一个
-        logger.warning(f"[{self._name}] 所有 API Key 都有错误记录，重置错误计数")
-        self._key_errors = {key: 0 for key in self._api_keys}
-        return self._api_keys[0] if self._api_keys else None
+        with self._state_lock:
+            if not self._key_cycle:
+                return None
+            
+            # 最多尝试所有 key
+            for _ in range(len(self._api_keys)):
+                key = next(self._key_cycle)
+                # 跳过错误次数过多的 key（超过 3 次）
+                if self._key_errors.get(key, 0) < 3:
+                    return key
+            
+            # 所有 key 都有问题，重置错误计数并返回第一个
+            logger.warning(f"[{self._name}] 所有 API Key 都有错误记录，重置错误计数")
+            self._key_errors = {key: 0 for key in self._api_keys}
+            return self._api_keys[0] if self._api_keys else None
     
     def _record_success(self, key: str) -> None:
         """记录成功使用"""
-        self._key_usage[key] = self._key_usage.get(key, 0) + 1
-        # 成功后减少错误计数
-        if key in self._key_errors and self._key_errors[key] > 0:
-            self._key_errors[key] -= 1
+        with self._state_lock:
+            self._key_usage[key] = self._key_usage.get(key, 0) + 1
+            # 成功后减少错误计数
+            if key in self._key_errors and self._key_errors[key] > 0:
+                self._key_errors[key] -= 1
     
     def _record_error(self, key: str) -> None:
         """记录错误"""
-        self._key_errors[key] = self._key_errors.get(key, 0) + 1
-        logger.warning(f"[{self._name}] API Key {key[:8]}... 错误计数: {self._key_errors[key]}")
+        with self._state_lock:
+            self._key_errors[key] = self._key_errors.get(key, 0) + 1
+            error_count = self._key_errors[key]
+        logger.warning(f"[{self._name}] API Key {key[:8]}... 错误计数: {error_count}")
     
     @abstractmethod
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -414,6 +420,46 @@ class SerpAPISearchProvider(BaseSearchProvider):
     
     文档：https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis
     """
+
+    _ORGANIC_CONTENT_FETCH_LIMIT = 1
+    _ORGANIC_CONTENT_FETCH_RANK_LIMIT = 2
+    _ORGANIC_CONTENT_FETCH_TIMEOUT = 2
+    _ORGANIC_SNIPPET_SUFFICIENT_LENGTH = 140
+    _ORGANIC_FETCHED_PREVIEW_LENGTH = 320
+    _SKIPPED_CONTENT_FETCH_SUFFIXES = (
+        ".pdf",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".svg",
+        ".webp",
+        ".zip",
+        ".rar",
+        ".7z",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".csv",
+    )
+    _SKIPPED_CONTENT_FETCH_QUERY_KEYS = {
+        "attachment",
+        "attachment_file",
+        "doc",
+        "document",
+        "download",
+        "download_file",
+        "file",
+        "file_name",
+        "filename",
+        "file_path",
+        "filepath",
+        "resource",
+        "resource_file",
+    }
     
     def __init__(self, api_keys: List[str]):
         super().__init__(api_keys, "SerpAPI")
@@ -548,28 +594,33 @@ class SerpAPISearchProvider(BaseSearchProvider):
 
             # 4. 解析 Organic Results (自然搜索结果)
             organic_results = response.get('organic_results', [])
+            organic_content_fetch_attempts = 0
 
-            for item in organic_results[:max_results]:
+            for rank, item in enumerate(organic_results[:max_results]):
                 link = item.get('link', '')
-                snippet = item.get('snippet', '')
+                rich_extensions = self._extract_rich_snippet_extensions(item)
+                snippet = self._build_organic_snippet(item, rich_extensions=rich_extensions)
 
-                # 增强：如果需要，解析网页正文
-                # 策略：如果摘要太短，或者为了获取更多信息，可以请求网页
-                # 这里我们对所有结果尝试获取正文，但为了性能，仅获取前1000字符
-                content = ""
-                if link:
-                   try:
-                       fetched_content = fetch_url_content(link, timeout=5)
-                       if fetched_content:
-                           # 如果获取到了正文，将其拼接到 snippet 中，或者替换 snippet
-                           # 这里选择拼接，保留原摘要
-                           content = fetched_content
-                           if len(content) > 500:
-                               snippet = f"{snippet}\n\n【网页详情】\n{content[:500]}..."
-                           else:
-                               snippet = f"{snippet}\n\n【网页详情】\n{content}"
-                   except Exception as e:
-                       logger.debug(f"[SerpAPI] Fetch content failed: {e}")
+                if self._should_fetch_organic_content(
+                    link=link,
+                    snippet=snippet,
+                    rank=rank,
+                    fetched_count=organic_content_fetch_attempts,
+                    has_structured_summary=bool(rich_extensions),
+                ):
+                    organic_content_fetch_attempts += 1
+                    try:
+                        fetched_content = fetch_url_content(
+                            link,
+                            timeout=self._ORGANIC_CONTENT_FETCH_TIMEOUT,
+                        )
+                        if fetched_content:
+                            snippet = self._merge_organic_snippet_with_content(
+                                snippet,
+                                fetched_content,
+                            )
+                    except Exception as e:
+                        logger.debug(f"[SerpAPI] Fetch content failed: {e}")
 
                 results.append(SearchResult(
                     title=item.get('title', ''),
@@ -600,11 +651,202 @@ class SerpAPISearchProvider(BaseSearchProvider):
     def _extract_domain(url: str) -> str:
         """从 URL 提取域名"""
         try:
-            from urllib.parse import urlparse
             parsed = urlparse(url)
             return parsed.netloc.replace('www.', '') or '未知来源'
         except Exception:
             return '未知来源'
+
+    @classmethod
+    def _normalize_organic_text(cls, value: Any) -> str:
+        """标准化 SerpAPI organic 文本字段。"""
+        text = "" if value is None else str(value)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _extract_rich_snippet_extensions(cls, item: Dict[str, Any]) -> List[str]:
+        """提取 rich_snippet 中已有的结构化摘要，优先复用 API 原始返回。"""
+        rich_snippet = item.get("rich_snippet")
+        if not isinstance(rich_snippet, dict):
+            return []
+
+        extensions: List[str] = []
+        seen: set[str] = set()
+
+        for section in ("top", "bottom"):
+            section_data = rich_snippet.get(section)
+            if not isinstance(section_data, dict):
+                continue
+
+            raw_extensions = section_data.get("extensions")
+            if isinstance(raw_extensions, (list, tuple, set)):
+                for raw_value in raw_extensions:
+                    value = cls._normalize_organic_text(raw_value)
+                    if not value or value in seen:
+                        continue
+                    seen.add(value)
+                    extensions.append(value)
+
+            for raw_value in cls._flatten_rich_snippet_values(
+                section_data.get("detected_extensions")
+            ):
+                if raw_value in seen:
+                    continue
+                seen.add(raw_value)
+                extensions.append(raw_value)
+
+        return extensions
+
+    @classmethod
+    def _flatten_rich_snippet_values(
+        cls,
+        value: Any,
+        *,
+        label: Optional[str] = None,
+        allow_unlabeled_scalar: bool = False,
+    ) -> List[str]:
+        """把 rich_snippet.detected_extensions 展平为可读文本。"""
+        if isinstance(value, dict):
+            flattened: List[str] = []
+            for key, nested_value in value.items():
+                flattened.extend(
+                    cls._flatten_rich_snippet_values(
+                        nested_value,
+                        label=cls._normalize_organic_text(str(key)).replace("_", " "),
+                    )
+                )
+            return flattened
+
+        if isinstance(value, (list, tuple, set)):
+            flattened: List[str] = []
+            for nested_value in value:
+                flattened.extend(
+                    cls._flatten_rich_snippet_values(
+                        nested_value,
+                        label=label,
+                        allow_unlabeled_scalar=True,
+                    )
+                )
+            return flattened
+
+        text = cls._normalize_organic_text(value)
+        if not text:
+            return []
+
+        if label:
+            return [f"{label}: {text}"]
+
+        if allow_unlabeled_scalar:
+            return [text]
+
+        return []
+
+    @classmethod
+    def _build_organic_snippet(
+        cls,
+        item: Dict[str, Any],
+        *,
+        rich_extensions: Optional[List[str]] = None,
+    ) -> str:
+        """构建 organic result 摘要，尽量先消费 SerpAPI 已返回的信息。"""
+        snippet = cls._normalize_organic_text(item.get("snippet", ""))
+        if rich_extensions is None:
+            rich_extensions = cls._extract_rich_snippet_extensions(item)
+
+        if rich_extensions:
+            rich_text = " | ".join(rich_extensions)
+            if rich_text and rich_text not in snippet:
+                snippet = f"{snippet}\n{rich_text}".strip() if snippet else rich_text
+
+        return snippet
+
+    @classmethod
+    def _matches_skipped_content_fetch_suffix(cls, value: Any) -> bool:
+        """判断链接片段是否指向附件或其他非 HTML 资源。"""
+        normalized_value = cls._normalize_organic_text(value).lower()
+        if not normalized_value:
+            return False
+
+        decoded_value = unquote(normalized_value)
+        if decoded_value.endswith(cls._SKIPPED_CONTENT_FETCH_SUFFIXES):
+            return True
+
+        return urlparse(decoded_value).path.lower().endswith(
+            cls._SKIPPED_CONTENT_FETCH_SUFFIXES
+        )
+
+    @classmethod
+    def _matches_skipped_content_fetch_query_param(
+        cls, key: Any, value: Any
+    ) -> bool:
+        """仅对少数显式附件参数跳过正文抓取，避免误伤普通 HTML 页面。"""
+        normalized_key = cls._normalize_organic_text(key)
+        if not normalized_key:
+            return False
+
+        snake_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized_key)
+        canonical_key = re.sub(r"[^a-z0-9]+", "_", snake_key.lower()).strip("_")
+        if canonical_key not in cls._SKIPPED_CONTENT_FETCH_QUERY_KEYS:
+            return False
+
+        return cls._matches_skipped_content_fetch_suffix(value)
+
+    @classmethod
+    def _should_fetch_organic_content(
+        cls,
+        *,
+        link: Any,
+        snippet: str,
+        rank: int,
+        fetched_count: int,
+        has_structured_summary: bool,
+    ) -> bool:
+        """仅对极少量高位且摘要明显不足的结果补抓正文。"""
+        if fetched_count >= cls._ORGANIC_CONTENT_FETCH_LIMIT:
+            return False
+
+        if rank >= cls._ORGANIC_CONTENT_FETCH_RANK_LIMIT:
+            return False
+
+        if has_structured_summary:
+            return False
+
+        if len(snippet) >= cls._ORGANIC_SNIPPET_SUFFICIENT_LENGTH:
+            return False
+
+        if not isinstance(link, str):
+            return False
+
+        if not link or not link.startswith(("http://", "https://")):
+            return False
+
+        parsed_link = urlparse(link)
+        if parsed_link.scheme not in {"http", "https"}:
+            return False
+
+        if cls._matches_skipped_content_fetch_suffix(parsed_link.path):
+            return False
+
+        for key, value in parse_qsl(parsed_link.query, keep_blank_values=True):
+            if cls._matches_skipped_content_fetch_query_param(key, value):
+                return False
+
+        return True
+
+    @classmethod
+    def _merge_organic_snippet_with_content(cls, snippet: str, content: str) -> str:
+        """用较短正文预览补强 snippet，避免拉长单次搜索耗时和返回体积。"""
+        normalized = cls._normalize_organic_text(content)
+        if not normalized:
+            return snippet
+
+        preview = normalized[:cls._ORGANIC_FETCHED_PREVIEW_LENGTH]
+        if len(normalized) > cls._ORGANIC_FETCHED_PREVIEW_LENGTH:
+            preview = f"{preview}..."
+
+        if snippet:
+            return f"{snippet}\n\n【网页详情】\n{preview}"
+
+        return f"【网页详情】\n{preview}"
 
 
 class BochaSearchProvider(BaseSearchProvider):
@@ -833,30 +1075,36 @@ class MiniMaxSearchProvider(BaseSearchProvider):
     @property
     def is_available(self) -> bool:
         """Check availability considering circuit breaker state."""
-        if not super().is_available:
-            return False
-        if self._consecutive_failures >= self._CB_FAILURE_THRESHOLD:
-            if time.time() < self._circuit_open_until:
+        with self._state_lock:
+            if not self._api_keys:
                 return False
-            # Cooldown expired -> half-open, allow one probe
-        return True
+            if self._consecutive_failures >= self._CB_FAILURE_THRESHOLD:
+                if time.time() < self._circuit_open_until:
+                    return False
+                # Cooldown expired -> half-open, allow one probe
+            return True
 
     def _record_success(self, key: str) -> None:
-        super()._record_success(key)
-        # Reset circuit breaker on success
-        self._consecutive_failures = 0
-        self._circuit_open_until = 0.0
+        with self._state_lock:
+            super()._record_success(key)
+            # Reset circuit breaker on success
+            self._consecutive_failures = 0
+            self._circuit_open_until = 0.0
 
     def _record_error(self, key: str) -> None:
-        super()._record_error(key)
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self._CB_FAILURE_THRESHOLD:
-            self._circuit_open_until = time.time() + self._CB_COOLDOWN_SECONDS
-            logger.warning(
-                f"[MiniMax] Circuit breaker OPEN – "
-                f"{self._consecutive_failures} consecutive failures, "
-                f"cooldown {self._CB_COOLDOWN_SECONDS}s"
-            )
+        warning_message = None
+        with self._state_lock:
+            super()._record_error(key)
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._CB_FAILURE_THRESHOLD:
+                self._circuit_open_until = time.time() + self._CB_COOLDOWN_SECONDS
+                warning_message = (
+                    f"[MiniMax] Circuit breaker OPEN – "
+                    f"{self._consecutive_failures} consecutive failures, "
+                    f"cooldown {self._CB_COOLDOWN_SECONDS}s"
+                )
+        if warning_message:
+            logger.warning(warning_message)
 
     # ------------------------------------------------------------------
     # Time-range helpers
@@ -1724,6 +1972,8 @@ class SearchService:
 
         # In-memory search result cache: {cache_key: (timestamp, SearchResponse)}
         self._cache: Dict[str, Tuple[float, 'SearchResponse']] = {}
+        self._cache_lock = threading.RLock()
+        self._cache_inflight: Dict[str, threading.Event] = {}
         # Default cache TTL in seconds (10 minutes)
         self._cache_ttl: int = 600
         logger.info(
@@ -1784,35 +2034,67 @@ class SearchService:
         """Build a cache key from query parameters."""
         return f"{query}|{max_results}|{days}"
 
-    def _get_cached(self, key: str) -> Optional['SearchResponse']:
-        """Return cached SearchResponse if still valid, else None."""
+    def _get_cached_locked(self, key: str) -> Optional['SearchResponse']:
         entry = self._cache.get(key)
         if entry is None:
             return None
         ts, response = entry
         if time.time() - ts > self._cache_ttl:
-            del self._cache[key]
+            self._cache.pop(key, None)
             return None
         logger.debug(f"Search cache hit: {key[:60]}...")
         return response
 
+    def _get_cached(self, key: str) -> Optional['SearchResponse']:
+        """Return cached SearchResponse if still valid, else None."""
+        with self._cache_lock:
+            return self._get_cached_locked(key)
+
+    def _get_cached_or_reserve(
+        self,
+        key: str,
+    ) -> Tuple[Optional['SearchResponse'], bool, Optional[threading.Event]]:
+        with self._cache_lock:
+            cached = self._get_cached_locked(key)
+            if cached is not None:
+                return cached, False, None
+
+            event = self._cache_inflight.get(key)
+            if event is None:
+                event = threading.Event()
+                self._cache_inflight[key] = event
+                return None, True, event
+            return None, False, event
+
+    def _release_cache_fill(self, key: str, event: threading.Event) -> None:
+        with self._cache_lock:
+            current = self._cache_inflight.get(key)
+            if current is event:
+                self._cache_inflight.pop(key, None)
+                event.set()
+
+    def _wait_for_cached(self, key: str, event: threading.Event) -> Optional['SearchResponse']:
+        event.wait(timeout=max(1.0, min(float(self._cache_ttl), 30.0)))
+        return self._get_cached(key)
+
     def _put_cache(self, key: str, response: 'SearchResponse') -> None:
         """Store a successful SearchResponse in cache."""
-        # Hard cap: evict oldest entries when cache exceeds limit
-        _MAX_CACHE_SIZE = 500
-        if len(self._cache) >= _MAX_CACHE_SIZE:
-            now = time.time()
-            # First pass: remove expired entries
-            expired = [k for k, (ts, _) in self._cache.items() if now - ts > self._cache_ttl]
-            for k in expired:
-                del self._cache[k]
-            # Second pass: if still over limit, evict oldest entries (FIFO)
+        with self._cache_lock:
+            # Hard cap: evict oldest entries when cache exceeds limit
+            _MAX_CACHE_SIZE = 500
             if len(self._cache) >= _MAX_CACHE_SIZE:
-                excess = len(self._cache) - _MAX_CACHE_SIZE + 1
-                oldest = sorted(self._cache.keys(), key=lambda k: self._cache[k][0])[:excess]
-                for k in oldest:
-                    del self._cache[k]
-        self._cache[key] = (time.time(), response)
+                now = time.time()
+                # First pass: remove expired entries
+                expired = [k for k, (ts, _) in self._cache.items() if now - ts > self._cache_ttl]
+                for k in expired:
+                    self._cache.pop(k, None)
+                # Second pass: if still over limit, evict oldest entries (FIFO)
+                if len(self._cache) >= _MAX_CACHE_SIZE:
+                    excess = len(self._cache) - _MAX_CACHE_SIZE + 1
+                    oldest = sorted(self._cache.keys(), key=lambda k: self._cache[k][0])[:excess]
+                    for k in oldest:
+                        self._cache.pop(k, None)
+            self._cache[key] = (time.time(), response)
 
     def _effective_news_window_days(self) -> int:
         """Resolve effective news window from strategy profile and global max-age."""
@@ -2121,66 +2403,79 @@ class SearchService:
             provider_max_results,
         )
 
-        # Check cache first
         cache_key = self._cache_key(query, max_results, search_days)
-        cached = self._get_cached(cache_key)
+        cached, cache_owner, cache_event = self._get_cached_or_reserve(cache_key)
         if cached is not None:
             logger.info(f"使用缓存搜索结果: {stock_name}({stock_code})")
             return cached
 
-        # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
-        had_provider_success = False
-        for provider in self._providers:
-            if not provider.is_available:
-                continue
+        if not cache_owner and cache_event is not None:
+            cached = self._wait_for_cached(cache_key, cache_event)
+            if cached is not None:
+                logger.info(f"使用并发填充后的缓存搜索结果: {stock_name}({stock_code})")
+                return cached
+            cached, cache_owner, cache_event = self._get_cached_or_reserve(cache_key)
+            if cached is not None:
+                logger.info(f"使用等待后命中的缓存搜索结果: {stock_name}({stock_code})")
+                return cached
 
-            search_kwargs: Dict[str, Any] = {}
-            if isinstance(provider, TavilySearchProvider):
-                search_kwargs["topic"] = "news"
+        try:
+            # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
+            had_provider_success = False
+            for provider in self._providers:
+                if not provider.is_available:
+                    continue
 
-            response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
-            filtered_response = self._filter_news_response(
-                response,
-                search_days=search_days,
-                max_results=max_results,
-                log_scope=f"{stock_code}:{provider.name}:stock_news",
-            )
-            had_provider_success = had_provider_success or bool(response.success)
+                search_kwargs: Dict[str, Any] = {}
+                if isinstance(provider, TavilySearchProvider):
+                    search_kwargs["topic"] = "news"
 
-            if filtered_response.success and filtered_response.results:
-                logger.info(f"使用 {provider.name} 搜索成功")
-                self._put_cache(cache_key, filtered_response)
-                return filtered_response
-            else:
-                if response.success and not filtered_response.results:
-                    logger.info(
-                        "%s 搜索成功但过滤后无有效新闻，继续尝试下一引擎",
-                        provider.name,
-                    )
+                response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
+                filtered_response = self._filter_news_response(
+                    response,
+                    search_days=search_days,
+                    max_results=max_results,
+                    log_scope=f"{stock_code}:{provider.name}:stock_news",
+                )
+                had_provider_success = had_provider_success or bool(response.success)
+
+                if filtered_response.success and filtered_response.results:
+                    logger.info(f"使用 {provider.name} 搜索成功")
+                    self._put_cache(cache_key, filtered_response)
+                    return filtered_response
                 else:
-                    logger.warning(
-                        "%s 搜索失败: %s，尝试下一个引擎",
-                        provider.name,
-                        response.error_message,
-                    )
+                    if response.success and not filtered_response.results:
+                        logger.info(
+                            "%s 搜索成功但过滤后无有效新闻，继续尝试下一引擎",
+                            provider.name,
+                        )
+                    else:
+                        logger.warning(
+                            "%s 搜索失败: %s，尝试下一个引擎",
+                            provider.name,
+                            response.error_message,
+                        )
 
-        if had_provider_success:
+            if had_provider_success:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider="Filtered",
+                    success=True,
+                    error_message=None,
+                )
+            
+            # 所有引擎都失败
             return SearchResponse(
                 query=query,
                 results=[],
-                provider="Filtered",
-                success=True,
-                error_message=None,
+                provider="None",
+                success=False,
+                error_message="所有搜索引擎都不可用或搜索失败"
             )
-        
-        # 所有引擎都失败
-        return SearchResponse(
-            query=query,
-            results=[],
-            provider="None",
-            success=False,
-            error_message="所有搜索引擎都不可用或搜索失败"
-        )
+        finally:
+            if cache_owner and cache_event is not None:
+                self._release_cache_fill(cache_key, cache_event)
     
     def search_stock_events(
         self,
@@ -2686,6 +2981,7 @@ class SearchService:
 
 # === 便捷函数 ===
 _search_service: Optional[SearchService] = None
+_search_service_lock = threading.Lock()
 
 
 def get_search_service() -> SearchService:
@@ -2693,20 +2989,22 @@ def get_search_service() -> SearchService:
     global _search_service
     
     if _search_service is None:
-        from src.config import get_config
-        config = get_config()
-        
-        _search_service = SearchService(
-            bocha_keys=config.bocha_api_keys,
-            tavily_keys=config.tavily_api_keys,
-            brave_keys=config.brave_api_keys,
-            serpapi_keys=config.serpapi_keys,
-            minimax_keys=config.minimax_api_keys,
-            searxng_base_urls=config.searxng_base_urls,
-            searxng_public_instances_enabled=config.searxng_public_instances_enabled,
-            news_max_age_days=config.news_max_age_days,
-            news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
-        )
+        with _search_service_lock:
+            if _search_service is None:
+                from src.config import get_config
+                config = get_config()
+                
+                _search_service = SearchService(
+                    bocha_keys=config.bocha_api_keys,
+                    tavily_keys=config.tavily_api_keys,
+                    brave_keys=config.brave_api_keys,
+                    serpapi_keys=config.serpapi_keys,
+                    minimax_keys=config.minimax_api_keys,
+                    searxng_base_urls=config.searxng_base_urls,
+                    searxng_public_instances_enabled=config.searxng_public_instances_enabled,
+                    news_max_age_days=config.news_max_age_days,
+                    news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
+                )
     
     return _search_service
 
@@ -2714,7 +3012,8 @@ def get_search_service() -> SearchService:
 def reset_search_service() -> None:
     """重置搜索服务（用于测试）"""
     global _search_service
-    _search_service = None
+    with _search_service_lock:
+        _search_service = None
 
 
 if __name__ == "__main__":

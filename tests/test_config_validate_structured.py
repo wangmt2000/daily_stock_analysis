@@ -54,6 +54,7 @@ def _make_config(**kwargs) -> Config:
         discord_bot_token=None,
         discord_main_channel_id=None,
         discord_webhook_url=None,
+        discord_interactions_public_key=None,
         llm_channels=[],
         litellm_config_path=None,
         gemini_api_key=None,
@@ -123,6 +124,57 @@ class TestValidateStructuredStockList:
         cfg = _make_config(stock_list=["600519", "000001"])
         issues = cfg.validate_structured()
         assert not any(i.field == "STOCK_LIST" for i in issues if i.severity == "error")
+
+    def test_stock_email_groups_outside_stock_list_is_warning(self):
+        cfg = _make_config(
+            stock_list=["600519"],
+            stock_email_groups=[(["600519", "000001"], ["group@example.com"])],
+        )
+        issues = cfg.validate_structured()
+        warning = next(i for i in issues if i.field == "STOCK_GROUP_N")
+        assert warning.severity == "warning"
+        assert "000001" in warning.message
+        assert "邮件路由" in warning.message
+        assert "STOCK_LIST" in warning.message
+
+    def test_stock_email_groups_subset_of_stock_list_has_no_warning(self):
+        cfg = _make_config(
+            stock_list=["600519", "000001"],
+            stock_email_groups=[(["600519"], ["group@example.com"])],
+        )
+        issues = cfg.validate_structured()
+        assert not any(i.field == "STOCK_GROUP_N" for i in issues)
+
+    def test_stock_email_groups_canonical_normalization_no_false_warning(self):
+        """Equivalent stock code formats (SH600519 vs 600519, 1810.HK vs HK01810)
+        should not trigger a subset warning after canonical normalization."""
+        cfg = _make_config(
+            stock_list=["600519", "HK00700"],
+            stock_email_groups=[
+                (["SH600519", "1810.HK"], ["group@example.com"]),
+            ],
+        )
+        issues = cfg.validate_structured()
+        group_warnings = [i for i in issues if i.field == "STOCK_GROUP_N"]
+        # SH600519 normalizes to 600519 (present in stock_list)
+        # 1810.HK normalizes to HK01810 (NOT present — HK00700 ≠ HK01810)
+        assert len(group_warnings) == 1
+        assert "HK01810" in group_warnings[0].message
+        assert "600519" not in group_warnings[0].message
+
+    def test_stock_email_groups_warning_normalizes_and_deduplicates_codes(self):
+        cfg = _make_config(
+            stock_list=["600519"],
+            stock_email_groups=[
+                (["  aapl ", "AAPL", "aapl", " "], ["group@example.com"]),
+            ],
+        )
+        issues = cfg.validate_structured()
+        warning = next(i for i in issues if i.field == "STOCK_GROUP_N")
+        assert warning.severity == "warning"
+        assert "AAPL" in warning.message
+        assert "  aapl " not in warning.message
+        assert warning.message.count("AAPL") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +496,24 @@ class TestEnvAliasCompatibility:
             config = Config._load_from_env()
 
         assert config.discord_main_channel_id == "main-channel"
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_discord_interactions_public_key_is_loaded(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ):
+        with patch.dict(
+            "os.environ",
+            {
+                "DISCORD_INTERACTIONS_PUBLIC_KEY": "abcdef123456",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        assert config.discord_interactions_public_key == "abcdef123456"
 
 
 # ---------------------------------------------------------------------------

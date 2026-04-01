@@ -110,6 +110,11 @@ LLM_OLLAMA_MODELS=qwen3:8b,llama3.2
 LITELLM_MODEL=ollama/qwen3:8b
 ```
 
+### MiniMax Model Naming in Channel Mode
+
+- If you access MiniMax through an OpenAI-compatible channel, enter the model as `minimax/<model-name>` in the channel model list, for example `minimax/MiniMax-M1`.
+- The Web settings page now keeps that value unchanged in Primary, Agent Primary, Fallback, and Vision selectors instead of rewriting it to `openai/minimax/<model-name>`.
+
 > **Critical Warning**: If you enable `LLM_CHANNELS`, any standard `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` declared independently will be **completely ignored**. **Use only one mode** to prevent configuration conflicts.
 
 ---

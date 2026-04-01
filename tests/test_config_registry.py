@@ -78,5 +78,23 @@ class TestSensitiveFieldsUsePasswordControl(unittest.TestCase):
                          f"Sensitive fields with non-password ui_control: {violations}")
 
 
+class TestDiscordInteractionPublicKeyField(unittest.TestCase):
+    def test_field_definition_exists(self):
+        field = get_field_definition("DISCORD_INTERACTIONS_PUBLIC_KEY")
+        self.assertEqual(field["category"], "notification")
+        self.assertFalse(field["is_sensitive"])
+        self.assertEqual(field["ui_control"], "text")
+
+    def test_schema_response_includes_public_key_field(self):
+        schema = build_schema_response()
+        notification_cat = next(
+            (c for c in schema["categories"] if c["category"] == "notification"),
+            None,
+        )
+        self.assertIsNotNone(notification_cat, "notification category missing")
+        field_keys = {f["key"] for f in notification_cat["fields"]}
+        self.assertIn("DISCORD_INTERACTIONS_PUBLIC_KEY", field_keys)
+
+
 if __name__ == "__main__":
     unittest.main()

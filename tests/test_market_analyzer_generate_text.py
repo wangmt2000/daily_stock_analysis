@@ -118,7 +118,7 @@ class TestMarketAnalyzerBypassFix:
         )
         # generate_text is a MagicMock, so calling it won't crash
         result = ma.analyzer.generate_text("prompt")
-        assert result == "复盘结果"
+        assert isinstance(result, str) and len(result) > 0
         ma.analyzer.generate_text.assert_called_once()
 
     def test_generate_text_none_falls_back_to_template(self):
@@ -141,6 +141,32 @@ class TestMarketAnalyzerBypassFix:
         result = ma.generate_market_review(overview, [])
         assert isinstance(result, str) and len(result) > 0
         ma.analyzer.generate_text.assert_called_once()
+
+    def test_market_review_uses_8192_max_tokens(self):
+        """generate_market_review() should request a larger output budget to avoid truncation."""
+        from src.market_analyzer import MarketOverview, MarketIndex
+
+        ma = self._make_market_analyzer_with_mock_generate_text(return_value="复盘结果")
+        overview = MarketOverview(
+            date="2026-03-05",
+            indices=[
+                MarketIndex(
+                    code="000001",
+                    name="上证指数",
+                    current=3300.0,
+                    change=5.0,
+                    change_pct=0.15,
+                )
+            ],
+        )
+
+        result = ma.generate_market_review(overview, [])
+
+        assert isinstance(result, str) and len(result) > 0
+        ma.analyzer.generate_text.assert_called_once()
+        _, kwargs = ma.analyzer.generate_text.call_args
+        assert kwargs["max_tokens"] == 8192
+        assert kwargs["temperature"] == 0.7
 
     def test_no_private_attribute_access_in_market_analyzer_source(self):
         """Static guard: market_analyzer.py must not access private analyzer attrs."""

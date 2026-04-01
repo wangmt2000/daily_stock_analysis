@@ -104,7 +104,6 @@ export const Input = ({
       }}
       aria-label={visible ? '隐藏内容' : '显示内容'}
       tabIndex={-1}
-      title={visible ? '隐藏' : '显示'}
     >
       <EyeToggleIcon visible={visible} />
     </button>

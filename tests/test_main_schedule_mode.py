@@ -79,13 +79,25 @@ class MainScheduleModeTestCase(unittest.TestCase):
         config = self._make_config(schedule_enabled=False)
         scheduled_call = {}
 
-        def fake_run_with_schedule(task, schedule_time, run_immediately):
+        def fake_run_with_schedule(
+            task,
+            schedule_time,
+            run_immediately,
+            background_tasks=None,
+            schedule_time_provider=None,
+        ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately
+            scheduled_call["background_tasks"] = background_tasks or []
+            scheduled_call["resolved_schedule_time"] = (
+                schedule_time_provider() if schedule_time_provider is not None else None
+            )
             task()
 
         with patch("main.parse_arguments", return_value=args), \
              patch("main.get_config", return_value=config), \
+             patch("main._reload_runtime_config", return_value=config), \
+             patch("main._build_schedule_time_provider", return_value=lambda: "18:00"), \
              patch("main.setup_logging"), \
              patch("main.run_full_analysis") as run_full_analysis, \
              patch("main.logger.warning") as warning_log, \
@@ -93,11 +105,208 @@ class MainScheduleModeTestCase(unittest.TestCase):
             exit_code = main.main()
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(scheduled_call, {"schedule_time": "18:00", "run_immediately": True})
+        self.assertEqual(
+            scheduled_call,
+            {
+                "schedule_time": "18:00",
+                "run_immediately": True,
+                "background_tasks": [],
+                "resolved_schedule_time": "18:00",
+            },
+        )
         run_full_analysis.assert_called_once_with(config, args, None)
         warning_log.assert_any_call(
             "定时模式下检测到 --stocks 参数；计划执行将忽略启动时股票快照，并在每次运行前重新读取最新的 STOCK_LIST。"
         )
+
+    def test_schedule_mode_reload_uses_latest_runtime_config(self) -> None:
+        args = self._make_args(schedule=True)
+        startup_config = self._make_config(schedule_enabled=True, schedule_time="18:00")
+        runtime_config = self._make_config(schedule_enabled=True, schedule_time="09:30")
+        scheduled_call = {}
+
+        def fake_run_with_schedule(
+            task,
+            schedule_time,
+            run_immediately,
+            background_tasks=None,
+            schedule_time_provider=None,
+        ):
+            scheduled_call["schedule_time"] = schedule_time
+            scheduled_call["resolved_schedule_time"] = (
+                schedule_time_provider() if schedule_time_provider is not None else None
+            )
+            task()
+
+        with patch("main.parse_arguments", return_value=args), \
+             patch("main.get_config", return_value=startup_config), \
+             patch("main._reload_runtime_config", return_value=runtime_config), \
+             patch("main._build_schedule_time_provider", return_value=lambda: "09:30"), \
+             patch("main.setup_logging"), \
+             patch("main.run_full_analysis") as run_full_analysis, \
+             patch("src.scheduler.run_with_schedule", side_effect=fake_run_with_schedule):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            scheduled_call,
+            {"schedule_time": "18:00", "resolved_schedule_time": "09:30"},
+        )
+        run_full_analysis.assert_called_once_with(runtime_config, args, None)
+
+    def test_reload_runtime_config_preserves_process_env_overrides(self) -> None:
+        self.env_path.write_text(
+            "OPENAI_API_KEY=stale-file\nSCHEDULE_TIME=09:30\n",
+            encoding="utf-8",
+        )
+        runtime_config = self._make_config(schedule_enabled=True, schedule_time="09:30")
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": str(self.env_path),
+                "OPENAI_API_KEY": "runtime-secret",
+                "SCHEDULE_TIME": "18:00",
+            },
+            clear=False,
+        ), patch.object(
+            main,
+            "_INITIAL_PROCESS_ENV",
+            {"OPENAI_API_KEY": "runtime-secret"},
+        ), patch.object(
+            main,
+            "_RUNTIME_ENV_FILE_KEYS",
+            {"SCHEDULE_TIME"},
+        ), patch(
+            "main.get_config",
+            return_value=runtime_config,
+        ) as get_config_mock:
+            reloaded_config = main._reload_runtime_config()
+            self.assertEqual(os.environ["OPENAI_API_KEY"], "runtime-secret")
+            self.assertEqual(os.environ["SCHEDULE_TIME"], "09:30")
+
+        self.assertIs(reloaded_config, runtime_config)
+        get_config_mock.assert_called_once_with()
+
+    def test_reload_env_file_values_preserves_managed_env_vars_when_read_fails(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": str(self.env_path),
+                "OPENAI_API_KEY": "runtime-secret",
+                "SCHEDULE_TIME": "09:30",
+            },
+            clear=False,
+        ), patch.object(
+            main,
+            "_INITIAL_PROCESS_ENV",
+            {},
+        ), patch.object(
+            main,
+            "_RUNTIME_ENV_FILE_KEYS",
+            {"OPENAI_API_KEY", "SCHEDULE_TIME"},
+        ), patch(
+            "main.dotenv_values",
+            side_effect=OSError("boom"),
+        ):
+            main._reload_env_file_values_preserving_overrides()
+
+            self.assertEqual(os.environ["OPENAI_API_KEY"], "runtime-secret")
+            self.assertEqual(os.environ["SCHEDULE_TIME"], "09:30")
+            self.assertEqual(
+                main._RUNTIME_ENV_FILE_KEYS,
+                {"OPENAI_API_KEY", "SCHEDULE_TIME"},
+            )
+
+    def test_reload_runtime_config_refreshes_env_before_resetting_singleton(self) -> None:
+        runtime_config = self._make_config(schedule_enabled=True, schedule_time="09:30")
+        call_order = []
+
+        def fake_reload_env() -> None:
+            call_order.append("reload_env")
+
+        def fake_reset_instance() -> None:
+            call_order.append("reset_instance")
+
+        def fake_get_config():
+            call_order.append("get_config")
+            return runtime_config
+
+        with patch(
+            "main._reload_env_file_values_preserving_overrides",
+            side_effect=fake_reload_env,
+        ), patch(
+            "main.Config.reset_instance",
+            side_effect=fake_reset_instance,
+        ), patch(
+            "main.get_config",
+            side_effect=fake_get_config,
+        ):
+            reloaded_config = main._reload_runtime_config()
+
+        self.assertIs(reloaded_config, runtime_config)
+        self.assertEqual(call_order, ["reload_env", "reset_instance", "get_config"])
+
+    def test_schedule_time_provider_propagates_config_read_failures(self) -> None:
+        with patch(
+            "src.core.config_manager.ConfigManager.read_config_map",
+            side_effect=RuntimeError("boom"),
+        ):
+            provider = main._build_schedule_time_provider("18:00")
+
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                provider()
+
+    def test_schedule_time_provider_respects_process_env_precedence(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"SCHEDULE_TIME": "18:00"},
+            clear=False,
+        ), patch.object(
+            main,
+            "_INITIAL_PROCESS_ENV",
+            {"SCHEDULE_TIME": "18:00"},
+        ), patch(
+            "src.core.config_manager.ConfigManager.read_config_map",
+            side_effect=AssertionError("should not read .env when process env override exists"),
+        ):
+            provider = main._build_schedule_time_provider("09:30")
+
+            self.assertEqual(provider(), "18:00")
+
+    def test_schedule_time_provider_falls_back_to_system_default_on_clear(self) -> None:
+        """When SCHEDULE_TIME is cleared/removed from config, provider returns '18:00'."""
+        with patch.dict(
+            os.environ,
+            {"SCHEDULE_TIME": "09:30"},
+            clear=False,
+        ), patch.object(
+            main,
+            "_INITIAL_PROCESS_ENV",
+            {},
+        ), patch(
+            "src.core.config_manager.ConfigManager.read_config_map",
+            return_value={},
+        ):
+            provider = main._build_schedule_time_provider("09:30")
+            self.assertEqual(provider(), "18:00")
+
+    def test_schedule_time_provider_falls_back_to_system_default_on_empty(self) -> None:
+        """When SCHEDULE_TIME is empty string in config, provider returns '18:00'."""
+        with patch.dict(
+            os.environ,
+            {"SCHEDULE_TIME": "09:30"},
+            clear=False,
+        ), patch.object(
+            main,
+            "_INITIAL_PROCESS_ENV",
+            {},
+        ), patch(
+            "src.core.config_manager.ConfigManager.read_config_map",
+            return_value={"SCHEDULE_TIME": "  "},
+        ):
+            provider = main._build_schedule_time_provider("09:30")
+            self.assertEqual(provider(), "18:00")
 
     def test_single_run_keeps_cli_stock_override(self) -> None:
         args = self._make_args(stocks="600519,000001")
