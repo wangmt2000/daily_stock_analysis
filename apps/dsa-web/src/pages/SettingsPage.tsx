@@ -398,8 +398,8 @@ const SettingsPage: React.FC = () => {
             ) : null}
             {activeCategory === 'ai_model' ? (
               <SettingsSectionCard
-                title="LLM 渠道与模型"
-                description="统一管理渠道协议、基础地址、API Key、主模型与回退模型。"
+                title="AI 模型接入"
+                description="统一管理模型渠道、基础地址、API Key、主模型与备选模型。"
               >
                 <LLMChannelEditor
                   items={rawActiveItems}

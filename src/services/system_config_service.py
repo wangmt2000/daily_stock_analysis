@@ -449,6 +449,32 @@ class SystemConfigService:
                     )
                 )
 
+        startup_only_run_keys = submitted_keys & {
+            "RUN_IMMEDIATELY",
+        }
+        if startup_only_run_keys:
+            warnings.append(
+                (
+                    f"{', '.join(sorted(startup_only_run_keys))} 已写入 .env。"
+                    "它属于启动期单次运行配置：当前已运行的 WebUI/API 进程不会因为本次保存立即触发分析；"
+                    "请重启当前进程后，在非 schedule 模式下按新值生效。"
+                )
+            )
+
+        startup_only_schedule_keys = submitted_keys & {
+            "SCHEDULE_ENABLED",
+            "SCHEDULE_TIME",
+            "SCHEDULE_RUN_IMMEDIATELY",
+        }
+        if startup_only_schedule_keys:
+            warnings.append(
+                (
+                    f"{', '.join(sorted(startup_only_schedule_keys))} 已写入 .env。"
+                    "这些属于启动期调度配置：当前已运行的 WebUI/API 进程不会因为本次保存立即触发分析，"
+                    "也不会自动重建 scheduler；请重启当前进程，并以 schedule 模式重新启动后生效。"
+                )
+            )
+
         return warnings
 
     def apply_simple_updates(
@@ -968,8 +994,9 @@ class SystemConfigService:
                         "key": "LITELLM_MODEL",
                         "code": "missing_runtime_source",
                         "message": (
-                            "LITELLM_MODEL is set, but there are no enabled channel models "
-                            "or matching legacy API keys for it"
+                            "A primary model is selected, but no usable runtime source was found. "
+                            "Enable at least one channel with available models, or provide the "
+                            "matching provider API key so the model can be resolved."
                         ),
                         "severity": "error",
                         "expected": "enabled channel model or matching legacy API key",
@@ -990,8 +1017,9 @@ class SystemConfigService:
                         "key": "AGENT_LITELLM_MODEL",
                         "code": "missing_runtime_source",
                         "message": (
-                            "AGENT_LITELLM_MODEL is set, but there are no enabled channel models "
-                            "or matching legacy API keys for it"
+                            "An Agent primary model is selected, but no usable runtime source was found. "
+                            "Enable at least one channel with available models, or provide the "
+                            "matching provider API key so the model can be resolved."
                         ),
                         "severity": "error",
                         "expected": "enabled channel model or matching legacy API key",
@@ -1014,8 +1042,8 @@ class SystemConfigService:
                         "key": "LITELLM_FALLBACK_MODELS",
                         "code": "missing_runtime_source",
                         "message": (
-                            "LITELLM_FALLBACK_MODELS contains models without enabled channels "
-                            "or matching legacy API keys"
+                            "Some fallback models do not have an enabled channel "
+                            "or matching API key available"
                         ),
                         "severity": "error",
                         "expected": "enabled channel models or matching legacy API keys",
@@ -1030,8 +1058,8 @@ class SystemConfigService:
                         "key": "VISION_MODEL",
                         "code": "missing_runtime_source",
                         "message": (
-                            "VISION_MODEL is set, but there are no enabled channel models "
-                            "or matching legacy API keys for it"
+                            "A Vision model is selected, but there is no enabled channel "
+                            "or matching API key available for it"
                         ),
                         "severity": "warning",
                         "expected": "enabled channel model or matching legacy API key",
@@ -1048,7 +1076,8 @@ class SystemConfigService:
                     "key": "LITELLM_MODEL",
                     "code": "unknown_model",
                     "message": (
-                        "LITELLM_MODEL is not declared by the current enabled channels. "
+                        "The selected primary model is not declared by the current enabled channels "
+                        "or advanced model routing config. "
                         f"Available models: {', '.join(available_models[:6])}"
                     ),
                     "severity": "error",
@@ -1073,7 +1102,8 @@ class SystemConfigService:
                     "key": "AGENT_LITELLM_MODEL",
                     "code": "unknown_model",
                     "message": (
-                        "AGENT_LITELLM_MODEL is not declared by the current enabled channels. "
+                        "The selected Agent primary model is not declared by the current enabled channels "
+                        "or advanced model routing config. "
                         f"Available models: {', '.join(available_models[:6])}"
                     ),
                     "severity": "error",
@@ -1097,7 +1127,8 @@ class SystemConfigService:
                     "key": "LITELLM_FALLBACK_MODELS",
                     "code": "unknown_model",
                     "message": (
-                        "LITELLM_FALLBACK_MODELS contains models that are not declared by the current enabled channels"
+                        "Fallback models include entries that are not declared by the current enabled channels "
+                        "or advanced model routing config"
                     ),
                     "severity": "error",
                     "expected": ",".join(available_models[:6]),
@@ -1112,7 +1143,8 @@ class SystemConfigService:
                     "key": "VISION_MODEL",
                     "code": "unknown_model",
                     "message": (
-                        "VISION_MODEL is not declared by the current enabled channels"
+                        "The selected Vision model is not declared by the current enabled channels "
+                        "or advanced model routing config"
                     ),
                     "severity": "warning",
                     "expected": ",".join(available_models[:6]),

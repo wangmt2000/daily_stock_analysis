@@ -211,19 +211,17 @@ class BaseSearchProvider(ABC):
         """执行搜索（子类实现）"""
         pass
     
-    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
-        """
-        执行搜索
-        
-        Args:
-            query: 搜索关键词
-            max_results: 最大返回结果数
-            days: 搜索最近几天的时间范围（默认7天）
-            
-        Returns:
-            SearchResponse 对象
-        """
-        api_key = self._get_next_key()
+    def _execute_search(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        days: int = 7,
+        api_key: Optional[str] = None,
+        **search_kwargs: Any,
+    ) -> SearchResponse:
+        """Run the shared search flow with an optional preselected API key."""
+        api_key = api_key or self._get_next_key()
         if not api_key:
             return SearchResponse(
                 query=query,
@@ -232,20 +230,20 @@ class BaseSearchProvider(ABC):
                 success=False,
                 error_message=f"{self._name} 未配置 API Key"
             )
-        
+
         start_time = time.time()
         try:
-            response = self._do_search(query, api_key, max_results, days=days)
+            response = self._do_search(query, api_key, max_results, days=days, **search_kwargs)
             response.search_time = time.time() - start_time
-            
+
             if response.success:
                 self._record_success(api_key)
                 logger.info(f"[{self._name}] 搜索 '{query}' 成功，返回 {len(response.results)} 条结果，耗时 {response.search_time:.2f}s")
             else:
                 self._record_error(api_key)
-            
+
             return response
-            
+
         except Exception as e:
             self._record_error(api_key)
             elapsed = time.time() - start_time
@@ -258,6 +256,20 @@ class BaseSearchProvider(ABC):
                 error_message=str(e),
                 search_time=elapsed
             )
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """
+        执行搜索
+        
+        Args:
+            query: 搜索关键词
+            max_results: 最大返回结果数
+            days: 搜索最近几天的时间范围（默认7天）
+            
+        Returns:
+            SearchResponse 对象
+        """
+        return self._execute_search(query, max_results=max_results, days=days)
 
 
 class TavilySearchProvider(BaseSearchProvider):
@@ -1296,7 +1308,15 @@ class BraveSearchProvider(BaseSearchProvider):
     def __init__(self, api_keys: List[str]):
         super().__init__(api_keys, "Brave")
 
-    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+        search_lang: Optional[str] = None,
+        country: Optional[str] = None,
+    ) -> SearchResponse:
         """执行 Brave 搜索"""
         try:
             # 请求头
@@ -1320,10 +1340,12 @@ class BraveSearchProvider(BaseSearchProvider):
                 "q": query,
                 "count": min(max_results, 20),  # Brave 最大支持20条
                 "freshness": freshness,
-                "search_lang": "en",  # 英文内容（US股票优先）
-                "country": "US",  # 美国区域偏好
                 "safesearch": "moderate"
             }
+            if search_lang:
+                params["search_lang"] = search_lang
+            if country:
+                params["country"] = country
 
             # 执行搜索（GET 请求）
             response = requests.get(
@@ -1452,6 +1474,26 @@ class BraveSearchProvider(BaseSearchProvider):
             return domain or '未知来源'
         except Exception:
             return '未知来源'
+
+    def search(
+        self,
+        query: str,
+        max_results: int = 5,
+        days: int = 7,
+        search_lang: Optional[str] = None,
+        country: Optional[str] = None,
+    ) -> SearchResponse:
+        """执行 Brave 搜索，可按调用方传入区域与语言偏好。"""
+        if search_lang is None and country is None:
+            return super().search(query, max_results=max_results, days=days)
+
+        return self._execute_search(
+            query,
+            max_results=max_results,
+            days=days,
+            search_lang=search_lang,
+            country=country,
+        )
 
 
 class SearXNGSearchProvider(BaseSearchProvider):
@@ -1884,7 +1926,9 @@ class SearchService:
     NEWS_OVERSAMPLE_FACTOR = 2
     NEWS_OVERSAMPLE_MAX = 10
     FUTURE_TOLERANCE_DAYS = 1
-    
+    _CHINESE_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+    _US_STOCK_RE = re.compile(r"^[A-Za-z]{1,5}(\.[A-Za-z])?$")
+
     def __init__(
         self,
         bocha_keys: Optional[List[str]] = None,
@@ -1987,10 +2031,9 @@ class SearchService:
     @staticmethod
     def _is_foreign_stock(stock_code: str) -> bool:
         """判断是否为港股或美股"""
-        import re
         code = stock_code.strip()
         # 美股：1-5个大写字母，可能包含点（如 BRK.B）
-        if re.match(r'^[A-Za-z]{1,5}(\.[A-Za-z])?$', code):
+        if SearchService._US_STOCK_RE.match(code):
             return True
         # 港股：带 hk 前缀或 5位纯数字
         lower = code.lower()
@@ -1999,6 +2042,105 @@ class SearchService:
         if code.isdigit() and len(code) == 5:
             return True
         return False
+
+    @classmethod
+    def _contains_chinese_text(cls, value: Optional[str]) -> bool:
+        """Return True when the input contains CJK characters."""
+        return bool(value and cls._CHINESE_TEXT_RE.search(value))
+
+    @classmethod
+    def _is_us_stock(cls, stock_code: str) -> bool:
+        """判断是否为美股/美股指数代码。"""
+        code = (stock_code or "").strip().upper()
+        return bool(cls._US_STOCK_RE.match(code) or is_us_index_code(code))
+
+    @classmethod
+    def _should_prefer_chinese_news(
+        cls,
+        stock_code: str,
+        stock_name: str,
+        focus_keywords: Optional[List[str]] = None,
+    ) -> bool:
+        """A 股或中文名称/关键词场景下优先中文资讯。
+
+        Only returns True when there is a positive Chinese signal:
+        Chinese characters in keywords/stock_name, or a 6-digit A-stock code.
+        Avoids false positives for non-foreign but English contexts like
+        ``stock_code="market", stock_name="US market"``.
+        """
+        if any(cls._contains_chinese_text(keyword) for keyword in (focus_keywords or [])):
+            return True
+        if cls._contains_chinese_text(stock_name):
+            return True
+        # Positive A-stock identification: 6-digit numeric codes (e.g. 600519)
+        code = (stock_code or "").strip()
+        return code.isdigit() and len(code) == 6
+
+    @classmethod
+    def _is_chinese_news_result(cls, item: SearchResult) -> bool:
+        """Heuristic check for Chinese-language news items."""
+        return cls._contains_chinese_text(" ".join(filter(None, [item.title, item.snippet, item.source])))
+
+    @classmethod
+    def _prioritize_news_language(
+        cls,
+        response: SearchResponse,
+        *,
+        prefer_chinese: bool,
+    ) -> Tuple[SearchResponse, int]:
+        """Reorder results by preferred language and return preferred-result count."""
+        if not prefer_chinese or not response.success or not response.results:
+            return response, 0
+
+        chinese_results: List[SearchResult] = []
+        other_results: List[SearchResult] = []
+        for item in response.results:
+            if cls._is_chinese_news_result(item):
+                chinese_results.append(item)
+            else:
+                other_results.append(item)
+
+        return (
+            SearchResponse(
+                query=response.query,
+                results=chinese_results + other_results,
+                provider=response.provider,
+                success=response.success,
+                error_message=response.error_message,
+                search_time=response.search_time,
+            ),
+            len(chinese_results),
+        )
+
+    @classmethod
+    def _is_better_preferred_news_response(
+        cls,
+        candidate: SearchResponse,
+        *,
+        candidate_preferred_count: int,
+        best_response: Optional[SearchResponse],
+        best_preferred_count: int,
+    ) -> bool:
+        """Prefer responses with more Chinese items, then more total items."""
+        if best_response is None:
+            return True
+        if candidate_preferred_count != best_preferred_count:
+            return candidate_preferred_count > best_preferred_count
+        return len(candidate.results) > len(best_response.results)
+
+    @classmethod
+    def _brave_search_locale(
+        cls,
+        stock_code: str,
+        *,
+        prefer_chinese: bool,
+    ) -> Dict[str, str]:
+        """Resolve Brave locale hints without forcing US bias onto non-US symbols."""
+        if prefer_chinese:
+            return {"search_lang": "zh-hans", "country": "CN"}
+        if cls._is_us_stock(stock_code):
+            return {"search_lang": "en", "country": "US"}
+        return {}
 
     # A-share ETF code prefixes (Shanghai 51/52/56/58, Shenzhen 15/16/18)
     _A_ETF_PREFIXES = ('51', '52', '56', '58', '15', '16', '18')
@@ -2351,7 +2493,30 @@ class SearchService:
             error_message=response.error_message,
             search_time=response.search_time,
         )
-    
+
+    @staticmethod
+    def _limit_search_response(
+        response: SearchResponse,
+        *,
+        max_results: int,
+    ) -> SearchResponse:
+        """Trim response results without changing the rest of the metadata."""
+        if not response.success or not response.results:
+            return response
+
+        limited_results = response.results[:max_results]
+        if len(limited_results) == len(response.results):
+            return response
+
+        return SearchResponse(
+            query=response.query,
+            results=limited_results,
+            provider=response.provider,
+            success=response.success,
+            error_message=response.error_message,
+            search_time=response.search_time,
+        )
+
     def search_stock_news(
         self,
         stock_code: str,
@@ -2375,12 +2540,19 @@ class SearchService:
         # 并统一受 NEWS_MAX_AGE_DAYS 上限约束。
         search_days = self._effective_news_window_days()
         provider_max_results = self._provider_request_size(max_results)
+        prefer_chinese = self._should_prefer_chinese_news(
+            stock_code,
+            stock_name,
+            focus_keywords=focus_keywords,
+        )
 
         # 构建搜索查询（优化搜索效果）
         is_foreign = self._is_foreign_stock(stock_code)
         if focus_keywords:
             # 如果提供了关键词，直接使用关键词作为查询
             query = " ".join(focus_keywords)
+        elif prefer_chinese:
+            query = f"{stock_name} {stock_code} 股票 最新消息"
         elif is_foreign:
             # 港股/美股使用英文搜索关键词
             query = f"{stock_name} {stock_code} stock latest news"
@@ -2391,7 +2563,7 @@ class SearchService:
         logger.info(
             (
                 "搜索股票新闻: %s(%s), query='%s', 时间范围: 近%s天 "
-                "(profile=%s, NEWS_MAX_AGE_DAYS=%s), 目标条数=%s, provider请求条数=%s"
+                "(profile=%s, NEWS_MAX_AGE_DAYS=%s, prefer_chinese=%s), 目标条数=%s, provider请求条数=%s"
             ),
             stock_name,
             stock_code,
@@ -2399,11 +2571,16 @@ class SearchService:
             search_days,
             self.news_strategy_profile,
             self.news_max_age_days,
+            prefer_chinese,
             max_results,
             provider_max_results,
         )
 
-        cache_key = self._cache_key(query, max_results, search_days)
+        cache_key = self._cache_key(
+            f"{query}|news_pref={'zh' if prefer_chinese else 'default'}",
+            max_results,
+            search_days,
+        )
         cached, cache_owner, cache_event = self._get_cached_or_reserve(cache_key)
         if cached is not None:
             logger.info(f"使用缓存搜索结果: {stock_name}({stock_code})")
@@ -2422,6 +2599,9 @@ class SearchService:
         try:
             # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
             had_provider_success = False
+            fallback_response: Optional[SearchResponse] = None
+            best_preferred_response: Optional[SearchResponse] = None
+            best_preferred_count = 0
             for provider in self._providers:
                 if not provider.is_available:
                     continue
@@ -2429,20 +2609,66 @@ class SearchService:
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
                     search_kwargs["topic"] = "news"
+                elif isinstance(provider, BraveSearchProvider):
+                    search_kwargs.update(
+                        self._brave_search_locale(
+                            stock_code,
+                            prefer_chinese=prefer_chinese,
+                        )
+                    )
 
                 response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
-                    max_results=max_results,
+                    max_results=provider_max_results,
                     log_scope=f"{stock_code}:{provider.name}:stock_news",
                 )
                 had_provider_success = had_provider_success or bool(response.success)
 
                 if filtered_response.success and filtered_response.results:
-                    logger.info(f"使用 {provider.name} 搜索成功")
-                    self._put_cache(cache_key, filtered_response)
-                    return filtered_response
+                    prioritized_response, preferred_count = self._prioritize_news_language(
+                        filtered_response,
+                        prefer_chinese=prefer_chinese,
+                    )
+                    limited_response = self._limit_search_response(
+                        prioritized_response,
+                        max_results=max_results,
+                    )
+                    visible_preferred_count = min(preferred_count, len(limited_response.results))
+
+                    if not prefer_chinese:
+                        logger.info(f"使用 {provider.name} 搜索成功")
+                        self._put_cache(cache_key, limited_response)
+                        return limited_response
+
+                    if fallback_response is None:
+                        fallback_response = limited_response
+
+                    if visible_preferred_count > 0:
+                        logger.info(
+                            "%s 搜索成功，识别到 %s/%s 条中文新闻",
+                            provider.name,
+                            visible_preferred_count,
+                            len(limited_response.results),
+                        )
+                        if self._is_better_preferred_news_response(
+                            limited_response,
+                            candidate_preferred_count=visible_preferred_count,
+                            best_response=best_preferred_response,
+                            best_preferred_count=best_preferred_count,
+                        ):
+                            best_preferred_response = limited_response
+                            best_preferred_count = visible_preferred_count
+
+                        if visible_preferred_count >= max_results:
+                            self._put_cache(cache_key, limited_response)
+                            return limited_response
+                    else:
+                        logger.info(
+                            "%s 搜索成功但结果仍以英文为主，继续尝试下一引擎",
+                            provider.name,
+                        )
                 else:
                     if response.success and not filtered_response.results:
                         logger.info(
@@ -2455,6 +2681,12 @@ class SearchService:
                             provider.name,
                             response.error_message,
                         )
+
+            if prefer_chinese:
+                best_to_return = best_preferred_response or fallback_response
+                if best_to_return is not None:
+                    self._put_cache(cache_key, best_to_return)
+                    return best_to_return
 
             if had_provider_success:
                 return SearchResponse(

@@ -406,6 +406,7 @@ def setup_env(override: bool = False):
                   Default is False to preserve behavior on initial load where
                   system environment variables take precedence.
     """
+    Config._capture_bootstrap_runtime_env_overrides()
     # src/config.py -> src/ -> root
     env_file = os.getenv("ENV_FILE")
     if env_file:
@@ -757,6 +758,17 @@ class Config:
     _VALID_AGENT_ARCH = {"single", "multi"}
     _VALID_ORCHESTRATOR_MODES = {"quick", "standard", "full", "specialist"}
     _VALID_SKILL_ROUTING = {"auto", "manual"}
+    _WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS = frozenset(
+        {
+            "STOCK_LIST",
+            "RUN_IMMEDIATELY",
+            "SCHEDULE_ENABLED",
+            "SCHEDULE_TIME",
+            "SCHEDULE_RUN_IMMEDIATELY",
+        }
+    )
+    _BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED = False
+    _BOOTSTRAP_RUNTIME_ENV_OVERRIDES = frozenset()
 
     def __post_init__(self) -> None:
         _log = logging.getLogger(__name__)
@@ -808,10 +820,11 @@ class Config:
         从 .env 文件加载配置
         
         加载优先级：
-        1. 系统环境变量
-        2. .env 文件
+        1. 大多数配置保持系统环境变量优先
+        2. WebUI 可写的运行期关键键优先复用持久化 `.env`，但保留启动时显式进程环境变量的 override
         3. 代码中的默认值
         """
+        cls._capture_bootstrap_runtime_env_overrides()
         preexisting_report_language = os.environ.get("REPORT_LANGUAGE")
 
         # 确保环境变量已加载
@@ -860,7 +873,11 @@ class Config:
 
         
         # 解析自选股列表（逗号分隔，统一为大写 Issue #355）
-        stock_list_str = os.getenv('STOCK_LIST', '')
+        stock_list_str = cls._resolve_env_value(
+            'STOCK_LIST',
+            default='',
+            prefer_env_file=True,
+        )
         stock_list = [
             (c or "").strip().upper()
             for c in stock_list_str.split(',')
@@ -1044,18 +1061,29 @@ class Config:
 
         # Preserve historical semantics for startup flags: only an explicit
         # literal "true" enables immediate execution; empty strings stay False.
-        legacy_run_immediately_env = os.getenv('RUN_IMMEDIATELY')
+        legacy_run_immediately_env = cls._resolve_env_value(
+            'RUN_IMMEDIATELY',
+            prefer_env_file=True,
+        )
         legacy_run_immediately = (
             legacy_run_immediately_env.lower() == 'true'
             if legacy_run_immediately_env is not None
             else True
         )
 
-        schedule_run_immediately_env = os.getenv('SCHEDULE_RUN_IMMEDIATELY')
+        schedule_run_immediately_env = cls._resolve_env_value(
+            'SCHEDULE_RUN_IMMEDIATELY',
+            prefer_env_file=True,
+        )
         schedule_run_immediately = (
             schedule_run_immediately_env.lower() == 'true'
             if schedule_run_immediately_env is not None
             else legacy_run_immediately
+        )
+        schedule_time_value = cls._resolve_env_value(
+            'SCHEDULE_TIME',
+            default='18:00',
+            prefer_env_file=True,
         )
 
         report_language_raw = cls._resolve_report_language_env_value(
@@ -1247,8 +1275,12 @@ class Config:
             config_validate_mode=os.getenv('CONFIG_VALIDATE_MODE', 'warn').lower(),
             http_proxy=os.getenv('HTTP_PROXY'),
             https_proxy=os.getenv('HTTPS_PROXY'),
-            schedule_enabled=os.getenv('SCHEDULE_ENABLED', 'false').lower() == 'true',
-            schedule_time=os.getenv('SCHEDULE_TIME', '18:00'),
+            schedule_enabled=cls._resolve_env_value(
+                'SCHEDULE_ENABLED',
+                default='false',
+                prefer_env_file=True,
+            ).lower() == 'true',
+            schedule_time=(schedule_time_value or '18:00').strip() or '18:00',
             schedule_run_immediately=schedule_run_immediately,
             run_immediately=legacy_run_immediately,
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
@@ -1645,6 +1677,67 @@ class Config:
         return str(value)
 
     @classmethod
+    def _resolve_env_value(
+        cls,
+        key: str,
+        *,
+        default: Optional[str] = None,
+        prefer_env_file: bool = False,
+    ) -> Optional[str]:
+        """Resolve one env value, optionally preferring the persisted `.env` copy."""
+        env_value = os.getenv(key)
+        file_value = cls._get_env_file_value(key)
+
+        should_prefer_file = prefer_env_file or key in cls._WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS
+        if should_prefer_file and file_value is not None:
+            if env_value is not None and cls._has_bootstrap_runtime_env_override(key):
+                return env_value
+            return file_value
+        if env_value is not None:
+            return env_value
+        if file_value is not None:
+            return file_value
+        return default
+
+    @classmethod
+    def _capture_bootstrap_runtime_env_overrides(cls) -> None:
+        """Remember process-provided runtime env overrides before dotenv mutates os.environ.
+
+        Called by ``setup_env()`` **before** ``load_dotenv()``, so ``os.environ``
+        only contains genuine process-level values (Docker ``environment:``,
+        Dockerfile ``ENV``, shell exports, etc.).
+
+        A key is treated as an explicit override when it is present in
+        ``os.environ`` and either:
+        * absent from the persisted ``.env`` file, **or**
+        * present with a **different** value.
+
+        When both values are identical, the distinction is irrelevant and we
+        do **not** flag the key, so that a later ``.env`` update by WebUI can
+        take effect on config reload without requiring a container restart.
+        """
+        if cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED:
+            return
+
+        explicit_overrides = set()
+        for key in cls._WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS:
+            env_value = os.environ.get(key)
+            if env_value is None:
+                continue
+
+            file_value = cls._get_env_file_value(key)
+            if file_value is None or env_value != file_value:
+                explicit_overrides.add(key)
+
+        cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES = frozenset(explicit_overrides)
+        cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED = True
+
+    @classmethod
+    def _has_bootstrap_runtime_env_override(cls, key: str) -> bool:
+        cls._capture_bootstrap_runtime_env_overrides()
+        return key in cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES
+
+    @classmethod
     def _resolve_report_language_env_value(
         cls,
         preexisting_env_value: Optional[str],
@@ -1763,6 +1856,8 @@ class Config:
     def reset_instance(cls) -> None:
         """重置单例（主要用于测试）"""
         cls._instance = None
+        cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED = False
+        cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES = frozenset()
 
     def has_searxng_enabled(self) -> bool:
         """Whether SearXNG fallback is enabled via self-hosted or public mode."""
@@ -1908,7 +2003,7 @@ class Config:
             issues.append(ConfigIssue(
                 severity="error",
                 message=(
-                    "未配置任何 LLM（LITELLM_CONFIG / LLM_CHANNELS / *_API_KEY），"
+                    "未配置任何可用的 AI 模型接入（高级模型路由配置 / 渠道 / API Key），"
                     "AI 分析功能将不可用"
                 ),
                 field="LITELLM_CONFIG",
@@ -1917,8 +2012,8 @@ class Config:
             issues.append(ConfigIssue(
                 severity="info",
                 message=(
-                    "LITELLM_MODEL 未配置，将自动从可用 API Key 推断模型。"
-                    "建议尽早配置 LITELLM_MODEL（格式如 gemini/gemini-2.5-flash）"
+                    "尚未明确指定主模型，系统将自动从可用 API Key 推断。"
+                    "建议尽早配置主模型（格式如 gemini/gemini-2.5-flash）"
                 ),
                 field="LITELLM_MODEL",
             ))
@@ -1952,7 +2047,7 @@ class Config:
                 issues.append(ConfigIssue(
                     severity="error",
                     message=(
-                        "LITELLM_MODEL 已配置，但当前渠道/配置文件中不存在该模型。"
+                        "已配置的主模型未出现在当前渠道或高级模型路由配置中。"
                         f" 当前可用模型：{', '.join(available_router_models[:6])}"
                     ),
                     field="LITELLM_MODEL",
@@ -1967,7 +2062,7 @@ class Config:
                 issues.append(ConfigIssue(
                     severity="error",
                     message=(
-                        "AGENT_LITELLM_MODEL 已配置，但当前渠道/配置文件中不存在该模型。"
+                        "已配置的 Agent 主模型未出现在当前渠道或高级模型路由配置中。"
                         f" 当前可用模型：{', '.join(available_router_models[:6])}"
                     ),
                     field="AGENT_LITELLM_MODEL",
@@ -1982,7 +2077,7 @@ class Config:
                 issues.append(ConfigIssue(
                     severity="warning",
                     message=(
-                        "LITELLM_FALLBACK_MODELS 中包含未在当前渠道声明的模型："
+                        "备选模型中包含未在当前渠道或高级模型路由配置中声明的模型："
                         f"{', '.join(invalid_fallbacks[:3])}"
                     ),
                     field="LITELLM_FALLBACK_MODELS",
@@ -2009,7 +2104,7 @@ class Config:
             issues.append(ConfigIssue(
                 severity="error",
                 message=(
-                    "AGENT_LITELLM_MODEL 已配置，但未找到可用的运行时来源"
+                    "已配置 Agent 主模型，但未找到可用的运行时来源"
                     "（启用渠道或匹配的 API Key）。"
                 ),
                 field="AGENT_LITELLM_MODEL",
