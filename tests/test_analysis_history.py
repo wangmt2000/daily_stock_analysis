@@ -196,6 +196,118 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertIsNotNone(detail)
         self.assertIsNone(detail.get("model_used"))
 
+    def test_history_detail_preserves_zero_change_pct(self) -> None:
+        """change_pct=0.0（平盘）应原样返回，而不是被当成缺失值丢失。
+
+        Regression for issue #1084: history endpoint used `or` chains that
+        treated 0.0 as falsy and silently dropped the daily change.
+        """
+        if get_history_detail is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        context_snapshot = {
+            "enhanced_context": {
+                "realtime": {"price": 100.0, "change_pct": 0.0},
+            }
+        }
+        query_id = "query_change_pct_zero"
+        saved = self.db.save_analysis_history(
+            result=self._build_result(),
+            query_id=query_id,
+            report_type="simple",
+            news_content="新闻摘要",
+            context_snapshot=context_snapshot,
+            save_snapshot=True,
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == query_id).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        report = get_history_detail(str(record_id), db_manager=self.db)
+        self.assertEqual(report.meta.current_price, 100.0)
+        self.assertEqual(report.meta.change_pct, 0.0)
+
+    def test_history_detail_falls_back_to_realtime_quote_raw_change_pct(self) -> None:
+        """缺少 enhanced_context.realtime.change_pct 时，应回退到 realtime_quote_raw。
+
+        Regression for issue #1084: previously the realtime_quote_raw fallback
+        was only consulted when current_price was missing, so reports with
+        price-only enhanced_context lost their change_pct entirely.
+        """
+        if get_history_detail is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        context_snapshot = {
+            "enhanced_context": {
+                "realtime": {"price": 200.0},
+            },
+            "realtime_quote_raw": {"change_pct": 1.23},
+        }
+        query_id = "query_change_pct_fallback"
+        saved = self.db.save_analysis_history(
+            result=self._build_result(),
+            query_id=query_id,
+            report_type="simple",
+            news_content="新闻摘要",
+            context_snapshot=context_snapshot,
+            save_snapshot=True,
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == query_id).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        report = get_history_detail(str(record_id), db_manager=self.db)
+        self.assertEqual(report.meta.current_price, 200.0)
+        self.assertEqual(report.meta.change_pct, 1.23)
+
+    @patch("src.auth.is_auth_enabled", return_value=False)
+    def test_history_detail_ignores_non_dict_realtime_quote_raw(self, mock_auth) -> None:
+        """GET /api/v1/history/{id} should tolerate truthy non-dict realtime_quote_raw."""
+        if TestClient is None or create_app is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        context_snapshot = {
+            "enhanced_context": {
+                "realtime": {"price": 300.0},
+            },
+            "realtime_quote_raw": "not-a-dict",
+        }
+        query_id = "query_change_pct_non_dict_raw"
+        saved = self.db.save_analysis_history(
+            result=self._build_result(),
+            query_id=query_id,
+            report_type="simple",
+            news_content="新闻摘要",
+            context_snapshot=context_snapshot,
+            save_snapshot=True,
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == query_id).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        static_dir = Path(self._temp_dir.name) / "empty-static"
+        static_dir.mkdir(exist_ok=True)
+        client = TestClient(create_app(static_dir=static_dir))
+
+        response = client.get(f"/api/v1/history/{record_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["current_price"], 300.0)
+        self.assertIsNone(payload["meta"]["change_pct"])
+
     def test_history_detail_accepts_dict_raw_result(self) -> None:
         """_record_to_detail_dict should handle dict raw_result without json.loads errors."""
         result = self._build_result()
@@ -641,6 +753,70 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         with self.db.get_session() as session:
             self.assertIsNone(session.query(AnalysisHistory).filter(AnalysisHistory.id == record_id_1).first())
             self.assertIsNotNone(session.query(AnalysisHistory).filter(AnalysisHistory.id == record_id_2).first())
+
+
+class HistoryItemSchemaNegativeSentimentTest(unittest.TestCase):
+    """Regression: HistoryItem / ReportSummary must accept out-of-range sentiment_score from DB rows."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        """Import schema classes once for all tests, skipping gracefully when deps are missing."""
+        try:
+            from api.v1.schemas.history import HistoryItem, ReportSummary  # type: ignore
+        except ModuleNotFoundError:
+            cls.HistoryItem = None
+            cls.ReportSummary = None
+        else:
+            cls.HistoryItem = HistoryItem
+            cls.ReportSummary = ReportSummary
+
+    def test_negative_sentiment_score_does_not_raise(self) -> None:
+        """Bug #942: sentiment_score=-22 in DB should not cause Pydantic ValidationError."""
+        if self.HistoryItem is None:
+            self.skipTest("fastapi / pydantic not installed in this test environment")
+
+        item = self.HistoryItem(query_id="q1", stock_code="600519", sentiment_score=-22)
+        self.assertEqual(item.sentiment_score, -22)
+
+    def test_out_of_range_high_sentiment_score_does_not_raise(self) -> None:
+        """HistoryItem should also accept scores above 100 from legacy data."""
+        if self.HistoryItem is None:
+            self.skipTest("fastapi / pydantic not installed in this test environment")
+
+        item = self.HistoryItem(query_id="q2", stock_code="600519", sentiment_score=150)
+        self.assertEqual(item.sentiment_score, 150)
+
+    def test_none_sentiment_score_is_allowed(self) -> None:
+        """HistoryItem.sentiment_score=None should still be valid (optional field)."""
+        if self.HistoryItem is None:
+            self.skipTest("fastapi / pydantic not installed in this test environment")
+
+        item = self.HistoryItem(query_id="q3", stock_code="600519", sentiment_score=None)
+        self.assertIsNone(item.sentiment_score)
+
+    def test_report_summary_negative_sentiment_score_does_not_raise(self) -> None:
+        """ReportSummary.sentiment_score should also accept negative values from legacy DB rows."""
+        if self.ReportSummary is None:
+            self.skipTest("fastapi / pydantic not installed in this test environment")
+
+        summary = self.ReportSummary(sentiment_score=-22)
+        self.assertEqual(summary.sentiment_score, -22)
+
+    def test_report_summary_out_of_range_high_sentiment_score_does_not_raise(self) -> None:
+        """ReportSummary.sentiment_score should also accept scores above 100 from legacy data."""
+        if self.ReportSummary is None:
+            self.skipTest("fastapi / pydantic not installed in this test environment")
+
+        summary = self.ReportSummary(sentiment_score=150)
+        self.assertEqual(summary.sentiment_score, 150)
+
+    def test_report_summary_none_sentiment_score_is_allowed(self) -> None:
+        """ReportSummary.sentiment_score=None should still be valid (optional field)."""
+        if self.ReportSummary is None:
+            self.skipTest("fastapi / pydantic not installed in this test environment")
+
+        summary = self.ReportSummary(sentiment_score=None)
+        self.assertIsNone(summary.sentiment_score)
 
 
 if __name__ == "__main__":

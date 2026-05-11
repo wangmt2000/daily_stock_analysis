@@ -51,9 +51,9 @@ except (ValueError, TypeError):
     )
     _EF_CALL_TIMEOUT = 30
 
-from patch.eastmoney_patch import eastmoney_patch
+from src.patches.eastmoney_patch import eastmoney_patch
 from src.config import get_config
-from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
+from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market
 from .realtime_types import (
     UnifiedRealtimeQuote, RealtimeSource,
     get_realtime_circuit_breaker,
@@ -354,6 +354,11 @@ class EfinanceFetcher(BaseFetcher):
         # 美股不支持，抛出异常让 DataFetcherManager 切换到 AkshareFetcher/YfinanceFetcher
         if _is_us_code(stock_code):
             raise DataFetchError(f"EfinanceFetcher 不支持美股 {stock_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
+
+        # efinance 的历史 K 线接口在港股代码上可能返回非预期市场数据，
+        # 明确跳过并交给 AkShare/Tushare/YFinance/Longbridge 等港股路径兜底。
+        if _is_hk_market(stock_code):
+            raise DataFetchError(f"EfinanceFetcher 不支持港股日线 {stock_code}，请使用 AkshareFetcher 或其他港股数据源")
         
         # 根据代码类型选择不同的获取方法
         if _is_etf_code(stock_code):
@@ -842,7 +847,7 @@ class EfinanceFetcher(BaseFetcher):
                 price_col = '最新价' if '最新价' in df.columns else 'price'
                 pct_col = '涨跌幅' if '涨跌幅' in df.columns else 'pct_chg'
                 chg_col = '涨跌额' if '涨跌额' in df.columns else 'change'
-                open_col = '开盘' if '开盘' in df.columns else 'open'
+                open_cols = [column for column in ('今开', '开盘', 'open') if column in df.columns]
                 high_col = '最高' if '最高' in df.columns else 'high'
                 low_col = '最低' if '最低' in df.columns else 'low'
                 vol_col = '成交量' if '成交量' in df.columns else 'volume'
@@ -851,6 +856,14 @@ class EfinanceFetcher(BaseFetcher):
 
                 current = safe_float(item.get(price_col, 0))
                 change_amount = safe_float(item.get(chg_col, 0))
+                open_price = 0.0
+                for column in open_cols:
+                    candidate = safe_float(item.get(column), default=None)
+                    if candidate not in (None, 0.0):
+                        open_price = candidate
+                        break
+                if open_price == 0.0 and open_cols:
+                    open_price = safe_float(item.get(open_cols[0], 0), 0)
 
                 results.append({
                     'code': full_code,
@@ -858,7 +871,7 @@ class EfinanceFetcher(BaseFetcher):
                     'current': current,
                     'change': change_amount,
                     'change_pct': safe_float(item.get(pct_col, 0)),
-                    'open': safe_float(item.get(open_col, 0)),
+                    'open': open_price,
                     'high': safe_float(item.get(high_col, 0)),
                     'low': safe_float(item.get(low_col, 0)),
                     'prev_close': current - change_amount if current or change_amount else 0,

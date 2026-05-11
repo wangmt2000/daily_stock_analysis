@@ -237,6 +237,7 @@ class SearchServiceConcurrencyTestCase(unittest.TestCase):
             searxng_public_instances_enabled=False,
             news_max_age_days=3,
             news_strategy_profile="short",
+            anspire_api_keys=[],
         )
 
         created = []

@@ -145,6 +145,13 @@ http://your-domain.com:8000
 
 ## 如何确认 Docker 重建已生效
 
+先区分两件事：
+
+1. **Docker 镜像发布版本**：看你部署时使用的镜像 tag，例如 `ghcr.io/zhulinsen/daily_stock_analysis:v3.12.0`。仓库的 Docker 发布由 `.github/workflows/docker-publish.yml` 按 `v*.*.*` Git tag 触发，所以 Docker 版本应以镜像 tag / GitHub Releases 为准。
+2. **当前页面加载的前端构建**：看 WebUI “系统设置”页里的版本信息卡片，用来确认浏览器拿到的静态资源是否已经更新。
+
+也就是说，**“系统设置”里的版本信息更适合判断前端是否重建成功，不等同于 Docker 镜像发布版本**。
+
 WebUI 现在会在“系统设置”页展示只读的“版本信息”卡片，包含：
 
 - `WebUI 版本`
@@ -155,7 +162,21 @@ WebUI 现在会在“系统设置”页展示只读的“版本信息”卡片�
 
 当你重新执行 `docker-compose -f ./docker/docker-compose.yml up -d --build`，或者单独重新执行前端 `npm run build` 后，可以刷新浏览器并进入“系统设置”，优先确认“构建时间”是否已经变化；若变化，通常就说明当前加载的静态资源已经切换到最新构建。
 
-在确认本地前端打包链路时，建议执行以下命令用于本次改动的最小验证闭环：
+如果你想确认“我现在到底部署的是哪个正式版本”，优先用下面这些方式：
+
+```yaml
+# 方式 1：看 docker-compose / 部署脚本里的 image tag
+image: ghcr.io/zhulinsen/daily_stock_analysis:v3.12.0
+```
+
+```bash
+# 方式 2：回看你的拉取命令
+docker pull ghcr.io/zhulinsen/daily_stock_analysis:v3.12.0
+```
+
+如果你一直使用 `latest`，建议改成显式版本 tag；否则很难仅凭容器内页面信息判断自己是否已经重复更新到同一版本。
+
+在确认本地前端打包链路时，建议执行以下命令作为最小验证闭环：
 
 ```bash
 cd apps/dsa-web
@@ -208,6 +229,34 @@ sudo firewall-cmd --reload
 
 - 直接部署：默认 8000，可通过 `WEBUI_PORT=xxxx` 修改
 - Docker：默认 8000，可通过 `API_PORT=xxxx` 修改
+
+### 5. 页面能打开，但 UI 元素异常变大 / 布局错乱
+
+**症状**：浏览器能访问到 8000 端口，页面有内容，但文字、按钮、卡片尺寸异常大，没有正常布局与配色。
+
+**根因**：`static/index.html` 存在但 CSS/JS 资源缺失（`static/assets/` 为空或不存在），浏览器加载了 HTML 框架但无法拿到样式与脚本，退化为裸 HTML 渲染。
+
+可先用浏览器开发者工具（F12 → Network 标签页）检查是否有 `/assets/index-*.js`、`/assets/index-*.css` 的 **404** 错误。若有，按以下方式修复：
+
+**Docker 用户**：
+
+```bash
+docker-compose -f ./docker/docker-compose.yml down
+docker-compose -f ./docker/docker-compose.yml build --no-cache
+docker-compose -f ./docker/docker-compose.yml up -d
+```
+
+重建完成后，用 `Ctrl+Shift+R` 强制刷新浏览器缓存，再访问页面。
+
+**直接部署用户**：先确保已安装 Node.js 18+（推荐 20+），然后手动构建前端：
+
+```bash
+cd apps/dsa-web
+npm ci
+npm run build
+cd ../..
+python main.py --webui-only
+```
 
 ---
 

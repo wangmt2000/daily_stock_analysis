@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, List, Any, TYPE_CHECKING, Tuple, Literal
+from typing import Optional, Dict, List, Any, TYPE_CHECKING, Tuple, Literal, Callable
 
 if TYPE_CHECKING:
     from asyncio import Queue as AsyncQueue
@@ -410,6 +410,44 @@ class AnalysisTaskQueue:
 
         return accepted, duplicates
 
+    def submit_background_task(
+        self,
+        run_task: Callable[[], Optional[Any]],
+        *,
+        stock_code: str,
+        stock_name: Optional[str] = None,
+        report_type: str = "detailed",
+        message: Optional[str] = "任务已加入队列",
+    ) -> TaskInfo:
+        """
+        Submit a generic background callable with task lifecycle tracking.
+
+        This is used by callers that need task status visibility but do not
+        map to standard per-stock async analysis flow.
+        """
+        task_id = uuid.uuid4().hex
+        task_info = TaskInfo(
+            task_id=task_id,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            status=TaskStatus.PENDING,
+            message=message,
+            report_type=report_type,
+        )
+
+        with self._data_lock:
+            self._tasks[task_id] = task_info
+            try:
+                future = self.executor.submit(self._execute_background_task, task_id, run_task)
+            except Exception:
+                del self._tasks[task_id]
+                raise
+
+            self._futures[task_id] = future
+            self._broadcast_event("task_created", task_info.to_dict())
+
+        return task_info.copy()
+
     def _rollback_submitted_tasks_locked(self, task_ids: List[str]) -> None:
         """回滚当前批次已创建但尚未稳定返回给调用方的任务。"""
         for task_id in task_ids:
@@ -486,6 +524,42 @@ class AnalysisTaskQueue:
             for task in self._tasks.values():
                 stats[task.status.value] = stats.get(task.status.value, 0) + 1
             return stats
+
+    def update_task_progress(
+        self,
+        task_id: str,
+        progress: int,
+        message: Optional[str] = None,
+        *,
+        event_type: str = "task_progress",
+    ) -> Optional[TaskInfo]:
+        """
+        Update in-flight task progress and broadcast an SSE event.
+
+        Only pending/processing tasks are updated. Progress is clamped to
+        [0, 99] so terminal states remain controlled by completion/failure.
+        """
+        with self._data_lock:
+            task = self._tasks.get(task_id)
+            if not task or task.status not in (TaskStatus.PENDING, TaskStatus.PROCESSING):
+                return None
+
+            next_progress = max(task.progress, max(0, min(99, int(progress))))
+            changed = False
+            if next_progress != task.progress:
+                task.progress = next_progress
+                changed = True
+            if message is not None and message != task.message:
+                task.message = message
+                changed = True
+
+            if not changed:
+                return task.copy()
+
+            task_snapshot = task.copy()
+
+        self._broadcast_event(event_type, task_snapshot.to_dict())
+        return task_snapshot
     
     # ========== 任务执行 ==========
     
@@ -527,12 +601,17 @@ class AnalysisTaskQueue:
             
             # 执行分析
             service = AnalysisService()
+
+            def _on_progress(progress: int, message: str) -> None:
+                self.update_task_progress(task_id, progress, message)
+
             result = service.analyze_stock(
                 stock_code=stock_code,
                 report_type=report_type,
                 force_refresh=force_refresh,
                 query_id=task_id,
                 send_notification=notify,
+                progress_callback=_on_progress,
             )
             
             if result:
@@ -561,7 +640,7 @@ class AnalysisTaskQueue:
                 return result
             else:
                 # 分析返回空结果
-                raise Exception("分析返回空结果")
+                raise Exception(service.last_error or "分析返回空结果")
                 
         except Exception as e:
             error_msg = str(e)
@@ -585,6 +664,72 @@ class AnalysisTaskQueue:
             # 清理过期任务
             self._cleanup_old_tasks()
             
+            return None
+
+    def _execute_background_task(
+        self,
+        task_id: str,
+        run_task: Callable[[], Optional[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        执行通用后台任务（支持自定义运行逻辑）
+
+        Args:
+            task_id: 任务 ID
+            run_task: 任务执行函数
+
+        Returns:
+            任务执行结果字典（可选）
+        """
+        with self._data_lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return None
+
+            task.status = TaskStatus.PROCESSING
+            task.started_at = datetime.now()
+            task.message = "任务执行中"
+            task.progress = 10
+            self._broadcast_event("task_started", task.to_dict())
+
+        try:
+            result = run_task()
+            if result is None:
+                raise RuntimeError("任务返回空结果，未生成可持久化内容")
+
+            with self._data_lock:
+                task = self._tasks.get(task_id)
+                if task:
+                    task.status = TaskStatus.COMPLETED
+                    task.progress = 100
+                    task.completed_at = datetime.now()
+                    task.result = result
+                    task.message = "任务执行完成"
+
+            self._broadcast_event("task_completed", task.to_dict())
+            logger.info(f"[TaskQueue] 自定义任务完成: {task_id}")
+
+            self._cleanup_old_tasks()
+            return result
+
+        except Exception as e:  # pragma: no cover - behavior verified in downstream tests
+            error_msg = str(e)
+            logger.error(
+                f"[TaskQueue] 自定义任务失败: {task_id}, 错误: {error_msg}"
+            )
+
+            with self._data_lock:
+                task = self._tasks.get(task_id)
+                if task:
+                    task.status = TaskStatus.FAILED
+                    task.completed_at = datetime.now()
+                    task.error = error_msg[:200]
+                    task.message = f"任务失败: {error_msg[:80]}"
+
+            if task:
+                self._broadcast_event("task_failed", task.to_dict())
+
+            self._cleanup_old_tasks()
             return None
     
     def _cleanup_old_tasks(self) -> int:

@@ -12,7 +12,7 @@ Tools:
 import logging
 from datetime import date
 from threading import Lock
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.agent.tools.registry import ToolParameter, ToolDefinition
 
@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 _fetcher_manager_singleton = None
 _fetcher_manager_lock = Lock()
+_DAILY_HISTORY_DEFAULT_DAYS = 60
+_DAILY_HISTORY_MAX_DAYS = 365
 
 
 def _get_fetcher_manager():
@@ -49,6 +51,59 @@ def _get_db():
     """Lazy import for DatabaseManager."""
     from src.storage import get_db
     return get_db()
+
+
+def _normalize_history_days(days: Any) -> Tuple[int, Dict[str, Any]]:
+    """Normalize LLM-provided history window and return response metadata."""
+    requested_days = days
+    warning = None
+    try:
+        if isinstance(days, bool):
+            raise ValueError("bool is not a valid days value")
+        effective_days = int(days)
+    except (TypeError, ValueError):
+        effective_days = _DAILY_HISTORY_DEFAULT_DAYS
+        warning = (
+            f"Invalid days value {requested_days!r}; "
+            f"using default {_DAILY_HISTORY_DEFAULT_DAYS}."
+        )
+
+    if effective_days < 1:
+        effective_days = 1
+        warning = f"days must be >= 1; using {effective_days}."
+    elif effective_days > _DAILY_HISTORY_MAX_DAYS:
+        effective_days = _DAILY_HISTORY_MAX_DAYS
+        warning = f"days exceeds max {_DAILY_HISTORY_MAX_DAYS}; truncated."
+
+    metadata: Dict[str, Any] = {}
+    if warning is not None:
+        metadata.update(
+            {
+                "warning": warning,
+                "requested_days": requested_days,
+                "effective_days": effective_days,
+            }
+        )
+    return effective_days, metadata
+
+
+def _history_code_candidates(stock_code: str) -> Tuple[List[str], str]:
+    """Return cache lookup candidates plus canonical write code."""
+    from data_provider.base import canonical_stock_code, normalize_stock_code
+
+    raw_code = str(stock_code or "").strip()
+    normalized_code = canonical_stock_code(normalize_stock_code(raw_code))
+    candidates: List[str] = []
+    for candidate in (canonical_stock_code(raw_code), normalized_code):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates, normalized_code
+
+
+def _append_history_metadata(response: dict, metadata: Dict[str, Any]) -> dict:
+    if metadata:
+        response.update(metadata)
+    return response
 
 
 def _compact_fundamental_context(fundamental_context: dict) -> dict:
@@ -234,25 +289,56 @@ get_realtime_quote_tool = ToolDefinition(
 
 def _handle_get_daily_history(stock_code: str, days: int = 60) -> dict:
     """Get daily OHLCV history data."""
-    manager = _get_fetcher_manager()
-    df, source = manager.get_daily_data(stock_code, days=days)
+    effective_days, metadata = _normalize_history_days(days)
+
+    from src.services.history_loader import load_history_df
+    df, source = load_history_df(stock_code, days=effective_days)
 
     if df is None or df.empty:
-        return {"error": f"No historical data available for {stock_code}"}
+        return _append_history_metadata(
+            {"error": f"No historical data available for {stock_code}"},
+            metadata,
+        )
+
+    if source != "db_cache":
+        _, normalized_code = _history_code_candidates(stock_code)
+        try:
+            saved_count = _get_db().save_daily_data(df, normalized_code, source)
+            logger.info(
+                "Agent daily history persisted for %s (source=%s, new_records=%s)",
+                normalized_code,
+                source,
+                saved_count,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Agent daily history persistence failed for %s: %s",
+                normalized_code,
+                exc,
+            )
 
     # Convert DataFrame to list of dicts (last N records)
-    records = df.tail(min(days, len(df))).to_dict(orient="records")
+    records = df.tail(min(effective_days, len(df))).to_dict(orient="records")
     # Ensure date is string
     for r in records:
         if "date" in r:
             r["date"] = str(r["date"])
 
-    return {
-        "code": stock_code,
+    response_code = stock_code
+    if source == "db_cache" and records:
+        response_code = records[-1].get("code") or response_code
+
+    return _append_history_metadata({
+        "code": response_code,
         "source": source,
+        "cache_hit": source == "db_cache",
+        "requested_days": effective_days,
+        "effective_days": effective_days,
+        "actual_records": len(records),
+        "partial_cache": source == "db_cache" and len(records) < effective_days,
         "total_records": len(records),
         "data": records,
-    }
+    }, metadata)
 
 
 get_daily_history_tool = ToolDefinition(
@@ -539,3 +625,70 @@ ALL_DATA_TOOLS = [
     get_stock_info_tool,
     get_portfolio_snapshot_tool,
 ]
+
+
+# ============================================================
+# get_capital_flow
+# ============================================================
+
+def _handle_get_capital_flow(stock_code: str) -> dict:
+    """Get main-force capital flow data for a stock."""
+    manager = _get_fetcher_manager()
+    try:
+        ctx = manager.get_capital_flow_context(stock_code)
+    except Exception as exc:
+        logger.warning("get_capital_flow failed for %s: %s", stock_code, exc)
+        return {
+            "stock_code": stock_code,
+            "status": "error",
+            "error": f"capital flow fetch failed: {exc}",
+        }
+
+    status = ctx.get("status", "not_supported")
+    if status == "not_supported":
+        return {
+            "stock_code": stock_code,
+            "status": "not_supported",
+            "note": "Capital flow data is only available for A-share stocks (not ETFs/indices).",
+        }
+
+    data = ctx.get("data", {})
+    stock_flow = data.get("stock_flow") or {}
+    sector_rankings = data.get("sector_rankings") or {}
+    errors = ctx.get("errors") or []
+
+    return {
+        "stock_code": stock_code,
+        "status": status,
+        "main_net_inflow": stock_flow.get("main_net_inflow"),
+        "inflow_5d": stock_flow.get("inflow_5d"),
+        "inflow_10d": stock_flow.get("inflow_10d"),
+        "sector_rankings": {
+            "top_inflow_sectors": sector_rankings.get("top", [])[:3],
+            "top_outflow_sectors": sector_rankings.get("bottom", [])[:3],
+        },
+        "errors": errors,
+    }
+
+
+get_capital_flow_tool = ToolDefinition(
+    name="get_capital_flow",
+    description=(
+        "Get main-force (主力) capital flow data for an A-share stock. "
+        "Returns today's net inflow, 5-day and 10-day cumulative inflows, "
+        "and top sector-level capital flow rankings. "
+        "Only supported for A-share individual stocks (not ETFs, indices, HK, or US stocks)."
+    ),
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="A-share stock code, e.g., '600519'",
+        ),
+    ],
+    handler=_handle_get_capital_flow,
+    category="data",
+)
+
+
+ALL_DATA_TOOLS.append(get_capital_flow_tool)

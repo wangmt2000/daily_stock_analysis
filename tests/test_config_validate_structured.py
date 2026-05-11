@@ -337,6 +337,62 @@ class TestValidateStructuredNotification:
         issues = cfg.validate_structured()
         assert not any(i.severity == "warning" and "通知渠道" in i.message for i in issues)
 
+    def test_astrbot_url_counts_as_notification_channel(self):
+        cfg = _make_config(
+            wechat_webhook_url=None,
+            astrbot_url="https://astrbot.example/webhook",
+        )
+        issues = cfg.validate_structured()
+        assert not any(i.severity == "warning" and "通知渠道" in i.message for i in issues)
+
+    def test_feishu_app_credentials_without_webhook_warns_mode_mismatch(self):
+        cfg = _make_config(
+            wechat_webhook_url=None,
+            feishu_app_id="cli_xxx",
+            feishu_app_secret="secret_xxx",
+            feishu_webhook_url=None,
+            feishu_stream_enabled=False,
+        )
+        issues = cfg.validate_structured()
+        warn = [i for i in issues if i.severity == "warning"]
+        assert any("FEISHU_APP_ID / FEISHU_APP_SECRET" in i.message for i in warn)
+
+    def test_feishu_cloud_doc_credentials_without_webhook_no_mode_warning(self):
+        cfg = _make_config(
+            wechat_webhook_url=None,
+            feishu_app_id="cli_xxx",
+            feishu_app_secret="secret_xxx",
+            feishu_folder_token="folder_xxx",
+            feishu_webhook_url=None,
+            feishu_stream_enabled=False,
+        )
+        issues = cfg.validate_structured()
+        warn = [i for i in issues if i.severity == "warning"]
+        assert not any("FEISHU_APP_ID / FEISHU_APP_SECRET" in i.message for i in warn)
+
+    def test_invalid_notification_noise_config_reports_errors(self):
+        cfg = _make_config(
+            notification_quiet_hours="9:00-18:00",
+            notification_timezone="Mars/Olympus",
+            notification_min_severity="notice",
+        )
+        issues = cfg.validate_structured()
+        errors = {(i.field, i.severity) for i in issues}
+
+        assert ("NOTIFICATION_QUIET_HOURS", "error") in errors
+        assert ("NOTIFICATION_TIMEZONE", "error") in errors
+        assert ("NOTIFICATION_MIN_SEVERITY", "error") in errors
+
+    def test_daily_digest_reserved_flag_warns_without_blocking(self):
+        cfg = _make_config(notification_daily_digest_enabled=True)
+        issues = cfg.validate_structured()
+
+        assert any(
+            issue.field == "NOTIFICATION_DAILY_DIGEST_ENABLED"
+            and issue.severity == "warning"
+            for issue in issues
+        )
+
     def test_no_search_engine_is_info(self):
         cfg = _make_config(searxng_public_instances_enabled=False)
         issues = cfg.validate_structured()
