@@ -616,6 +616,143 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
     @mock.patch("src.notification.get_config")
     @mock.patch("requests.post")
+    def test_send_to_gotify_via_notification_service(
+        self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(gotify_url="https://gotify.example", gotify_token="secret-token")
+        mock_get_config.return_value = cfg
+        mock_post.return_value = _make_response(200)
+
+        service = NotificationService()
+        self.assertIn(NotificationChannel.GOTIFY, service.get_available_channels())
+
+        ok = service.send("gotify content")
+
+        self.assertTrue(ok)
+        mock_post.assert_called_once()
+        self.assertEqual(mock_post.call_args.args[0], "https://gotify.example/message")
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["X-Gotify-Key"], "secret-token")
+        self.assertEqual(mock_post.call_args.kwargs["json"]["message"], "gotify content")
+        self.assertEqual(
+            mock_post.call_args.kwargs["json"]["extras"]["client::display"]["contentType"],
+            "text/markdown",
+        )
+
+    @mock.patch("src.notification.get_config")
+    def test_gotify_without_token_is_not_available(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(gotify_url="https://gotify.example")
+
+        service = NotificationService()
+
+        self.assertNotIn(NotificationChannel.GOTIFY, service.get_available_channels())
+        self.assertFalse(service.is_available())
+
+    @mock.patch("src.notification.get_config")
+    def test_gotify_blank_token_is_not_available(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(
+            gotify_url="https://gotify.example",
+            gotify_token="   ",
+        )
+
+        service = NotificationService()
+
+        self.assertNotIn(NotificationChannel.GOTIFY, service.get_available_channels())
+        self.assertFalse(service.is_available())
+
+    @mock.patch("src.notification.get_config")
+    def test_gotify_message_endpoint_is_not_available(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(
+            gotify_url="https://gotify.example/message",
+            gotify_token="secret-token",
+        )
+
+        service = NotificationService()
+
+        self.assertNotIn(NotificationChannel.GOTIFY, service.get_available_channels())
+        self.assertFalse(service.is_available())
+
+    @mock.patch("src.notification.get_config")
+    @mock.patch("requests.post")
+    def test_send_to_gotify_does_not_trigger_markdown_to_image(
+        self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(
+            gotify_url="https://gotify.example",
+            gotify_token="secret-token",
+            markdown_to_image_channels=["gotify"],
+        )
+        mock_get_config.return_value = cfg
+        mock_post.return_value = _make_response(200)
+
+        service = NotificationService()
+        with mock.patch("src.md2img.markdown_to_image", return_value=b"png") as mock_md2img:
+            ok = service.send("gotify content")
+
+        self.assertTrue(ok)
+        mock_md2img.assert_not_called()
+        mock_post.assert_called_once()
+
+    @mock.patch("src.notification.get_config")
+    @mock.patch("requests.post")
+    def test_send_to_ntfy_via_notification_service(
+        self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(ntfy_url="https://ntfy.sh/dsa-topic")
+        mock_get_config.return_value = cfg
+        mock_post.return_value = _make_response(200)
+
+        service = NotificationService()
+        self.assertIn(NotificationChannel.NTFY, service.get_available_channels())
+
+        ok = service.send("ntfy content")
+
+        self.assertTrue(ok)
+        mock_post.assert_called_once()
+        self.assertEqual(mock_post.call_args.args[0], "https://ntfy.sh")
+        self.assertEqual(mock_post.call_args.kwargs["json"]["topic"], "dsa-topic")
+
+    @mock.patch("src.notification.get_config")
+    def test_ntfy_url_without_topic_is_not_available(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(ntfy_url="https://ntfy.sh")
+
+        service = NotificationService()
+
+        self.assertNotIn(NotificationChannel.NTFY, service.get_available_channels())
+        self.assertFalse(service.is_available())
+
+    @mock.patch("src.notification.get_config")
+    def test_ntfy_url_with_unsupported_scheme_is_not_available(
+        self, mock_get_config: mock.MagicMock
+    ):
+        mock_get_config.return_value = _make_config(ntfy_url="ntfy://ntfy.sh/dsa-topic")
+
+        service = NotificationService()
+
+        self.assertNotIn(NotificationChannel.NTFY, service.get_available_channels())
+        self.assertFalse(service.is_available())
+
+    @mock.patch("src.notification.get_config")
+    @mock.patch("requests.post")
+    def test_send_to_ntfy_does_not_trigger_markdown_to_image(
+        self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(
+            ntfy_url="https://ntfy.sh/dsa-topic",
+            markdown_to_image_channels=["ntfy"],
+        )
+        mock_get_config.return_value = cfg
+        mock_post.return_value = _make_response(200)
+
+        service = NotificationService()
+        with mock.patch("src.md2img.markdown_to_image", return_value=b"png") as mock_md2img:
+            ok = service.send("ntfy content")
+
+        self.assertTrue(ok)
+        mock_md2img.assert_not_called()
+        mock_post.assert_called_once()
+
+    @mock.patch("src.notification.get_config")
+    @mock.patch("requests.post")
     def test_send_to_pushover_via_notification_service(
         self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock
     ):

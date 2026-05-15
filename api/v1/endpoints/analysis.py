@@ -797,10 +797,10 @@ def get_analysis_status(task_id: str) -> TaskStatus:
                     analysis_summary=record.analysis_summary,
                 ),
                 strategy=ReportStrategy(
-                    ideal_buy=str(getattr(record, 'ideal_buy', None)) if getattr(record, 'ideal_buy', None) is not None else None,
-                    secondary_buy=str(getattr(record, 'secondary_buy', None)) if getattr(record, 'secondary_buy', None) is not None else None,
-                    stop_loss=str(getattr(record, 'stop_loss', None)) if getattr(record, 'stop_loss', None) is not None else None,
-                    take_profit=str(getattr(record, 'take_profit', None)) if getattr(record, 'take_profit', None) is not None else None,
+                    ideal_buy=_stringify_report_strategy_value(getattr(record, 'ideal_buy', None)),
+                    secondary_buy=_stringify_report_strategy_value(getattr(record, 'secondary_buy', None)),
+                    stop_loss=_stringify_report_strategy_value(getattr(record, 'stop_loss', None)),
+                    take_profit=_stringify_report_strategy_value(getattr(record, 'take_profit', None)),
                 ),
             ).model_dump()
             return TaskStatus(
@@ -872,6 +872,14 @@ def _load_sync_fundamental_sources(
         return None, None
 
 
+def _stringify_report_strategy_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def _build_analysis_report(
         report_data: Dict[str, Any],
         query_id: str,
@@ -932,10 +940,10 @@ def _build_analysis_report(
     strategy = None
     if strategy_data:
         strategy = ReportStrategy(
-            ideal_buy=strategy_data.get("ideal_buy"),
-            secondary_buy=strategy_data.get("secondary_buy"),
-            stop_loss=strategy_data.get("stop_loss"),
-            take_profit=strategy_data.get("take_profit")
+            ideal_buy=_stringify_report_strategy_value(strategy_data.get("ideal_buy")),
+            secondary_buy=_stringify_report_strategy_value(strategy_data.get("secondary_buy")),
+            stop_loss=_stringify_report_strategy_value(strategy_data.get("stop_loss")),
+            take_profit=_stringify_report_strategy_value(strategy_data.get("take_profit"))
         )
 
     extracted_fundamental = extract_fundamental_detail_fields(

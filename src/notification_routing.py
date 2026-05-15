@@ -16,6 +16,8 @@ ROUTABLE_NOTIFICATION_CHANNELS: Tuple[str, ...] = (
     "telegram",
     "email",
     "pushover",
+    "ntfy",
+    "gotify",
     "pushplus",
     "serverchan3",
     "custom",

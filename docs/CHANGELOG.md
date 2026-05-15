@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
+- [新功能] 通知网关新增 ntfy 一等渠道，支持通过 `NTFY_URL` / `NTFY_TOKEN` 推送并接入 Web 测试、路由、Actions 与诊断。
+- [新功能] 通知网关新增 Gotify 一等渠道，支持通过 `GOTIFY_URL` / `GOTIFY_TOKEN` 推送 Markdown 文本并接入 Web 测试、路由、Actions 与诊断。
+- [修复] 收紧 ntfy 结构化校验，避免 URL 编码空白 topic 被误判为有效通知端点。
+- [文档] 补充 Bark custom webhook 示例和 WebPush / Apprise 通知渠道评估，明确本轮不新增运行时依赖或配置入口。
+- [文档] 收口通知专题场景文档，并为 GitHub Actions 通知 env 对照表加入自动化校验。
+- [修复] 聚合报告通知按静态渠道隔离发送失败，并补充自定义 Webhook 部分成功诊断与脱敏测试。
 - [修复] 未配置 Tushare / Longbridge 凭据时不再实例化对应可选 fetcher，避免缺失凭据的数据源进入候选集。
 - [修复] Longbridge 遇到连接关闭类异常后会进入冷却期，并在美股/港股实时与日线请求中临时跳过该数据源，避免请求级频繁重连。
 - [修复] Pytdx 股票名称查询在全部服务器不可达时会短暂冷却，并在冷却期内跳过重复探测，减少无效拨号与告警噪音。
@@ -25,12 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] Windows NSIS 自动更新在安装尝试未切换桌面端版本时跳过自动恢复，避免失败或取消安装后误回滚用户运行时数据。
 - [修复] 同版本启动时清理未生效的自动更新备份目录，避免后续升级误将旧 `.dsa-desktop-update-backup/runtime-state.json` 的运行时文件再次恢复到新版本。
 - [修复] 清理提交中的临时探测文件（`node_modules_exists.txt` 与 `node_modules_ls_check.txt`），避免污染桌面/前端改动范围。
-
 - [新功能] Web 系统设置页开放 `.env` 配置备份导入/导出，复用键级覆盖、配置版本冲突保护和重载链路；Web 端在 `ADMIN_AUTH_ENABLED=false` 时该入口为禁用状态。
 - [chore] 精简仓库根目录：将文档图片资源迁入 `docs/assets/`，将东方财富请求补丁迁入 `src/patches/`，并下移 CI 专用依赖文件与技能适配服务。
 - [文档] 更新多语言 README 首页浅色工作台 GIF，并精简功能特性表，保留原有赞助商、快速开始和推送效果结构。
 - [新功能] 通知网关新增默认关闭的进程内降噪配置，支持去重、冷却、静默时段和最低严重级别，并将每日摘要开关标记为预留能力。
 - [文档] 恢复多语言 README 新闻源配置表中推荐项的加粗样式，统一相关项目章节层级，并精简顶部导航、联系文案和尾部展示。
+- [修复] Docker 挂载的 `logs` 目录不可写时启动日志自动降级到控制台输出，并补充非 root 容器目录权限说明。
+- [修复] 修正分析报告 API 构建策略点位时数值字段未归一为字符串的问题，避免策略价格触发响应 DTO 类型校验失败。
+- [修复] Docker 启动入口自动修复 `data` / `logs` / `reports` 挂载目录权限并降权运行，文档化的 Compose `exec` 手动命令显式使用 `dsa` 用户，避免普通部署需要手动 `chown` / `chmod`。
+- [修复] Web 首页大盘复盘结果改由主内容滚动区承载，避免 loading 切换到长结果后下方报告区域被截断或无法继续滚动。
 
 ## [3.16.0] - 2026-05-10
 

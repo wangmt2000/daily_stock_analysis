@@ -638,6 +638,34 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         self.assertEqual(report.details.financial_report["report_date"], "2025-12-31")
         self.assertEqual(report.details.dividend_metrics["ttm_dividend_yield_pct"], 2.5)
 
+    def test_build_analysis_report_stringifies_strategy_price_fields(self) -> None:
+        if _build_analysis_report is None:
+            self.skipTest("analysis endpoint helpers unavailable in this environment")
+
+        report = _build_analysis_report(
+            report_data={
+                "meta": {},
+                "summary": {},
+                "strategy": {
+                    "ideal_buy": 10.0,
+                    "secondary_buy": None,
+                    "stop_loss": 9.5,
+                    "take_profit": 11.6,
+                },
+                "details": {},
+            },
+            query_id="q1",
+            stock_code="600519",
+            stock_name="贵州茅台",
+            context_snapshot=None,
+            fallback_fundamental_payload=None,
+        )
+
+        self.assertEqual(report.strategy.ideal_buy, "10.0")
+        self.assertIsNone(report.strategy.secondary_buy)
+        self.assertEqual(report.strategy.stop_loss, "9.5")
+        self.assertEqual(report.strategy.take_profit, "11.6")
+
     def test_build_analysis_report_extracts_related_board_fields_from_snapshot(self) -> None:
         if _build_analysis_report is None:
             self.skipTest("analysis endpoint helpers unavailable in this environment")

@@ -491,6 +491,40 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_mock.assert_called_once()
 
+    def test_runtime_file_logging_permission_error_falls_back_to_console(self) -> None:
+        """Configured file logging failures should not prevent Docker startup."""
+        import io
+
+        args = self._make_args()
+        config = self._make_config(log_dir="/app/logs")
+        capture_stream = io.StringIO()
+        capture_handler = logging.StreamHandler(capture_stream)
+        capture_handler.setLevel(logging.DEBUG)
+        capture_handler.setFormatter(logging.Formatter("%(message)s"))
+
+        root_logger = logging.getLogger()
+
+        with patch("main.parse_arguments", return_value=args), \
+             patch("main.get_config", return_value=config), \
+             patch(
+                 "main.setup_logging",
+                 side_effect=PermissionError("/app/logs/stock_analysis_20260511.log"),
+             ), \
+             patch("main.run_full_analysis") as run_mock:
+            root_logger.addHandler(capture_handler)
+            try:
+                exit_code = main.main()
+            finally:
+                root_logger.removeHandler(capture_handler)
+                capture_handler.close()
+
+        self.assertEqual(exit_code, 0)
+        run_mock.assert_called_once()
+        output = capture_stream.getvalue()
+        self.assertIn("文件日志初始化失败，已降级为控制台日志输出", output)
+        self.assertIn("/app/logs", output)
+        self.assertIn("官方 Docker 镜像启动入口会自动修复默认挂载目录权限", output)
+
     def test_run_full_analysis_import_failure_propagates(self) -> None:
         """P1: import failures in run_full_analysis must propagate, not be swallowed."""
         args = self._make_args()

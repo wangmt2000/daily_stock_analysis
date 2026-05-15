@@ -197,6 +197,8 @@ export type NotificationTestChannel =
   | 'telegram'
   | 'email'
   | 'pushover'
+  | 'ntfy'
+  | 'gotify'
   | 'pushplus'
   | 'serverchan3'
   | 'custom'

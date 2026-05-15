@@ -81,6 +81,23 @@ const settingsHelpZhCN: SettingsHelpMap = {
       '如果飞书侧配置 IP 白名单，需要确认当前运行环境出口 IP 已加入白名单。',
     ],
   },
+  'settings.notification.CUSTOM_WEBHOOK_URLS': {
+    title: '自定义 Webhook',
+    summary: '配置任意支持 POST JSON 的通知端点，可用于钉钉、Bark、Slack、Discord 或自建服务。',
+    usage: '多个 URL 使用英文逗号分隔。Bark 可直接填写 https://api.day.app/YOUR_BARK_KEY。',
+    valueNotes: [
+      '未配置 CUSTOM_WEBHOOK_BODY_TEMPLATE 时，系统会按 URL 类型自动生成常见 payload。',
+      '配置全局 Body 模板后，会覆盖 Bark、Slack、Discord 等自动 payload。',
+      '需要认证的通用 webhook 可搭配 CUSTOM_WEBHOOK_BEARER_TOKEN。',
+    ],
+    impact: [
+      '影响 custom 通知渠道；单个 URL 失败不会阻断其他 URL 或主分析流程。',
+    ],
+    notes: [
+      'Bark 仍作为 custom webhook 使用，不需要新增 BARK_* 配置。',
+      '自签名内网端点可评估 WEBHOOK_VERIFY_SSL=false，但不要用于公网链路。',
+    ],
+  },
   'settings.system.WEBUI_HOST': {
     title: 'WebUI 监听地址',
     summary: '控制 WebUI 服务绑定在哪个网络地址上。',
@@ -157,6 +174,23 @@ const settingsHelpEnUS: SettingsHelpMap = {
     notes: [
       'Do not use FEISHU_APP_SECRET as FEISHU_WEBHOOK_SECRET.',
       'If IP allowlisting is enabled in Feishu, add the outbound IP of your runtime environment.',
+    ],
+  },
+  'settings.notification.CUSTOM_WEBHOOK_URLS': {
+    title: 'Custom Webhook',
+    summary: 'Sends notifications to any endpoint that accepts POST JSON, such as DingTalk, Bark, Slack, Discord, or a self-hosted service.',
+    usage: 'Separate multiple URLs with commas. For Bark, use https://api.day.app/YOUR_BARK_KEY.',
+    valueNotes: [
+      'Without CUSTOM_WEBHOOK_BODY_TEMPLATE, the sender auto-builds payloads for known URL types.',
+      'A global body template overrides auto-detected payloads for Bark, Slack, Discord, and similar URLs.',
+      'Use CUSTOM_WEBHOOK_BEARER_TOKEN for generic webhook endpoints that require bearer auth.',
+    ],
+    impact: [
+      'Affects the custom notification channel only; one URL failure does not block other URLs or the analysis flow.',
+    ],
+    notes: [
+      'Bark stays on the custom webhook baseline and does not use BARK_* settings.',
+      'Only consider WEBHOOK_VERIFY_SSL=false for trusted internal self-signed endpoints, not public routes.',
     ],
   },
   'settings.system.WEBUI_HOST': {
