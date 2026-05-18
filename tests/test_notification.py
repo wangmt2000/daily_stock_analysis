@@ -411,6 +411,67 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertIn("600519", out)
 
     @mock.patch("src.notification.get_config")
+    def test_generate_brief_report_shows_model_by_default(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="稳健",
+            model_used="gemini/gemini-2.5-flash",
+        )
+
+        out = service.generate_brief_report([result], report_date="2026-02-01")
+
+        self.assertIn("*分析模型: gemini/gemini-2.5-flash*", out)
+
+    @mock.patch("src.notification.get_config")
+    def test_generate_dashboard_report_shows_model_by_default(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="稳健",
+            model_used="gemini/gemini-2.5-flash",
+        )
+
+        out = service.generate_dashboard_report([result], report_date="2026-02-01")
+
+        self.assertIn("*分析模型：gemini/gemini-2.5-flash*", out)
+
+    @mock.patch("src.notification.get_config")
+    def test_generate_reports_hide_model_when_disabled(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(
+            report_renderer_enabled=False,
+            report_show_llm_model=False,
+        )
+        service = NotificationService()
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="稳健",
+            model_used="gemini/gemini-2.5-flash",
+        )
+
+        dashboard = service.generate_dashboard_report([result], report_date="2026-02-01")
+        single = service.generate_single_stock_report(result)
+
+        self.assertNotIn("分析模型", dashboard)
+        self.assertNotIn("gemini/gemini-2.5-flash", dashboard)
+        self.assertNotIn("分析模型", single)
+        self.assertNotIn("gemini/gemini-2.5-flash", single)
+
+    @mock.patch("src.notification.get_config")
     def test_generate_dashboard_report_localizes_english_fallback(self, mock_get_config: mock.MagicMock):
         mock_get_config.return_value = _make_config(report_renderer_enabled=False, report_language="en")
         service = NotificationService()

@@ -27,7 +27,6 @@ from src.config import (
     channel_allows_empty_api_key,
     get_configured_llm_models,
     normalize_agent_litellm_model,
-    normalize_litellm_temperature,
     normalize_news_strategy_profile,
     normalize_llm_channel_model,
     parse_env_bool,
@@ -43,6 +42,8 @@ from src.core.config_registry import (
     get_field_definition,
     get_registered_field_keys,
 )
+from src.llm.errors import call_litellm_with_param_recovery
+from src.llm.generation_params import apply_litellm_generation_params
 from src.notification_noise import validate_notification_timezone
 from src.notification_sender.gotify_sender import resolve_gotify_message_endpoint
 from src.notification_sender.ntfy_sender import resolve_ntfy_endpoint
@@ -263,6 +264,18 @@ class SystemConfigService:
 
         return display_map
 
+    @staticmethod
+    def _resolve_display_value(raw_value: str, field_schema: Dict[str, Any], raw_value_exists: bool) -> str:
+        if raw_value_exists:
+            return raw_value
+
+        if field_schema.get("ui_control") == "switch":
+            default_value = field_schema.get("default_value")
+            if isinstance(default_value, str) and default_value:
+                return default_value
+
+        return raw_value
+
     def get_config(self, include_schema: bool = True, mask_token: str = "******") -> Dict[str, Any]:
         """Return current config values without server-side secret masking."""
         config_map = self._build_display_config_map(self._manager.read_config_map())
@@ -281,12 +294,14 @@ class SystemConfigService:
 
         items: List[Dict[str, Any]] = []
         for key in all_keys:
+            raw_value_exists = key in config_map
             raw_value = config_map.get(key, "")
             field_schema = schema_by_key[key]
+            display_value = self._resolve_display_value(raw_value, field_schema, raw_value_exists)
             item: Dict[str, Any] = {
                 "key": key,
-                "value": raw_value,
-                "raw_value_exists": bool(raw_value),
+                "value": display_value,
+                "raw_value_exists": raw_value_exists,
                 "is_masked": False,
             }
             if include_schema:
@@ -710,10 +725,6 @@ class SystemConfigService:
         call_kwargs: Dict[str, Any] = {
             "model": resolved_model,
             "messages": [{"role": "user", "content": "Reply with OK"}],
-            "temperature": normalize_litellm_temperature(
-                resolved_model,
-                self._get_runtime_llm_temperature(),
-            ),
             "max_tokens": 256,  # Increased to allow MiniMax-M2.7 thinking process + response
             "timeout": max(5.0, float(timeout_seconds)),
         }
@@ -721,6 +732,11 @@ class SystemConfigService:
             call_kwargs["api_key"] = selected_api_key
         if base_url.strip():
             call_kwargs["api_base"] = base_url.strip()
+        call_kwargs = apply_litellm_generation_params(
+            call_kwargs,
+            resolved_model,
+            self._get_runtime_llm_temperature(),
+        )
 
         try:
             import litellm
@@ -732,7 +748,13 @@ class SystemConfigService:
             LLMToolAdapter._register_custom_model_pricing()
 
             started_at = time.perf_counter()
-            response = litellm.completion(**call_kwargs)
+            response = call_litellm_with_param_recovery(
+                lambda kwargs: litellm.completion(**kwargs),
+                model=resolved_model,
+                call_kwargs=call_kwargs,
+                logger=logger,
+                log_label="[LLM channel test]",
+            )
             latency_ms = int((time.perf_counter() - started_at) * 1000)
             content, parse_error_code, parse_error, parse_reason = self._extract_llm_completion_content(response)
             if parse_error_code:
@@ -1137,7 +1159,6 @@ class SystemConfigService:
         call_kwargs: Dict[str, Any] = {
             "model": resolved_model,
             "messages": messages,
-            "temperature": normalize_litellm_temperature(resolved_model, 0.0),
             "max_tokens": max_tokens,
             "timeout": min(max(5.0, timeout), 10.0),
         }
@@ -1147,6 +1168,11 @@ class SystemConfigService:
             call_kwargs["api_base"] = base_url.strip()
         if extra:
             call_kwargs.update(extra)
+        call_kwargs = apply_litellm_generation_params(
+            call_kwargs,
+            resolved_model,
+            0.0,
+        )
         return call_kwargs
 
     @classmethod
@@ -1400,15 +1426,24 @@ class SystemConfigService:
 
         startup_only_schedule_keys = submitted_keys & {
             "SCHEDULE_ENABLED",
-            "SCHEDULE_TIME",
             "SCHEDULE_RUN_IMMEDIATELY",
         }
         if startup_only_schedule_keys:
             warnings.append(
                 (
                     f"{', '.join(sorted(startup_only_schedule_keys))} 已写入 .env。"
-                    "这些属于启动期调度配置：当前已运行的 WebUI/API 进程不会因为本次保存立即触发分析，"
-                    "也不会自动重建 scheduler；请重启当前进程，并以 schedule 模式重新启动后生效。"
+                    "这些属于启动期调度模式配置：当前已运行的 WebUI/API 进程不会因为本次保存启动、"
+                    "停止或重建 scheduler；请重启当前进程，并以 schedule 模式重新启动后生效。"
+                )
+            )
+
+        if "SCHEDULE_TIME" in submitted_keys:
+            schedule_time = (current_map.get("SCHEDULE_TIME", "") or "").strip() or "18:00"
+            warnings.append(
+                (
+                    f"SCHEDULE_TIME={schedule_time} 已写入 .env。"
+                    "如果当前进程已经以 schedule 模式运行，scheduler 会在下一轮检查中自动重建 daily job；"
+                    "如果当前进程未以 schedule 模式运行，本次保存不会启动 scheduler。"
                 )
             )
 

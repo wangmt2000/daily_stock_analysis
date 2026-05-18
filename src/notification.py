@@ -170,6 +170,7 @@ class NotificationService(
 
         # 仅分析结果摘要（Issue #262）：true 时只推送汇总，不含个股详情
         self._report_summary_only = getattr(config, 'report_summary_only', False)
+        self._report_show_llm_model = getattr(config, 'report_show_llm_model', True)
         self._history_compare_cache: Dict[Tuple[int, Tuple[Tuple[str, str], ...]], Dict[str, List[Dict[str, Any]]]] = {}
 
         # 初始化各渠道
@@ -276,12 +277,17 @@ class NotificationService(
         return self.generate_dashboard_report(results, report_date=report_date)
 
     def _collect_models_used(self, results: List[AnalysisResult]) -> List[str]:
+        if not self._should_show_llm_model():
+            return []
         models: List[str] = []
         for result in results:
             model = normalize_model_used(getattr(result, "model_used", None))
             if model:
                 models.append(model)
         return list(dict.fromkeys(models))
+
+    def _should_show_llm_model(self) -> bool:
+        return bool(getattr(self._config, "report_show_llm_model", self._report_show_llm_model))
     
     @staticmethod
     def detect_configured_channels(config: Config) -> List[NotificationChannel]:
@@ -1184,6 +1190,9 @@ class NotificationService(
             "",
             f"*{labels['generated_at_label']}：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
         ])
+        models = self._collect_models_used(results)
+        if models:
+            report_lines.append(f"*{labels['analysis_model_label']}：{', '.join(models)}*")
         
         return "\n".join(report_lines)
     
@@ -1484,6 +1493,9 @@ class NotificationService(
             )
         lines.append("")
         lines.append(f"*{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+        models = self._collect_models_used(results)
+        if models:
+            lines.append(f"*{labels['analysis_model_label']}: {', '.join(models)}*")
         return "\n".join(lines)
 
     def generate_single_stock_report(self, result: AnalysisResult) -> str:
@@ -1596,9 +1608,10 @@ class NotificationService(
             ])
         
         lines.append("---")
-        model_used = normalize_model_used(getattr(result, "model_used", None))
-        if model_used:
-            lines.append(f"*{labels['analysis_model_label']}: {model_used}*")
+        if self._should_show_llm_model():
+            model_used = normalize_model_used(getattr(result, "model_used", None))
+            if model_used:
+                lines.append(f"*{labels['analysis_model_label']}: {model_used}*")
         lines.append(f"*{labels['not_investment_advice']}*")
 
         return "\n".join(lines)
