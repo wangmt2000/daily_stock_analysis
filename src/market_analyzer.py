@@ -556,15 +556,15 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             light = self.build_market_light_snapshot(overview)
             return "\n".join(
                 [
-                    f"> **Market Light**: {light['status']} ({light['label']}) | "
-                    f"**{light['score']}/100** {self._build_temperature_bar(light['score'])}",
-                    f"> **Reasons**: {'; '.join(light['reasons'])}",
-                    f"> **Guidance**: {light['guidance']}",
+                    f"- **Market Signal**: {light['score']}/100 "
+                    f"({light['temperature_label']}, {light['label']})",
+                    f"- **Drivers**: {'; '.join(light['reasons'])}",
+                    f"- **Guidance**: {light['guidance']}",
                     "",
-                    f"> 📈 Advancers **{overview.up_count}** / Decliners **{overview.down_count}** / "
-                    f"Flat **{overview.flat_count}** | "
-                    f"Limit-up **{overview.limit_up_count}** / Limit-down **{overview.limit_down_count}** | "
-                    f"Turnover **{overview.total_amount:.0f}** ({self._get_turnover_unit_label()})",
+                    f"- **Breadth**: Advancers {overview.up_count} / Decliners {overview.down_count} / "
+                    f"Flat {overview.flat_count}; "
+                    f"Limit-up {overview.limit_up_count} / Limit-down {overview.limit_down_count}; "
+                    f"Turnover {overview.total_amount:.0f} ({self._get_turnover_unit_label()})",
                 ]
             )
         light = self.build_market_light_snapshot(overview)
@@ -573,11 +573,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         up_ratio = overview.up_count / participation if participation else 0.0
         limit_spread = overview.limit_up_count - overview.limit_down_count
         lines = [
-            f"> **大盘红绿灯**：{light['status']}（{light['label']}） | **{score}/100** {self._build_temperature_bar(score)}",
-            f"> **核心原因**：{'；'.join(light['reasons'])}",
-            f"> **操作建议**：{light['guidance']}",
-            "",
-            f"> **盘面温度**：{label} **{score}/100** {self._build_temperature_bar(score)}",
+            f"- **盘面信号**：{score}/100（{label}，{light['label']}）",
+            f"- **信号依据**：{'；'.join(light['reasons'])}",
+            f"- **操作建议**：{light['guidance']}",
             "",
             "| 指标 | 数值 | 观察 |",
             "|------|------|------|",
@@ -599,9 +597,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         if self._get_review_language() == "en":
             label_map = {
-                "green": "constructive",
-                "yellow": "watch",
-                "red": "defensive",
+                "green": "risk-on",
+                "yellow": "balanced",
+                "red": "risk-off",
             }
             guidance_map = {
                 "green": "Risk appetite is acceptable; focus on leading themes and position discipline.",
@@ -634,7 +632,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
     def _build_market_light_reasons_zh(self, overview: MarketOverview, score: int) -> List[str]:
         participation = overview.up_count + overview.down_count
         up_ratio = overview.up_count / participation if participation else None
-        reasons: List[str] = [f"盘面温度 {score}/100"]
+        reasons: List[str] = []
         if up_ratio is not None:
             if up_ratio >= 0.6:
                 reasons.append(f"上涨家数占比 {up_ratio:.0%}，赚钱效应扩散")
@@ -647,12 +645,16 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             reasons.append(f"主要指数平均涨跌幅 {avg_change:+.2f}%")
         if overview.limit_up_count or overview.limit_down_count:
             reasons.append(f"涨跌停差 {overview.limit_up_count - overview.limit_down_count:+d}")
+        if not reasons and overview.total_amount:
+            reasons.append(f"成交额 {overview.total_amount:.0f} 亿，{self._describe_turnover(overview.total_amount)}")
+        if not reasons:
+            reasons.append("结构化涨跌数据有限，按可用行情综合判断")
         return reasons[:4]
 
     def _build_market_light_reasons_en(self, overview: MarketOverview, score: int) -> List[str]:
         participation = overview.up_count + overview.down_count
         up_ratio = overview.up_count / participation if participation else None
-        reasons: List[str] = [f"market temperature {score}/100"]
+        reasons: List[str] = []
         if up_ratio is not None:
             if up_ratio >= 0.6:
                 reasons.append(f"advancers ratio {up_ratio:.0%}, breadth is expanding")
@@ -665,6 +667,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             reasons.append(f"average major-index change {avg_change:+.2f}%")
         if overview.limit_up_count or overview.limit_down_count:
             reasons.append(f"limit-up/down spread {overview.limit_up_count - overview.limit_down_count:+d}")
+        if not reasons and overview.total_amount:
+            reasons.append(f"turnover {overview.total_amount:.0f} ({self._get_turnover_unit_label()})")
+        if not reasons:
+            reasons.append("limited structured breadth data; using available market inputs")
         return reasons[:4]
 
     def _build_indices_block(self, overview: MarketOverview) -> str:
@@ -736,31 +742,21 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         return "\n".join(lines)
 
     def _build_news_block(self, news: List) -> str:
-        """Build a source-aware news catalyst table for the rendered report."""
+        """Build a compact source-aware news catalyst list for the rendered report."""
         if not news:
             return ""
-        if self._get_review_language() == "en":
+        language = self._get_review_language()
+        if language == "en":
             lines = [
                 "#### News Catalysts",
-                "| # | Headline | Snippet / Lead | Source |",
-                "|---|----------|----------------|--------|",
             ]
         else:
             lines = [
-                "#### 近三日催化线索",
-                "| 序号 | 事件/标题 | 摘要/线索片段 | 来源 |",
-                "|------|-----------|----------------|------|",
+                "#### 近三日市场线索",
             ]
 
         for idx, item in enumerate(news[:5], 1):
-            title = self._escape_table_cell(
-                self._compact_news_text(self._get_news_field(item, "title"), limit=80) or "-"
-            )
-            snippet = self._escape_table_cell(
-                self._compact_news_text(self._get_news_field(item, "snippet"), limit=180) or "-"
-            )
-            source = self._escape_table_cell(self._format_news_source_cell(item) or "-")
-            lines.append(f"| {idx} | {title} | {snippet} | {source} |")
+            lines.append(self._format_news_catalyst_line(idx, item, language=language))
         return "\n".join(lines)
 
     @staticmethod
@@ -774,15 +770,21 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         return str(value).strip()
 
     @classmethod
-    def _format_news_source_cell(cls, item: Any) -> str:
+    def _format_news_catalyst_line(cls, idx: int, item: Any, *, language: str = "zh") -> str:
+        fallback_title = "Untitled catalyst" if language == "en" else "未命名线索"
+        title = cls._compact_news_text(cls._get_news_field(item, "title"), limit=90) or fallback_title
         source = cls._compact_news_text(cls._get_news_field(item, "source"), limit=40)
         date_text = cls._compact_news_text(cls._get_news_field(item, "published_date"), limit=24)
         url = cls._compact_news_text(cls._get_news_field(item, "url"), limit=0)
-        label_parts = [part for part in (source, date_text) if part]
-        label = " / ".join(label_parts)
+        title_text = cls._escape_markdown_link_label(title)
         if url:
-            return f"[{label or 'URL'}]({url})"
-        return label
+            title_text = f"[{title_text}]({url})"
+        meta_parts = [part for part in (source, date_text) if part]
+        if language == "en":
+            meta = f" ({' / '.join(meta_parts)})" if meta_parts else ""
+        else:
+            meta = f"（{' / '.join(meta_parts)}）" if meta_parts else ""
+        return f"- {idx}. {title_text}{meta}"
 
     @staticmethod
     def _compact_news_text(value: str, *, limit: int) -> str:
@@ -808,13 +810,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         return f"{numeric_value:+.2f}%"
 
     @staticmethod
-    def _escape_table_cell(value: str) -> str:
-        return value.replace("|", "\\|")
-
-    @staticmethod
-    def _build_temperature_bar(score: int) -> str:
-        filled = max(0, min(10, round(score / 10)))
-        return "█" * filled + "░" * (10 - filled)
+    def _escape_markdown_link_label(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
     @staticmethod
     def _describe_turnover(total_amount: float) -> str:

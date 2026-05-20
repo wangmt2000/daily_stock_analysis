@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import date, datetime
 from typing import Any, Dict, Optional
@@ -18,13 +19,31 @@ from src.agent.events import (
     validate_event_alert_rule,
 )
 from src.repositories.alert_repo import AlertRepository
-from src.storage import AlertNotificationRecord, AlertRuleRecord, AlertTriggerRecord, DatabaseManager
+from src.services.alert_indicators import (
+    TECHNICAL_ALERT_TYPES,
+    TechnicalIndicatorAlert,
+    compute_requested_days,
+    evaluate_indicator_alert,
+    normalize_indicator_parameters,
+    threshold_for_indicator,
+)
+from src.storage import (
+    AlertCooldownRecord,
+    AlertNotificationRecord,
+    AlertRuleRecord,
+    AlertTriggerRecord,
+    DatabaseManager,
+)
+from src.utils.sanitize import sanitize_diagnostic_text
 
 
-SUPPORTED_ALERT_TYPES = frozenset({"price_cross", "price_change_percent", "volume_spike"})
+LEGACY_RUNTIME_ALERT_TYPES = frozenset({"price_cross", "price_change_percent", "volume_spike"})
+SUPPORTED_ALERT_TYPES = LEGACY_RUNTIME_ALERT_TYPES | TECHNICAL_ALERT_TYPES
 SUPPORTED_TARGET_SCOPES = frozenset({"single_symbol"})
 SUPPORTED_SEVERITIES = frozenset({"info", "warning", "critical"})
 NULLABLE_RULE_UPDATE_FIELDS = frozenset({"cooldown_policy", "notification_policy"})
+
+logger = logging.getLogger(__name__)
 
 
 class AlertServiceError(ValueError):
@@ -70,7 +89,7 @@ class AlertService:
             raise AlertServiceError("No fields provided for update")
         self._validate_rule_update_payload(payload)
 
-        merged = self._serialize_rule(row)
+        merged = self._serialize_rule_base(row)
         merged.update(payload)
         fields = self._normalize_rule_payload(merged, source=merged.get("source") or "api")
         updated = self.repo.update_rule(rule_id, fields)
@@ -122,7 +141,7 @@ class AlertService:
         rule = self._to_runtime_rule(row)
         monitor = EventMonitor()
         try:
-            return asyncio.run(self._evaluate_rule(rule, monitor))
+            return asyncio.run(self._evaluate_rule(rule, monitor, daily_cache=None))
         except Exception as exc:
             sanitized_message = self._sanitize_text(str(exc) or "Alert evaluation failed")
             return {
@@ -138,13 +157,20 @@ class AlertService:
                 "message": sanitized_message,
             }
 
-    async def _evaluate_rule(self, rule, monitor: EventMonitor) -> Dict[str, Any]:
+    async def _evaluate_rule(
+        self,
+        rule,
+        monitor: EventMonitor,
+        daily_cache: Optional[Dict[tuple[str, int], Any]] = None,
+    ) -> Dict[str, Any]:
         if isinstance(rule, PriceAlert):
             return await self._evaluate_price(rule, monitor)
         if isinstance(rule, PriceChangeAlert):
             return await self._evaluate_price_change(rule, monitor)
         if isinstance(rule, VolumeAlert):
             return await self._evaluate_volume(rule)
+        if isinstance(rule, TechnicalIndicatorAlert):
+            return await self._evaluate_technical_indicator(rule, daily_cache=daily_cache)
         return self._evaluation_error(rule, f"unsupported runtime alert type: {rule.alert_type}")
 
     async def _evaluate_price(self, rule: PriceAlert, monitor: EventMonitor) -> Dict[str, Any]:
@@ -360,6 +386,96 @@ class AlertService:
             data_timestamp=data_timestamp,
         )
 
+    async def _evaluate_technical_indicator(
+        self,
+        rule: TechnicalIndicatorAlert,
+        *,
+        daily_cache: Optional[Dict[tuple[str, int], Any]] = None,
+    ) -> Dict[str, Any]:
+        requested_days = compute_requested_days(rule.alert_type, rule.indicator_params)
+        cache_key = (rule.stock_code, requested_days)
+
+        def _fetch_daily_data():
+            from data_provider import DataFetcherManager
+
+            return DataFetcherManager().get_daily_data(rule.stock_code, days=requested_days)
+
+        try:
+            if daily_cache is not None and cache_key in daily_cache:
+                result = daily_cache[cache_key]
+            else:
+                result = await asyncio.to_thread(_fetch_daily_data)
+                if daily_cache is not None:
+                    daily_cache[cache_key] = result
+        except Exception as exc:
+            return self._evaluation_error(rule, exc, data_source="daily_data")
+
+        if result is None:
+            return self._not_triggered(
+                rule,
+                None,
+                "No daily indicator data available",
+                record_status="degraded",
+                data_source="daily_data",
+            )
+        if not isinstance(result, tuple) or len(result) != 2:
+            return self._not_triggered(
+                rule,
+                None,
+                "Malformed daily indicator data response",
+                record_status="degraded",
+                data_source="daily_data",
+            )
+
+        df, _source = result
+        if df is None or getattr(df, "empty", True):
+            return self._not_triggered(
+                rule,
+                None,
+                "No daily indicator data available",
+                record_status="degraded",
+                data_source="daily_data",
+            )
+
+        try:
+            evaluation = evaluate_indicator_alert(rule.alert_type, rule.stock_code, rule.indicator_params, df)
+        except ValueError as exc:
+            return self._not_triggered(
+                rule,
+                None,
+                str(exc),
+                record_status="degraded",
+                threshold=threshold_for_indicator(rule.alert_type, rule.indicator_params),
+                data_source="daily_data",
+                data_timestamp=self._extract_daily_timestamp(df),
+            )
+        except Exception as exc:
+            return self._evaluation_error(
+                rule,
+                exc,
+                data_source="daily_data",
+                data_timestamp=self._extract_daily_timestamp(df),
+            )
+
+        if evaluation.status == "triggered":
+            return self._triggered(
+                rule,
+                evaluation.observed_value,
+                evaluation.message,
+                threshold=evaluation.threshold,
+                data_source="daily_data",
+                data_timestamp=evaluation.data_timestamp,
+            )
+        return self._not_triggered(
+            rule,
+            evaluation.observed_value,
+            evaluation.message,
+            record_status="degraded" if evaluation.status == "degraded" else None,
+            threshold=evaluation.threshold,
+            data_source="daily_data",
+            data_timestamp=evaluation.data_timestamp,
+        )
+
     def _triggered(
         self,
         rule,
@@ -442,6 +558,8 @@ class AlertService:
             return float(rule.price)
         if isinstance(rule, PriceChangeAlert):
             return abs(float(rule.change_pct))
+        if isinstance(rule, TechnicalIndicatorAlert):
+            return threshold_for_indicator(rule.alert_type, rule.indicator_params)
         return None
 
     @staticmethod
@@ -449,6 +567,8 @@ class AlertService:
         if isinstance(rule, (PriceAlert, PriceChangeAlert)):
             return "realtime_quote"
         if isinstance(rule, VolumeAlert):
+            return "daily_data"
+        if isinstance(rule, TechnicalIndicatorAlert):
             return "daily_data"
         return None
 
@@ -613,20 +733,19 @@ class AlertService:
 
         alert_type = str(payload.get("alert_type") or "").strip().lower()
         if alert_type not in SUPPORTED_ALERT_TYPES:
-            raise UnsupportedAlertTypeError(
-                f"unsupported alert_type for P1 Alert API: {alert_type or '<empty>'}"
-            )
+            raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {alert_type or '<empty>'}")
 
         severity = str(payload.get("severity") or "warning").strip().lower()
         if severity not in SUPPORTED_SEVERITIES:
             raise AlertServiceError(f"unsupported severity: {severity}")
 
         parameters = self._normalize_parameters(alert_type, payload.get("parameters") or {})
-        serialized_rule = {"stock_code": target, "alert_type": alert_type, **parameters}
-        try:
-            validate_event_alert_rule(serialized_rule)
-        except ValueError as exc:
-            raise AlertServiceError(str(exc)) from exc
+        if alert_type in LEGACY_RUNTIME_ALERT_TYPES:
+            serialized_rule = {"stock_code": target, "alert_type": alert_type, **parameters}
+            try:
+                validate_event_alert_rule(serialized_rule)
+            except ValueError as exc:
+                raise AlertServiceError(str(exc)) from exc
 
         name = str(payload.get("name") or "").strip()
         if not name:
@@ -672,7 +791,13 @@ class AlertService:
         if alert_type == "volume_spike":
             return {"multiplier": self._positive_float(parameters.get("multiplier"), "multiplier")}
 
-        raise UnsupportedAlertTypeError(f"unsupported alert_type for P1 Alert API: {alert_type}")
+        if alert_type in TECHNICAL_ALERT_TYPES:
+            try:
+                return normalize_indicator_parameters(alert_type, parameters)
+            except ValueError as exc:
+                raise AlertServiceError(str(exc)) from exc
+
+        raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {alert_type}")
 
     @staticmethod
     def _positive_float(value: Any, field_name: str) -> float:
@@ -684,8 +809,8 @@ class AlertService:
             raise AlertServiceError(f"{field_name} must be > 0")
         return number
 
-    def _to_runtime_rule(self, row: AlertRuleRecord):
-        data = self._serialize_rule(row)
+    def _to_runtime_rule(self, row: AlertRuleRecord, data: Optional[Dict[str, Any]] = None):
+        data = data or self._serialize_rule_base(row)
         parameters = data["parameters"]
         if data["alert_type"] == "price_cross":
             return PriceAlert(
@@ -707,9 +832,26 @@ class AlertService:
                 multiplier=float(parameters["multiplier"]),
                 metadata={"persisted_rule_id": data["id"]},
             )
-        raise UnsupportedAlertTypeError(f"unsupported alert_type for P1 Alert API: {data['alert_type']}")
+        if data["alert_type"] in TECHNICAL_ALERT_TYPES:
+            return TechnicalIndicatorAlert(
+                stock_code=data["target"],
+                alert_type=data["alert_type"],
+                indicator_params=parameters,
+                metadata={"persisted_rule_id": data["id"]},
+            )
+        raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {data['alert_type']}")
 
     def _serialize_rule(self, row: AlertRuleRecord) -> Dict[str, Any]:
+        data = self._serialize_rule_base(row)
+        cooldown_summary = self._cooldown_summary_for_rule(row)
+        data.update({
+            "last_triggered_at": cooldown_summary.get("last_triggered_at"),
+            "cooldown_until": cooldown_summary.get("cooldown_until"),
+            "cooldown_active": cooldown_summary.get("cooldown_active"),
+        })
+        return data
+
+    def _serialize_rule_base(self, row: AlertRuleRecord) -> Dict[str, Any]:
         return {
             "id": row.id,
             "name": row.name,
@@ -724,6 +866,37 @@ class AlertService:
             "notification_policy": self._load_json(row.notification_policy, default=None),
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+    def _cooldown_summary_for_rule(self, row: AlertRuleRecord) -> Dict[str, Any]:
+        try:
+            cooldown = self.repo.get_rule_cooldown_summary(
+                rule_id=int(row.id),
+                target=str(row.target),
+                severity=str(row.severity) if row.severity else None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[AlertService] Failed to load alert cooldown summary for rule %s: %s",
+                getattr(row, "id", "?"),
+                self._sanitize_text(str(exc) or "cooldown summary read failed"),
+            )
+            return {"last_triggered_at": None, "cooldown_until": None, "cooldown_active": False}
+        return self._serialize_cooldown_summary(cooldown)
+
+    @staticmethod
+    def _serialize_cooldown_summary(row: Optional[AlertCooldownRecord]) -> Dict[str, Any]:
+        if row is None:
+            return {"last_triggered_at": None, "cooldown_until": None, "cooldown_active": False}
+        cooldown_active = bool(
+            row.state == "active"
+            and row.cooldown_until is not None
+            and row.cooldown_until > datetime.now()
+        )
+        return {
+            "last_triggered_at": row.last_triggered_at.isoformat() if row.last_triggered_at else None,
+            "cooldown_until": row.cooldown_until.isoformat() if row.cooldown_until else None,
+            "cooldown_active": cooldown_active,
         }
 
     def _serialize_trigger(self, row: AlertTriggerRecord) -> Dict[str, Any]:
@@ -763,6 +936,16 @@ class AlertService:
             return f"{target} change {parameters['direction']} {parameters['change_pct']}%"
         if alert_type == "volume_spike":
             return f"{target} volume spike {parameters['multiplier']}x"
+        if alert_type == "ma_price_cross":
+            return f"{target} close {parameters['direction']} MA{parameters['window']}"
+        if alert_type == "rsi_threshold":
+            return f"{target} RSI{parameters['period']} {parameters['direction']} {parameters['threshold']}"
+        if alert_type == "macd_cross":
+            return f"{target} MACD {parameters['direction']}"
+        if alert_type == "kdj_cross":
+            return f"{target} KDJ {parameters['direction']}"
+        if alert_type == "cci_threshold":
+            return f"{target} CCI{parameters['period']} {parameters['direction']} {parameters['threshold']}"
         return f"{target} {alert_type}"
 
     @staticmethod
@@ -787,10 +970,4 @@ class AlertService:
 
     @staticmethod
     def _sanitize_text(text: Any) -> str:
-        sanitized = str(text or "").strip()
-        if not sanitized:
-            return ""
-        sanitized = re.sub(r"(?i)(bearer\s+)[a-z0-9._\-:]+", r"\1[REDACTED]", sanitized)
-        sanitized = re.sub(r"(?i)(token|secret|password|sendkey)([=:]\s*)[^\s,;&]+", r"\1\2[REDACTED]", sanitized)
-        sanitized = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", sanitized)
-        return " ".join(sanitized.split())[:300]
+        return sanitize_diagnostic_text(text)

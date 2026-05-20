@@ -143,6 +143,48 @@ class TestNotificationServiceSendToMethods(unittest.TestCase):
         mock_custom.assert_called_once_with("content")
 
     @mock.patch("src.notification.get_config")
+    def test_send_with_results_reports_per_channel_attempts(self, mock_get_config: mock.MagicMock):
+        cfg = _make_config(
+            wechat_webhook_url="https://wechat.example/hook",
+            custom_webhook_urls=["https://example.com/webhook"],
+        )
+        mock_get_config.return_value = cfg
+
+        service = NotificationService()
+
+        with mock.patch.object(service, "send_to_wechat", side_effect=RuntimeError("token=secret-token failed")), \
+             mock.patch.object(service, "send_to_custom", return_value=True):
+            result = service.send_with_results("content")
+
+        self.assertTrue(result.dispatched)
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, "partial_failed")
+        by_channel = {item.channel: item for item in result.channel_results}
+        self.assertFalse(by_channel["wechat"].success)
+        self.assertEqual(by_channel["wechat"].error_code, "exception")
+        self.assertNotIn("secret-token", by_channel["wechat"].diagnostics)
+        self.assertTrue(by_channel["custom"].success)
+
+    @mock.patch("src.notification.get_config")
+    def test_send_with_results_reports_route_no_channel(self, mock_get_config: mock.MagicMock):
+        cfg = _make_config(
+            custom_webhook_urls=["https://example.com/webhook"],
+            notification_report_channels=["unknown-route-channel"],
+        )
+        mock_get_config.return_value = cfg
+
+        service = NotificationService()
+
+        with mock.patch.object(service, "send_to_custom", return_value=True) as mock_custom:
+            result = service.send_with_results("content", route_type="report")
+
+        self.assertFalse(result.dispatched)
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "no_channel")
+        self.assertEqual(result.channel_results, [])
+        mock_custom.assert_not_called()
+
+    @mock.patch("src.notification.get_config")
     def test_send_route_empty_keeps_all_configured_channels(self, mock_get_config: mock.MagicMock):
         cfg = _make_config(
             wechat_webhook_url="https://wechat.example/hook",

@@ -17,6 +17,8 @@ A股自选股智能分析系统 - 通知层
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from enum import Enum
@@ -43,6 +45,7 @@ from src.report_language import (
     normalize_report_language,
 )
 from bot.models import BotMessage
+from src.utils.sanitize import sanitize_diagnostic_text
 from src.utils.data_processing import normalize_model_used
 from src.notification_sender import (
     AstrbotSender,
@@ -85,6 +88,29 @@ class NotificationChannel(Enum):
     SLACK = "slack"        # Slack
     ASTRBOT = "astrbot"
     UNKNOWN = "unknown"    # 未知
+
+
+@dataclass
+class ChannelAttemptResult:
+    """One static notification channel send attempt."""
+
+    channel: str
+    success: bool
+    error_code: Optional[str] = None
+    retryable: bool = False
+    latency_ms: Optional[int] = None
+    diagnostics: Optional[str] = None
+
+
+@dataclass
+class NotificationDispatchResult:
+    """Structured result for notification dispatch diagnostics."""
+
+    dispatched: bool
+    success: bool
+    status: str
+    channel_results: List[ChannelAttemptResult] = field(default_factory=list)
+    message: Optional[str] = None
 
 
 class ChannelDetector:
@@ -1689,7 +1715,65 @@ class NotificationService(
             return False
         return True
 
-    def send(
+    @staticmethod
+    def _sanitize_notification_diagnostics(text: Any) -> str:
+        return sanitize_diagnostic_text(text)
+
+    def _send_to_static_channel(
+        self,
+        channel: NotificationChannel,
+        content: str,
+        *,
+        image_bytes: Optional[bytes],
+        email_stock_codes: Optional[List[str]],
+        email_send_to_all: bool,
+    ) -> bool:
+        use_image = self._should_use_image_for_channel(channel, image_bytes)
+        if channel == NotificationChannel.WECHAT:
+            if use_image:
+                return self._send_wechat_image(image_bytes)
+            return self.send_to_wechat(content)
+        if channel == NotificationChannel.FEISHU:
+            return self.send_to_feishu(content)
+        if channel == NotificationChannel.TELEGRAM:
+            if use_image:
+                return self._send_telegram_photo(image_bytes)
+            return self.send_to_telegram(content)
+        if channel == NotificationChannel.EMAIL:
+            receivers = None
+            if email_send_to_all and self._stock_email_groups:
+                receivers = self.get_all_email_receivers()
+            elif email_stock_codes and self._stock_email_groups:
+                receivers = self.get_receivers_for_stocks(email_stock_codes)
+            if use_image:
+                return self._send_email_with_inline_image(image_bytes, receivers=receivers)
+            return self.send_to_email(content, receivers=receivers)
+        if channel == NotificationChannel.PUSHOVER:
+            return self.send_to_pushover(content)
+        if channel == NotificationChannel.NTFY:
+            return self.send_to_ntfy(content)
+        if channel == NotificationChannel.GOTIFY:
+            return self.send_to_gotify(content)
+        if channel == NotificationChannel.PUSHPLUS:
+            return self.send_to_pushplus(content)
+        if channel == NotificationChannel.SERVERCHAN3:
+            return self.send_to_serverchan3(content)
+        if channel == NotificationChannel.CUSTOM:
+            if use_image:
+                return self._send_custom_webhook_image(image_bytes, fallback_content=content)
+            return self.send_to_custom(content)
+        if channel == NotificationChannel.DISCORD:
+            return self.send_to_discord(content)
+        if channel == NotificationChannel.SLACK:
+            if use_image:
+                return self._send_slack_image(image_bytes, fallback_content=content)
+            return self.send_to_slack(content)
+        if channel == NotificationChannel.ASTRBOT:
+            return self.send_to_astrbot(content)
+        logger.warning(f"不支持的通知渠道: {channel}")
+        return False
+
+    def send_with_results(
         self,
         content: str,
         email_stock_codes: Optional[List[str]] = None,
@@ -1698,11 +1782,11 @@ class NotificationService(
         severity: Optional[str] = None,
         dedup_key: Optional[str] = None,
         cooldown_key: Optional[str] = None,
-    ) -> bool:
+    ) -> NotificationDispatchResult:
         """
-        统一发送接口 - 向所有已配置的渠道发送
+        Send a notification and return per-channel diagnostics.
 
-        遍历所有已配置的渠道，逐一发送消息
+        ``send()`` keeps the historical bool API and delegates here.
 
         Fallback rules (Markdown-to-image, Issue #289):
         - When image_bytes is None (conversion failed / imgkit not installed /
@@ -1720,24 +1804,44 @@ class NotificationService(
             cooldown_key: 可选冷却 key；未设置时使用路由/级别默认 key
 
         Returns:
-            是否至少有一个渠道发送成功
+            Structured dispatch diagnostics.
         """
         context_success = self.send_to_context(content)
 
         if not self._available_channels:
             if context_success:
                 logger.info("已通过消息上下文渠道完成推送（无其他通知渠道）")
-                return True
+                return NotificationDispatchResult(
+                    dispatched=True,
+                    success=True,
+                    status="sent",
+                    channel_results=[ChannelAttemptResult(channel="__context__", success=True)],
+                )
             logger.warning("通知服务不可用，跳过推送")
-            return False
+            return NotificationDispatchResult(
+                dispatched=False,
+                success=False,
+                status="no_channel",
+                message="notification service unavailable",
+            )
 
         target_channels = self.get_channels_for_route(route_type)
         if not target_channels:
             if context_success:
                 logger.info("已通过消息上下文渠道完成推送（路由后无其他通知渠道）")
-                return True
+                return NotificationDispatchResult(
+                    dispatched=True,
+                    success=True,
+                    status="sent",
+                    channel_results=[ChannelAttemptResult(channel="__context__", success=True)],
+                )
             logger.warning("通知路由 %s 未命中任何已配置渠道，跳过静态通知渠道", route_type)
-            return False
+            return NotificationDispatchResult(
+                dispatched=False,
+                success=False,
+                status="no_channel",
+                message=f"notification route {route_type} has no configured channel",
+            )
 
         noise_decision = self.evaluate_noise_control(
             content,
@@ -1748,7 +1852,15 @@ class NotificationService(
         )
         if not noise_decision.should_send:
             logger.info(noise_decision.message)
-            return context_success
+            status = "sent" if context_success else "noise_suppressed"
+            results = [ChannelAttemptResult(channel="__context__", success=True)] if context_success else []
+            return NotificationDispatchResult(
+                dispatched=bool(context_success),
+                success=bool(context_success),
+                status=status,
+                channel_results=results,
+                message=noise_decision.message,
+            )
 
         # Markdown to image (Issue #289): convert once if any channel needs it.
         # Per-channel decision via _should_use_image_for_channel (see send() docstring for fallback rules).
@@ -1786,82 +1898,96 @@ class NotificationService(
 
         success_count = 0
         fail_count = 0
+        channel_results: List[ChannelAttemptResult] = []
 
         for channel in target_channels:
             channel_name = ChannelDetector.get_channel_name(channel)
-            use_image = self._should_use_image_for_channel(channel, image_bytes)
+            started_at = time.monotonic()
             try:
-                if channel == NotificationChannel.WECHAT:
-                    if use_image:
-                        result = self._send_wechat_image(image_bytes)
-                    else:
-                        result = self.send_to_wechat(content)
-                elif channel == NotificationChannel.FEISHU:
-                    result = self.send_to_feishu(content)
-                elif channel == NotificationChannel.TELEGRAM:
-                    if use_image:
-                        result = self._send_telegram_photo(image_bytes)
-                    else:
-                        result = self.send_to_telegram(content)
-                elif channel == NotificationChannel.EMAIL:
-                    receivers = None
-                    if email_send_to_all and self._stock_email_groups:
-                        receivers = self.get_all_email_receivers()
-                    elif email_stock_codes and self._stock_email_groups:
-                        receivers = self.get_receivers_for_stocks(email_stock_codes)
-                    if use_image:
-                        result = self._send_email_with_inline_image(
-                            image_bytes, receivers=receivers
-                        )
-                    else:
-                        result = self.send_to_email(content, receivers=receivers)
-                elif channel == NotificationChannel.PUSHOVER:
-                    result = self.send_to_pushover(content)
-                elif channel == NotificationChannel.NTFY:
-                    result = self.send_to_ntfy(content)
-                elif channel == NotificationChannel.GOTIFY:
-                    result = self.send_to_gotify(content)
-                elif channel == NotificationChannel.PUSHPLUS:
-                    result = self.send_to_pushplus(content)
-                elif channel == NotificationChannel.SERVERCHAN3:
-                    result = self.send_to_serverchan3(content)
-                elif channel == NotificationChannel.CUSTOM:
-                    if use_image:
-                        result = self._send_custom_webhook_image(
-                            image_bytes, fallback_content=content
-                        )
-                    else:
-                        result = self.send_to_custom(content)
-                elif channel == NotificationChannel.DISCORD:
-                    result = self.send_to_discord(content)
-                elif channel == NotificationChannel.SLACK:
-                    if use_image:
-                        result = self._send_slack_image(
-                            image_bytes, fallback_content=content
-                        )
-                    else:
-                        result = self.send_to_slack(content)
-                elif channel == NotificationChannel.ASTRBOT:
-                    result = self.send_to_astrbot(content)
-                else:
-                    logger.warning(f"不支持的通知渠道: {channel}")
-                    result = False
+                result = self._send_to_static_channel(
+                    channel,
+                    content,
+                    image_bytes=image_bytes,
+                    email_stock_codes=email_stock_codes,
+                    email_send_to_all=email_send_to_all,
+                )
+                latency_ms = int((time.monotonic() - started_at) * 1000)
 
                 if result:
                     success_count += 1
                 else:
                     fail_count += 1
+                channel_results.append(
+                    ChannelAttemptResult(
+                        channel=channel.value,
+                        success=bool(result),
+                        error_code=None if result else "send_failed",
+                        retryable=not bool(result),
+                        latency_ms=latency_ms,
+                    )
+                )
 
             except Exception as e:
                 logger.error(f"{channel_name} 发送失败: {e}")
                 fail_count += 1
+                channel_results.append(
+                    ChannelAttemptResult(
+                        channel=channel.value,
+                        success=False,
+                        error_code="exception",
+                        retryable=True,
+                        latency_ms=int((time.monotonic() - started_at) * 1000),
+                        diagnostics=self._sanitize_notification_diagnostics(str(e)),
+                    )
+                )
 
         logger.info(f"通知发送完成：成功 {success_count} 个，失败 {fail_count} 个")
         if success_count > 0:
             self.record_noise_control(noise_decision)
         else:
             self.release_noise_control(noise_decision)
-        return success_count > 0 or context_success
+        success = success_count > 0 or context_success
+        if success_count > 0 and fail_count > 0:
+            status = "partial_failed"
+        elif success_count > 0 or context_success:
+            status = "sent"
+        else:
+            status = "all_failed"
+        if context_success:
+            channel_results.insert(0, ChannelAttemptResult(channel="__context__", success=True))
+        return NotificationDispatchResult(
+            dispatched=True,
+            success=success,
+            status=status,
+            channel_results=channel_results,
+        )
+
+    def send(
+        self,
+        content: str,
+        email_stock_codes: Optional[List[str]] = None,
+        email_send_to_all: bool = False,
+        route_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        dedup_key: Optional[str] = None,
+        cooldown_key: Optional[str] = None,
+    ) -> bool:
+        """
+        统一发送接口 - 向所有已配置的渠道发送。
+
+        Returns:
+            是否至少有一个渠道发送成功
+        """
+        result = self.send_with_results(
+            content,
+            email_stock_codes=email_stock_codes,
+            email_send_to_all=email_send_to_all,
+            route_type=route_type,
+            severity=severity,
+            dedup_key=dedup_key,
+            cooldown_key=cooldown_key,
+        )
+        return bool(result.success)
    
     def save_report_to_file(
         self, 

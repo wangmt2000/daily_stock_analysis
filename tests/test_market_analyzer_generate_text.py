@@ -1065,8 +1065,9 @@ Sector text.
 
         result = ma._inject_data_into_review(review, overview)
 
-        assert "Advancers **3200**" in result
-        assert "Turnover **14567** (CNY 100m)" in result
+        assert "- **Market Signal**: 66/100 (constructive, risk-on)" in result
+        assert "- **Breadth**: Advancers 3200 / Decliners 1800 / Flat 100;" in result
+        assert "Turnover 14567 (CNY 100m)" in result
         assert "| Index | Last | Change % | Open | High | Low | Amplitude | Turnover (CNY 100m) |" in result
         assert "#### Leading Sectors" in result
         assert "| 1 | AI算力 | +3.25% |" in result
@@ -1120,20 +1121,31 @@ Sector text.
 
         result = ma._inject_data_into_review(review, overview, news)
 
-        assert "大盘红绿灯" in result
-        assert "green（可进攻）" in result
-        assert "核心原因" in result
+        assert "盘面信号" in result
+        assert "66/100（偏暖，可进攻）" in result
+        assert "绿灯（可进攻）" not in result
+        assert "大盘红绿灯" not in result
+        assert "green（可进攻）" not in result
+        assert "信号依据" in result
+        signal_line = next(line for line in result.splitlines() if "**盘面信号**" in line)
+        drivers_line = next(line for line in result.splitlines() if "**信号依据**" in line)
+        assert signal_line.startswith("- ")
+        assert "66/100" in signal_line
+        assert "█" not in result
+        assert "░" not in result
+        assert "盘面温度" not in drivers_line
         assert "操作建议" in result
-        assert "盘面温度" in result
+        assert "盘面温度" not in result
         assert "| 上涨/下跌/平盘 | 3200 / 1800 / 100 |" in result
         assert "| 指数 | 最新 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 | 成交额(亿) |" in result
         assert "| 上证指数 | 3300.00 | 🟢 +0.36% | 3288.00 | 3312.00 | 3276.00 | 1.10% | 1450 |" in result
         assert "#### 领涨板块 Top 5" in result
         assert "| 1 | AI算力 | +3.25% |" in result
-        assert "#### 近三日催化线索" in result
+        assert "#### 近三日市场线索" in result
         assert "AI算力板块走强" in result
+        assert "算力产业链延续活跃" not in result
 
-    def test_news_block_labels_snippets_and_preserves_source_url(self):
+    def test_news_block_renders_title_source_and_link_only(self):
         from src.market_analyzer import MarketAnalyzer
 
         ma = MarketAnalyzer.__new__(MarketAnalyzer)
@@ -1154,10 +1166,15 @@ Sector text.
             }
         ])
 
-        assert "摘要/线索片段" in result
+        assert "#### 近三日市场线索" in result
+        assert "| 序号 |" not in result
+        assert "摘要/线索片段" not in result
         assert "关注点" not in result
-        assert "成交额放大" in result
-        assert "[东方财富 / 2026-05-06](https://example.com/news/1)" in result
+        assert "成交额放大" not in result
+        assert (
+            "- 1. [A股收评：科创50指数放量反弹涨5.47% 两市成交额重回3万亿元]"
+            "(https://example.com/news/1)（东方财富 / 2026-05-06）"
+        ) in result
 
     def test_news_block_uses_dash_when_source_metadata_missing(self):
         from src.market_analyzer import MarketAnalyzer
@@ -1173,8 +1190,32 @@ Sector text.
             }
         ])
 
-        assert "| 1 | 政策利好带动板块活跃 | 相关主题成交放大 | - |" in result
-        assert "| 1 | 政策利好带动板块活跃 | 相关主题成交放大 | source |" not in result
+        assert "- 1. 政策利好带动板块活跃" in result
+        assert "相关主题成交放大" not in result
+        assert "| 1 | 政策利好带动板块活跃 |" not in result
+
+    def test_news_block_uses_english_metadata_punctuation(self):
+        from src.market_analyzer import MarketAnalyzer
+
+        ma = MarketAnalyzer.__new__(MarketAnalyzer)
+        ma.config = SimpleNamespace(report_language="en")
+        ma.region = "us"
+
+        result = ma._build_news_block([
+            {
+                "title": "Chip stocks rally as AI demand improves",
+                "source": "Reuters",
+                "published_date": "2026-05-06",
+                "url": "https://example.com/news/2",
+            }
+        ])
+
+        assert "#### News Catalysts" in result
+        assert (
+            "- 1. [Chip stocks rally as AI demand improves](https://example.com/news/2)"
+            " (Reuters / 2026-05-06)"
+        ) in result
+        assert "（Reuters" not in result
 
     def test_review_prompt_caps_news_url_context(self):
         from src.market_analyzer import MarketOverview
@@ -1244,11 +1285,11 @@ Sector text.
         snapshot = ma.build_market_light_snapshot(overview)
 
         assert snapshot["status"] == "red"
-        assert snapshot["label"] == "defensive"
+        assert snapshot["label"] == "risk-off"
         assert snapshot["guidance"] == (
             "Risk is elevated; prioritize drawdown control and avoid chasing weak rebounds."
         )
-        assert snapshot["reasons"][0].startswith("market temperature ")
+        assert not any(reason.startswith("market temperature ") for reason in snapshot["reasons"])
         assert any(
             reason.startswith("advancers ratio ") and "downside pressure dominates" in reason
             for reason in snapshot["reasons"]

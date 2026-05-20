@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,7 +23,8 @@ except ModuleNotFoundError:
 import src.auth as auth
 from api.app import create_app
 from src.config import Config
-from src.storage import AlertNotificationRecord, AlertTriggerRecord, DatabaseManager
+from src.repositories.alert_repo import AlertRepository
+from src.storage import AlertCooldownRecord, AlertNotificationRecord, AlertTriggerRecord, Base, DatabaseManager
 
 
 def _reset_auth_globals() -> None:
@@ -97,6 +98,9 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(created["parameters"]["price"], 1800.0)
         self.assertTrue(created["enabled"])
         self.assertEqual(created["source"], "api")
+        self.assertIsNone(created["last_triggered_at"])
+        self.assertIsNone(created["cooldown_until"])
+        self.assertFalse(created["cooldown_active"])
         self.assertIsNotNone(created["created_at"])
         self.assertIsNotNone(created["updated_at"])
 
@@ -132,6 +136,43 @@ class AlertApiTestCase(unittest.TestCase):
 
         missing_resp = self.client.get(f"/api/v1/alerts/rules/{rule_id}")
         self.assertEqual(missing_resp.status_code, 404)
+
+    def test_rule_response_includes_server_cooldown_active_flag(self) -> None:
+        created = self._create_rule()
+        repo = AlertRepository(self.db)
+        now_dt = datetime.now()
+        cooldown_until = now_dt + timedelta(minutes=5)
+        repo.upsert_cooldown(
+            rule_id=created["id"],
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=now_dt,
+            cooldown_until=cooldown_until,
+            reason="active cooldown",
+        )
+
+        list_resp = self.client.get("/api/v1/alerts/rules")
+        self.assertEqual(list_resp.status_code, 200, list_resp.text)
+        item = list_resp.json()["items"][0]
+        self.assertEqual(item["id"], created["id"])
+        self.assertEqual(item["cooldown_until"], cooldown_until.isoformat())
+        self.assertTrue(item["cooldown_active"])
+
+        expired_at = datetime.now() - timedelta(minutes=5)
+        repo.upsert_cooldown(
+            rule_id=created["id"],
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=expired_at,
+            cooldown_until=expired_at,
+            reason="expired cooldown",
+        )
+
+        detail_resp = self.client.get(f"/api/v1/alerts/rules/{created['id']}")
+        self.assertEqual(detail_resp.status_code, 200, detail_resp.text)
+        self.assertFalse(detail_resp.json()["cooldown_active"])
 
     def test_rule_update_rejects_empty_payload(self) -> None:
         rule = self._create_rule()
@@ -202,6 +243,71 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(payload["total"], 1)
         self.assertEqual(payload["items"][0]["target"], "300750")
         self.assertEqual(payload["items"][0]["parameters"]["change_pct"], 3.5)
+
+    def test_create_p5_technical_indicator_rules(self) -> None:
+        cases = [
+            ("ma_price_cross", {"direction": "above", "window": 20}),
+            ("rsi_threshold", {"direction": "below", "period": 12, "threshold": 30}),
+            (
+                "macd_cross",
+                {"direction": "bullish_cross", "fast_period": 12, "slow_period": 26, "signal_period": 9},
+            ),
+            ("kdj_cross", {"direction": "bearish_cross", "period": 9, "k_period": 3, "d_period": 3}),
+            ("cci_threshold", {"direction": "above", "period": 14, "threshold": 100}),
+        ]
+
+        for alert_type, parameters in cases:
+            created = self._create_rule({
+                "name": f"{alert_type} rule",
+                "alert_type": alert_type,
+                "parameters": parameters,
+            })
+            self.assertEqual(created["alert_type"], alert_type)
+            self.assertEqual(created["parameters"], parameters)
+
+    def test_p5_technical_indicator_rules_skip_legacy_event_validator(self) -> None:
+        with patch("src.services.alert_service.validate_event_alert_rule") as legacy_validator:
+            created = self._create_rule({
+                "name": "RSI threshold",
+                "alert_type": "rsi_threshold",
+                "parameters": {"direction": "above", "period": 12, "threshold": 70},
+            })
+
+        self.assertEqual(created["alert_type"], "rsi_threshold")
+        legacy_validator.assert_not_called()
+
+        with patch("src.services.alert_service.validate_event_alert_rule") as legacy_validator:
+            self._create_rule({
+                "name": "Legacy price cross",
+                "alert_type": "price_cross",
+                "parameters": {"direction": "above", "price": 1800},
+            })
+
+        legacy_validator.assert_called_once()
+
+    def test_rejects_invalid_p5_technical_indicator_parameters(self) -> None:
+        cases = [
+            ("ma_price_cross", {"window": 0, "direction": "above"}),
+            ("rsi_threshold", {"period": -1, "threshold": 50, "direction": "above"}),
+            ("rsi_threshold", {"period": 12, "threshold": 200, "direction": "above"}),
+            ("macd_cross", {"fast_period": 26, "slow_period": 12, "signal_period": 9}),
+            ("macd_cross", {"fast_period": 2, "slow_period": 250, "signal_period": 250}),
+            ("kdj_cross", {"period": 250, "k_period": 250, "d_period": 250}),
+            ("kdj_cross", {"period": 9, "k_period": 3, "d_period": 3, "direction": "golden"}),
+        ]
+
+        for alert_type, parameters in cases:
+            resp = self.client.post(
+                "/api/v1/alerts/rules",
+                json={
+                    "target_scope": "single_symbol",
+                    "target": "600519",
+                    "alert_type": alert_type,
+                    "parameters": parameters,
+                },
+            )
+            self.assertEqual(resp.status_code, 400, resp.text)
+            self.assertEqual(resp.json()["error"], "validation_error")
 
     def test_rejects_unsupported_and_invalid_rules(self) -> None:
         unsupported = self.client.post(
@@ -353,6 +459,67 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertFalse(payload["triggered"])
         self.assertNotIn("secret-token", payload["message"])
 
+    def test_dry_run_p5_technical_indicator_rules_use_mocked_daily_data(self) -> None:
+        triggered_rule = self._create_rule(
+            {
+                "target": "600519",
+                "alert_type": "ma_price_cross",
+                "parameters": {"window": 2, "direction": "above"},
+            }
+        )
+        not_triggered_rule = self._create_rule(
+            {
+                "target": "000001",
+                "alert_type": "ma_price_cross",
+                "parameters": {"window": 2, "direction": "above"},
+            }
+        )
+        error_rule = self._create_rule(
+            {
+                "target": "300750",
+                "alert_type": "ma_price_cross",
+                "parameters": {"window": 2, "direction": "above"},
+            }
+        )
+        manager = MagicMock()
+        manager.get_daily_data.side_effect = [
+            (
+                pd.DataFrame({
+                    "date": [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)],
+                    "close": [10, 9, 12],
+                }),
+                "unit-test",
+            ),
+            (
+                pd.DataFrame({
+                    "date": [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)],
+                    "close": [10, 12, 13],
+                }),
+                "unit-test",
+            ),
+            RuntimeError("token=secret-token data source failed"),
+        ]
+
+        async def _run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("data_provider.DataFetcherManager", return_value=manager), \
+             patch("src.services.alert_service.asyncio.to_thread", new=_run_inline):
+            triggered_resp = self.client.post(f"/api/v1/alerts/rules/{triggered_rule['id']}/test")
+            not_triggered_resp = self.client.post(f"/api/v1/alerts/rules/{not_triggered_rule['id']}/test")
+            error_resp = self.client.post(f"/api/v1/alerts/rules/{error_rule['id']}/test")
+
+        self.assertEqual(triggered_resp.status_code, 200, triggered_resp.text)
+        self.assertTrue(triggered_resp.json()["triggered"])
+        self.assertEqual(triggered_resp.json()["status"], "triggered")
+        self.assertEqual(not_triggered_resp.status_code, 200, not_triggered_resp.text)
+        self.assertFalse(not_triggered_resp.json()["triggered"])
+        self.assertEqual(not_triggered_resp.json()["status"], "not_triggered")
+        self.assertEqual(error_resp.status_code, 200, error_resp.text)
+        self.assertEqual(error_resp.json()["status"], "evaluation_error")
+        self.assertNotIn("secret-token", error_resp.json()["message"])
+        self.assertEqual(manager.get_daily_data.call_count, 3)
+
     def test_dry_run_missing_data_returns_not_triggered(self) -> None:
         rule = self._create_rule()
 
@@ -417,6 +584,57 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertTrue(notification_payload["items"][0]["retryable"])
         self.assertNotIn("secret-token", str(notification_payload))
         self.assertNotIn("example.com/webhook", str(notification_payload))
+
+    def test_alert_cooldowns_table_create_all_is_idempotent(self) -> None:
+        constraint_names = {constraint.name for constraint in AlertCooldownRecord.__table__.constraints}
+        self.assertIn("uix_alert_cooldown_rule_target_severity", constraint_names)
+
+        Base.metadata.create_all(self.db._engine)
+        Base.metadata.create_all(self.db._engine)
+
+        with self.db.get_session() as session:
+            session.add(
+                AlertCooldownRecord(
+                    rule_id=1,
+                    rule_key="single_symbol:600519:price_cross:{}",
+                    target="600519",
+                    severity="warning",
+                    state="active",
+                )
+            )
+            session.commit()
+            count = session.query(AlertCooldownRecord).count()
+
+        self.assertEqual(count, 1)
+
+    def test_alert_cooldown_upsert_keeps_one_row_per_rule_target_severity(self) -> None:
+        repo = AlertRepository(self.db)
+        first = repo.upsert_cooldown(
+            rule_id=1,
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=datetime(2026, 5, 18, 10, 0, 0),
+            cooldown_until=datetime(2026, 5, 18, 11, 0, 0),
+            reason="first trigger",
+        )
+        second = repo.upsert_cooldown(
+            rule_id=1,
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=datetime(2026, 5, 18, 10, 30, 0),
+            cooldown_until=datetime(2026, 5, 18, 11, 30, 0),
+            reason="updated trigger",
+        )
+
+        with self.db.get_session() as session:
+            rows = session.query(AlertCooldownRecord).all()
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].reason, "updated trigger")
+        self.assertEqual(rows[0].cooldown_until, datetime(2026, 5, 18, 11, 30, 0))
 
 
 if __name__ == "__main__":

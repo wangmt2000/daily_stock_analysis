@@ -11,7 +11,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, delete, desc, func, select
 
-from src.storage import AlertNotificationRecord, AlertRuleRecord, AlertTriggerRecord, DatabaseManager
+from src.storage import (
+    AlertCooldownRecord,
+    AlertNotificationRecord,
+    AlertRuleRecord,
+    AlertTriggerRecord,
+    DatabaseManager,
+)
 
 
 class AlertRepository:
@@ -115,6 +121,99 @@ class AlertRepository:
             session.commit()
             session.refresh(row)
             return row
+
+    def record_notification_attempt(self, fields: Dict[str, Any]) -> AlertNotificationRecord:
+        if not fields.get("channel"):
+            raise ValueError("alert notification channel is required")
+
+        with self.db.get_session() as session:
+            row = AlertNotificationRecord(**fields)
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row
+
+    def get_active_cooldown(
+        self,
+        *,
+        rule_id: int,
+        target: str,
+        severity: Optional[str],
+        now: Optional[datetime] = None,
+    ) -> Optional[AlertCooldownRecord]:
+        now_value = now or datetime.now()
+        with self.db.get_session() as session:
+            return session.execute(
+                select(AlertCooldownRecord)
+                .where(
+                    AlertCooldownRecord.rule_id == rule_id,
+                    AlertCooldownRecord.target == target,
+                    AlertCooldownRecord.severity == severity,
+                    AlertCooldownRecord.state == "active",
+                    AlertCooldownRecord.cooldown_until > now_value,
+                )
+                .order_by(desc(AlertCooldownRecord.cooldown_until), desc(AlertCooldownRecord.id))
+                .limit(1)
+            ).scalar_one_or_none()
+
+    def upsert_cooldown(
+        self,
+        *,
+        rule_id: int,
+        rule_key: Optional[str],
+        target: str,
+        severity: Optional[str],
+        last_triggered_at: datetime,
+        cooldown_until: datetime,
+        reason: Optional[str] = None,
+        state: str = "active",
+    ) -> AlertCooldownRecord:
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(AlertCooldownRecord)
+                .where(
+                    AlertCooldownRecord.rule_id == rule_id,
+                    AlertCooldownRecord.target == target,
+                    AlertCooldownRecord.severity == severity,
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                row = AlertCooldownRecord(
+                    rule_id=rule_id,
+                    rule_key=rule_key,
+                    target=target,
+                    severity=severity,
+                )
+                session.add(row)
+            row.rule_key = rule_key
+            row.last_triggered_at = last_triggered_at
+            row.cooldown_until = cooldown_until
+            row.reason = reason
+            row.state = state
+            row.updated_at = datetime.now()
+            session.commit()
+            session.refresh(row)
+            return row
+
+    def get_rule_cooldown_summary(
+        self,
+        *,
+        rule_id: int,
+        target: str,
+        severity: Optional[str],
+    ) -> Optional[AlertCooldownRecord]:
+        with self.db.get_session() as session:
+            return session.execute(
+                select(AlertCooldownRecord)
+                .where(
+                    AlertCooldownRecord.rule_id == rule_id,
+                    AlertCooldownRecord.target == target,
+                    AlertCooldownRecord.severity == severity,
+                )
+                .order_by(desc(AlertCooldownRecord.updated_at), desc(AlertCooldownRecord.id))
+                .limit(1)
+            ).scalar_one_or_none()
 
     def list_triggers(
         self,

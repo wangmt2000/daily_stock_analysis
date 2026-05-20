@@ -699,6 +699,28 @@ class AlertNotificationRecord(Base):
     )
 
 
+class AlertCooldownRecord(Base):
+    """Persisted alert cooldown state for DB-managed alert rules."""
+
+    __tablename__ = 'alert_cooldowns'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_id = Column(Integer, index=True)
+    # Reserved for future non-DB/expanded-scope rules; P4 queries by rule_id.
+    rule_key = Column(String(255), index=True)
+    target = Column(String(64), nullable=False, index=True)
+    severity = Column(String(16), nullable=False, default='warning', index=True)
+    last_triggered_at = Column(DateTime, index=True)
+    cooldown_until = Column(DateTime, index=True)
+    reason = Column(Text)
+    state = Column(String(16), nullable=False, default='active', index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint('rule_id', 'target', 'severity', name='uix_alert_cooldown_rule_target_severity'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式
