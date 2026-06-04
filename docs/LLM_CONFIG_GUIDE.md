@@ -199,6 +199,22 @@ LITELLM_MODEL=ollama/qwen3:8b
 - 如果当前环境没有任何有效 Agent 模型链路，问股页面会继续按失败语义返回，并直接展示后端真实配置诊断；补齐任一有效模型来源后即可恢复，无需额外执行配置迁移脚本。
 - 推荐的新配置方式仍然是显式设置 `LITELLM_MODEL` / `AGENT_LITELLM_MODEL` 或使用 `LLM_CHANNELS`；legacy provider keys 目前保留为兼容回退路径，方便旧 `.env`、本地 macOS 开发环境和历史部署平滑继续运行。
 
+### 问股可见对话上下文压缩
+
+默认情况下，问股仍按历史行为只注入最近 20 条可见对话。需要长会话省 token 时，可开启：
+
+```env
+AGENT_CONTEXT_COMPRESSION_ENABLED=true
+AGENT_CONTEXT_COMPRESSION_PROFILE=balanced
+# 留空则跟随 profile preset
+AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS=
+AGENT_CONTEXT_PROTECTED_TURNS=
+```
+
+压缩只处理 `session_id` 下用户可见的 `user` / `assistant` 文本历史，不处理 provider trace、thinking blocks、tool calls 或 tool results，也不会改变同轮工具调用透传。三档 preset 分别是 `cost`（6000 tokens / 保护 2 轮）、`balanced`（12000 / 4）和 `long_context_raw_first`（24000 / 6）；trigger / protected 留空时跟随当前 profile，显式填写时覆盖 profile。
+
+问股 single-agent 路径会额外维护一条 provider-aware trace 分轨，用于 DeepSeek V4 thinking + tool-call 的跨轮协议回放：只有同一轮同时出现 `tool_calls` 与 `reasoning_content` 时才会按当前 `session_id + provider + model` 保存最近 3 条最小协议材料，并在下一轮按原始时序插回对应可见 assistant 回复之前。该 trace 只能原样保留或整段丢弃，不参与摘要、不写入 Web 会话消息、不新增 `.env` 配置；model/provider 不匹配、锚点已被 summary 覆盖或预算不足时会整段跳过。Claude extended thinking 本轮只覆盖 adapter/storage 级 opaque `thinking` / `redacted_thinking` / `signature` blocks plumbing 与离线 fixture，不声明生产端到端支持；multi-agent trace 注入仍是 follow-up。外部协议依据包括 DeepSeek thinking mode 文档（<https://api-docs.deepseek.com/guides/thinking_mode>）和 Anthropic Claude extended thinking 文档（<https://platform.claude.com/docs/en/docs/build-with-claude/extended-thinking>），LiteLLM 兼容窗口仍以 `requirements.txt` 的 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0` 为准。
+
 ### 严格 temperature 模型兼容说明
 
 - Moonshot 官方说明 Kimi API 兼容 OpenAI 接口，Base URL 使用 `https://api.moonshot.ai/v1`：<https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart>
@@ -280,7 +296,7 @@ model_list:
 | `ANTHROPIC_API_KEY` | 如果要多个API Key，这个变量名称也能拿来用 | 可选，必须配置到repository secret中 |
 | `OPENAI_API_KEY` | 同上，可以用来存储API Key | 可选，必须配置到repository secret中 |
 
-渠道模式无需上传 YAML 文件。仓库自带 `daily_analysis.yml` 已显式透传以下常用字段：
+渠道模式无需上传 YAML 文件。仓库自带 `00-daily-analysis.yml` 已显式透传以下常用字段：
 
 - 运行时选择：`LLM_CHANNELS`、`LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`AGENT_LITELLM_MODEL`、`VISION_MODEL`、`VISION_PROVIDER_PRIORITY`、`LLM_TEMPERATURE`
 - 多 Key：`GEMINI_API_KEYS`、`ANTHROPIC_API_KEYS`、`OPENAI_API_KEYS`、`DEEPSEEK_API_KEYS`（当前 workflow 仅从 repository secrets 导入，不会读取同名 Variables）

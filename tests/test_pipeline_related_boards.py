@@ -56,6 +56,21 @@ class PipelineRelatedBoardsTestCase(unittest.TestCase):
         self.assertEqual(enriched["belong_boards"], [])
         pipeline.fetcher_manager.get_belong_boards.assert_not_called()
 
+    def test_attach_belong_boards_preserves_adapter_boards_for_offshore(self) -> None:
+        """HK/US adapters populate belong_boards from yfinance; pipeline must not clobber."""
+        pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+        pipeline.fetcher_manager = MagicMock()
+
+        existing_boards = [
+            {"name": "Technology", "type": "行业"},
+            {"name": "Consumer Electronics", "type": "概念"},
+        ]
+        context = {"market": "us", "status": "ok", "belong_boards": existing_boards}
+        enriched = pipeline._attach_belong_boards_to_fundamental_context("AAPL", context)
+
+        self.assertEqual(enriched["belong_boards"], existing_boards)
+        pipeline.fetcher_manager.get_belong_boards.assert_not_called()
+
     def test_attach_belong_boards_skips_provider_when_board_block_not_supported(self) -> None:
         pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
         pipeline.fetcher_manager = MagicMock()

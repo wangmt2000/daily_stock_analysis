@@ -1,7 +1,9 @@
 import type React from 'react';
+import { ChevronDown, RefreshCw } from 'lucide-react';
 import { Badge, Card, StatusDot } from '../common';
 import { DashboardPanelHeader } from '../dashboard';
 import type { TaskInfo } from '../../types/analysis';
+import { getRequestedPhaseLabel } from '../../utils/marketPhase';
 
 /**
  * 任务项组件属性
@@ -20,6 +22,9 @@ const TaskItem: React.FC<TaskItemProps> = ({ task }) => {
   const statusVariant = isProcessing ? 'info' : 'default';
   const statusTone = isProcessing ? 'info' : 'neutral';
   const progress = Math.max(0, Math.min(100, task.progress || 0));
+  const traceId = (task.traceId || '').trim();
+  const requestedPhaseLabel = getRequestedPhaseLabel(task.analysisPhase, 'zh');
+  const requestedPhaseVariant = task.analysisPhase === 'auto' ? 'default' : 'info';
 
   return (
     <div className="home-subpanel flex items-center gap-3 px-3 py-2.5">
@@ -47,6 +52,13 @@ const TaskItem: React.FC<TaskItemProps> = ({ task }) => {
             {task.message}
           </p>
         )}
+        {requestedPhaseLabel ? (
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <Badge variant={requestedPhaseVariant} className="shrink-0 shadow-none" aria-label={requestedPhaseLabel}>
+              {requestedPhaseLabel}
+            </Badge>
+          </div>
+        ) : null}
         <div className="mt-2 flex items-center gap-2">
           <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/8">
             <div
@@ -58,6 +70,23 @@ const TaskItem: React.FC<TaskItemProps> = ({ task }) => {
             {progress}%
           </span>
         </div>
+        {traceId ? (
+          <details className="group/task mt-2 text-xs">
+            <summary className="flex cursor-pointer list-none items-center gap-2 text-muted-text">
+              <span>运行诊断</span>
+              <span className="font-mono text-[11px] text-secondary-text">
+                {traceId.length > 18 ? `${traceId.slice(0, 10)}...` : traceId}
+              </span>
+              <ChevronDown className="h-3.5 w-3.5 transition-transform group-open/task:rotate-180" aria-hidden="true" />
+            </summary>
+            <div className="mt-1 rounded-lg border border-subtle bg-base/50 px-2 py-1.5 text-muted-text">
+              <span className="mr-1">Trace:</span>
+              <code className="break-all font-mono text-[11px] text-secondary-text">
+                {traceId}
+              </code>
+            </div>
+          </details>
+        ) : null}
       </div>
 
       {/* 状态标签 */}
@@ -124,14 +153,7 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
           title={title}
           titleClassName="text-sm font-medium"
           leading={(
-            <svg className="h-4 w-4 text-cyan" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-              />
-            </svg>
+            <RefreshCw className="h-4 w-4 text-cyan" aria-hidden="true" />
           )}
           headingClassName="items-center"
           actions={(

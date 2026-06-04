@@ -109,7 +109,7 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
 
   // Convert snake_case payloads into camelCase TaskInfo objects.
   const toCamelCase = (data: Record<string, unknown>): TaskInfo => {
-    return {
+    const task: TaskInfo = {
       taskId: data.task_id as string,
       stockCode: data.stock_code as string,
       stockName: data.stock_name as string | undefined,
@@ -123,7 +123,15 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
       error: data.error as string | undefined,
       originalQuery: data.original_query as string | undefined,
       selectionSource: data.selection_source as string | undefined,
+      analysisPhase: data.analysis_phase as TaskInfo['analysisPhase'],
+      skills: Array.isArray(data.skills) ? data.skills.map(String) : undefined,
     };
+
+    if (typeof data.trace_id === 'string' && data.trace_id.trim()) {
+      task.traceId = data.trace_id;
+    }
+
+    return task;
   };
 
   // Parse an SSE payload.

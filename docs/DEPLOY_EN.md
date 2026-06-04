@@ -385,10 +385,10 @@ Add these Secrets:
 
 #### 3. Verify Workflow File
 
-Ensure `.github/workflows/daily_analysis.yml` file exists and is committed:
+Ensure `.github/workflows/00-daily-analysis.yml` file exists and is committed:
 
 ```bash
-git add .github/workflows/daily_analysis.yml
+git add .github/workflows/00-daily-analysis.yml
 git commit -m "Add GitHub Actions workflow"
 git push
 ```
@@ -414,7 +414,7 @@ git push
 
 Default configuration: **Monday to Friday, 18:00 Beijing Time** auto-execution
 
-Modify time: Edit cron expression in `.github/workflows/daily_analysis.yml`:
+Modify time: Edit cron expression in `.github/workflows/00-daily-analysis.yml`:
 
 ```yaml
 schedule:

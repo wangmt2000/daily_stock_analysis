@@ -162,6 +162,145 @@ describe('alertsApi', () => {
     });
   });
 
+  it('creates market light rules with market scope and min_drop parameter fields', async () => {
+    post
+      .mockResolvedValueOnce({
+        data: {
+          id: 6,
+          name: 'market status',
+          target_scope: 'market',
+          target: 'cn',
+          alert_type: 'market_light_status',
+          parameters: { statuses: ['red', 'yellow'] },
+          severity: 'critical',
+          enabled: true,
+          source: 'api',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          id: 7,
+          name: 'market score drop',
+          target_scope: 'market',
+          target: 'us',
+          alert_type: 'market_light_score_drop',
+          parameters: { min_drop: 12 },
+          severity: 'warning',
+          enabled: true,
+          source: 'api',
+        },
+      });
+
+    const statusRule = await alertsApi.createRule({
+      name: 'market status',
+      targetScope: 'market',
+      target: 'cn',
+      alertType: 'market_light_status',
+      parameters: { statuses: ['red', 'yellow'] },
+      severity: 'critical',
+      enabled: true,
+    });
+    const scoreDropRule = await alertsApi.createRule({
+      name: 'market score drop',
+      targetScope: 'market',
+      target: 'us',
+      alertType: 'market_light_score_drop',
+      parameters: { minDrop: 12 },
+      severity: 'warning',
+      enabled: true,
+    });
+
+    expect(post).toHaveBeenNthCalledWith(1, '/api/v1/alerts/rules', {
+      name: 'market status',
+      target_scope: 'market',
+      target: 'cn',
+      alert_type: 'market_light_status',
+      parameters: { statuses: ['red', 'yellow'] },
+      severity: 'critical',
+      enabled: true,
+    });
+    expect(post).toHaveBeenNthCalledWith(2, '/api/v1/alerts/rules', {
+      name: 'market score drop',
+      target_scope: 'market',
+      target: 'us',
+      alert_type: 'market_light_score_drop',
+      parameters: { min_drop: 12 },
+      severity: 'warning',
+      enabled: true,
+    });
+    expect(statusRule.targetScope).toBe('market');
+    expect(statusRule.parameters.statuses).toEqual(['red', 'yellow']);
+    expect(scoreDropRule.parameters.minDrop).toBe(12);
+  });
+
+  it('creates portfolio alert rules and maps batch dry-run fields', async () => {
+    post
+      .mockResolvedValueOnce({
+        data: {
+          id: 5,
+          name: 'portfolio stop loss',
+          target_scope: 'portfolio_account',
+          target: 'all',
+          alert_type: 'portfolio_stop_loss',
+          parameters: { mode: 'breach' },
+          severity: 'critical',
+          enabled: true,
+          source: 'api',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          rule_id: 5,
+          target_scope: 'watchlist',
+          status: 'triggered',
+          triggered: true,
+          observed_value: 11,
+          message: 'Evaluated 2 targets',
+          evaluated_count: 2,
+          triggered_count: 1,
+          degraded_count: 1,
+          skipped_count: 0,
+          target_results: [
+            {
+              target: '600519',
+              display_target: '自选股 - 600519',
+              status: 'triggered',
+              record_status: 'triggered',
+              triggered: true,
+              observed_value: 11,
+              threshold: 10,
+              message: 'triggered',
+            },
+          ],
+        },
+      });
+
+    const created = await alertsApi.createRule({
+      name: 'portfolio stop loss',
+      targetScope: 'portfolio_account',
+      target: 'all',
+      alertType: 'portfolio_stop_loss',
+      parameters: { mode: 'breach' },
+      severity: 'critical',
+      enabled: true,
+    });
+    const dryRun = await alertsApi.testRule(5);
+
+    expect(post).toHaveBeenNthCalledWith(1, '/api/v1/alerts/rules', {
+      name: 'portfolio stop loss',
+      target_scope: 'portfolio_account',
+      target: 'all',
+      alert_type: 'portfolio_stop_loss',
+      parameters: { mode: 'breach' },
+      severity: 'critical',
+      enabled: true,
+    });
+    expect(created.parameters.mode).toBe('breach');
+    expect(dryRun.evaluatedCount).toBe(2);
+    expect(dryRun.degradedCount).toBe(1);
+    expect(dryRun.targetResults?.[0].displayTarget).toBe('自选股 - 600519');
+  });
+
   it('deletes, toggles, tests, and lists history endpoints', async () => {
     deleteRequest.mockResolvedValueOnce({ data: { deleted: 1 } });
     post

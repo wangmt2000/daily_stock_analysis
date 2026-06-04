@@ -17,6 +17,7 @@ import unittest
 import sys
 import os
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -27,10 +28,22 @@ try:
 except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
-from src.agent.executor import AgentExecutor, AgentResult
+from src.agent.executor import (
+    AGENT_SYSTEM_PROMPT,
+    LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT,
+    AgentExecutor,
+    AgentResult,
+)
 from src.agent.llm_adapter import LLMResponse, ToolCall
 from src.agent.runner import parse_dashboard_json, run_agent_loop, serialize_tool_result
 from src.agent.tools.registry import ToolRegistry, ToolDefinition, ToolParameter
+from src.analysis_context_pack_prompt import format_analysis_context_pack_prompt_section
+from src.config import Config
+from src.services.analysis_context_builder import (
+    AnalysisContextBuilder,
+    PipelineAnalysisArtifacts,
+)
+from src.storage import DatabaseManager
 
 
 # ============================================================
@@ -58,6 +71,44 @@ def _make_mock_adapter():
     return adapter
 
 
+def _build_analysis_context_pack_summary(
+    *,
+    realtime_quote=None,
+    fundamental_context=None,
+) -> str:
+    artifacts = PipelineAnalysisArtifacts(
+        code="600519",
+        stock_name="贵州茅台",
+        market="cn",
+        phase=None,
+        base_context={
+            "today": {"close": 1880.0},
+            "yesterday": {"close": 1870.0},
+            "date": "2026-03-26",
+        },
+        enhanced_context={},
+        realtime_quote=realtime_quote
+        if realtime_quote is not None
+        else {"price": 1880.0, "source": "mock_quote"},
+        trend_result={"trend_status": "available"},
+        chip_data={"source": "mock_chip", "date": "2026-03-26"},
+        fundamental_context=fundamental_context
+        if fundamental_context is not None
+        else {
+            "status": "ok",
+            "coverage": {"valuation": "ok"},
+            "source_chain": [{"provider": "fundamental_pipeline"}],
+        },
+        news_context="新闻摘要",
+        news_result_count=1,
+        metadata={"trigger_source": "api"},
+    )
+    return format_analysis_context_pack_prompt_section(
+        AnalysisContextBuilder.build(artifacts),
+        report_language="zh",
+    )
+
+
 SAMPLE_DASHBOARD = {
     "stock_name": "贵州茅台",
     "sentiment_score": 75,
@@ -80,12 +131,62 @@ SAMPLE_DASHBOARD = {
 }
 
 
+def test_agent_system_prompts_require_phase_decision_contract() -> None:
+    for prompt in (LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT, AGENT_SYSTEM_PROMPT):
+        assert '"phase_decision"' in prompt
+        assert '"watch_conditions"' in prompt
+        assert '"data_limitations"' in prompt
+        assert "quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated" in prompt
+        assert "`confidence_level` 不得为高" in prompt
+
+
 # ============================================================
 # AgentExecutor Tests
 # ============================================================
 
 class TestAgentExecutor(unittest.TestCase):
     """Test the ReAct loop logic."""
+
+    def test_chat_injects_compressed_history_before_report_context_and_current_user(self):
+        registry = _make_registry_with_echo()
+        adapter = _make_mock_adapter()
+        adapter._config = MagicMock()
+        executor = AgentExecutor(registry, adapter, max_steps=2)
+        captured = {}
+
+        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None):
+            captured["messages"] = messages
+            return AgentResult(success=True, content="assistant reply")
+
+        compressed_history = [
+            {"role": "user", "content": "[系统生成的历史对话摘要，仅供延续本会话]\n旧摘要"},
+            {"role": "assistant", "content": "最近回复"},
+        ]
+
+        with patch.object(executor, "_run_loop", side_effect=fake_run_loop):
+            with patch(
+                "src.agent.executor.build_agent_chat_context_bundle",
+                return_value=SimpleNamespace(context_messages=compressed_history, diagnostics={}),
+            ):
+                with patch("src.agent.conversation.conversation_manager.get_or_create"):
+                    with patch("src.agent.conversation.conversation_manager.add_message"):
+                        executor.chat(
+                            "当前问题",
+                            "session-1",
+                            context={
+                                "stock_code": "600519",
+                                "stock_name": "贵州茅台",
+                                "previous_price": 1800,
+                            },
+                        )
+
+        messages = captured["messages"]
+        assert messages[0]["role"] == "system"
+        assert messages[1:3] == compressed_history
+        assert messages[3]["role"] == "user"
+        assert messages[3]["content"].startswith("[系统提供的历史分析上下文，可供参考对比]")
+        assert messages[4]["role"] == "assistant"
+        assert messages[-1] == {"role": "user", "content": "当前问题"}
 
     def test_prompt_omits_hardcoded_trend_baseline_when_default_policy_is_empty(self):
         """Explicit skill runs should not silently keep the legacy trend baseline."""
@@ -196,6 +297,149 @@ class TestAgentExecutor(unittest.TestCase):
         self.assertEqual(len(result.tool_calls_log), 1)
         self.assertEqual(result.tool_calls_log[0]["tool"], "echo")
         self.assertTrue(result.tool_calls_log[0]["success"])
+
+    def test_run_agent_loop_replays_reasoning_and_provider_specific_fields_on_followup_call(self):
+        registry = _make_registry_with_echo()
+        adapter = _make_mock_adapter()
+        adapter.call_with_tools.side_effect = [
+            LLMResponse(
+                content="Checking.",
+                tool_calls=[
+                    ToolCall(
+                        id="call_reason",
+                        name="echo",
+                        arguments={"message": "hello"},
+                        thought_signature="sig-1",
+                        provider_specific_fields={"thought_signature": "sig-1", "extra": "keep"},
+                    )
+                ],
+                reasoning_content="deepseek reasoning",
+                usage={"total_tokens": 10},
+                provider="deepseek",
+                model="deepseek/deepseek-chat",
+            ),
+            LLMResponse(
+                content=json.dumps(SAMPLE_DASHBOARD, ensure_ascii=False),
+                tool_calls=[],
+                usage={"total_tokens": 20},
+                provider="deepseek",
+                model="deepseek/deepseek-chat",
+            ),
+        ]
+
+        result = run_agent_loop(
+            messages=[{"role": "user", "content": "Analyze"}],
+            tool_registry=registry,
+            llm_adapter=adapter,
+            max_steps=2,
+        )
+
+        self.assertTrue(result.success)
+        followup_messages = adapter.call_with_tools.call_args_list[1].args[0]
+        assistant_msg = followup_messages[-2]
+        tool_msg = followup_messages[-1]
+        self.assertEqual(assistant_msg["role"], "assistant")
+        self.assertEqual(assistant_msg["reasoning_content"], "deepseek reasoning")
+        self.assertEqual(assistant_msg["_trace_provider"], "deepseek")
+        self.assertEqual(assistant_msg["_trace_model"], "deepseek/deepseek-chat")
+        self.assertEqual(
+            assistant_msg["tool_calls"][0]["provider_specific_fields"],
+            {"thought_signature": "sig-1", "extra": "keep"},
+        )
+        self.assertEqual(assistant_msg["tool_calls"][0]["thought_signature"], "sig-1")
+        self.assertEqual(tool_msg["role"], "tool")
+        self.assertEqual(tool_msg["tool_call_id"], "call_reason")
+
+    def test_chat_persists_single_provider_trace_and_reinjects_without_duplication(self):
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+        registry = _make_registry_with_echo()
+        adapter = _make_mock_adapter()
+        adapter._config = SimpleNamespace(
+            agent_context_compression_enabled=False,
+            agent_context_compression_profile="balanced",
+            agent_context_compression_trigger_tokens=999999,
+            agent_context_protected_turns=1,
+            llm_model_list=[],
+            agent_litellm_model="deepseek/deepseek-chat",
+            litellm_model="deepseek/deepseek-chat",
+            litellm_fallback_models=[],
+        )
+        adapter.call_with_tools.side_effect = [
+            LLMResponse(
+                content="Checking.",
+                tool_calls=[ToolCall(id="call_1", name="echo", arguments={"message": "first"})],
+                reasoning_content="r1",
+                usage={"total_tokens": 10},
+                provider="deepseek",
+                model="deepseek/deepseek-chat",
+            ),
+            LLMResponse(
+                content="first final",
+                tool_calls=[],
+                usage={"total_tokens": 5},
+                provider="deepseek",
+                model="deepseek/deepseek-chat",
+            ),
+            LLMResponse(
+                content="second final",
+                tool_calls=[],
+                usage={"total_tokens": 5},
+                provider="deepseek",
+                model="deepseek/deepseek-chat",
+            ),
+        ]
+
+        executor = AgentExecutor(registry, adapter, max_steps=3)
+
+        first = executor.chat("first question", "executor-trace")
+        second = executor.chat("second question", "executor-trace")
+
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(len(db.get_agent_provider_turns("executor-trace")), 1)
+        second_request_messages = adapter.call_with_tools.call_args_list[2].args[0]
+        ordered_roles = [msg["role"] for msg in second_request_messages[-5:]]
+        self.assertEqual(ordered_roles, ["user", "assistant", "tool", "assistant", "user"])
+        self.assertEqual(second_request_messages[-4]["reasoning_content"], "r1")
+        self.assertEqual(second_request_messages[-3]["tool_call_id"], "call_1")
+        self.assertEqual(second_request_messages[-2]["content"], "first final")
+        self.assertEqual(second_request_messages[-1]["content"], "second question")
+
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+
+    def test_persist_provider_trace_logs_save_failure_without_failing_chat(self):
+        registry = _make_registry_with_echo()
+        adapter = _make_mock_adapter()
+        executor = AgentExecutor(registry, adapter, max_steps=2)
+        messages = [
+            {"role": "user", "content": "question"},
+            {
+                "role": "assistant",
+                "content": "checking",
+                "_trace_provider": "deepseek",
+                "_trace_model": "deepseek/deepseek-chat",
+                "reasoning_content": "r1",
+                "tool_calls": [{"id": "call_1", "name": "echo", "arguments": {"message": "x"}}],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "tool-result"},
+        ]
+        db = SimpleNamespace(save_agent_provider_turn=MagicMock(side_effect=RuntimeError("db down")))
+
+        with patch("src.agent.executor.get_db", return_value=db):
+            with self.assertLogs("src.agent.executor", level="WARNING") as logs:
+                executor._persist_provider_trace(
+                    session_id="executor-trace-fail-open",
+                    run_id="run-1",
+                    messages=messages,
+                    baseline_len=1,
+                    user_message_id=10,
+                    assistant_message_id=11,
+                )
+
+        self.assertIn("Provider trace persistence failed", "\n".join(logs.output))
 
     def test_multiple_tool_calls_in_one_step(self):
         """Agent requests multiple tool calls in a single response."""
@@ -731,6 +975,45 @@ class TestBuildUserMessage(unittest.TestCase):
         )
         self.assertIn("股票代码: 600519", msg)
         self.assertIn("报告类型: daily", msg)
+
+    def test_message_renders_readable_market_phase_context_without_raw_keys(self):
+        summary = _build_analysis_context_pack_summary(
+            realtime_quote={
+                "price": 1880.0,
+                "source": "fallback",
+                "fallback_from": "primary_realtime_provider",
+            },
+        )
+        msg = self.executor._build_user_message(
+            "Analyze",
+            context={
+                "stock_code": "600519",
+                "report_language": "zh",
+                "market_phase_context": {
+                    "phase": "intraday",
+                    "market": "cn",
+                    "market_local_time": "2026-03-27T10:00:00+08:00",
+                    "effective_daily_bar_date": "2026-03-26",
+                    "is_partial_bar": True,
+                },
+                "analysis_context_pack_summary": summary,
+                "realtime_quote": {"price": 1880.0},
+            },
+        )
+        self.assertIn("股票代码: 600519", msg)
+        self.assertIn("市场阶段上下文", msg)
+        self.assertIn("分析上下文包摘要", msg)
+        self.assertIn("数据限制", msg)
+        self.assertIn("已知限制：行情：降级", msg)
+        self.assertIn("confidence_level 不得为高", msg)
+        self.assertIn("盘中", msg)
+        self.assertIn("不得当作完整日线复盘", msg)
+        self.assertLess(msg.index("市场阶段上下文"), msg.index("分析上下文包摘要"))
+        self.assertLess(msg.index("分析上下文包摘要"), msg.index("[系统已获取的实时行情]"))
+        self.assertNotIn("market_phase_context", msg)
+        self.assertNotIn("analysis_context_pack_summary", msg)
+        self.assertNotIn("is_partial_bar", msg)
+        self.assertNotIn("is_market_open_now", msg)
 
 
 # ============================================================

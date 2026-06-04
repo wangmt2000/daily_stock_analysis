@@ -192,6 +192,8 @@ LITELLM_MODEL=ollama/qwen3:8b
 - If the current environment has no valid Agent model path at all, the ask-stock page still returns a failure and now surfaces the backend's real configuration diagnosis. As soon as you restore any valid model source, the flow recovers without running any migration step.
 - The recommended forward path is still to configure `LITELLM_MODEL` / `AGENT_LITELLM_MODEL` explicitly or move to `LLM_CHANNELS`; legacy provider keys remain a compatibility fallback for older `.env` files, local macOS development, and existing deployments.
 
+For the single-agent ask-stock path, the backend also keeps a provider-aware trace track for DeepSeek V4 thinking + tool-call roundtrip. A trace is persisted only when the same run has both `tool_calls` and `reasoning_content`; the last 3 minimal protocol slices per `session_id + provider + model` are spliced back into the next request before the anchored visible assistant reply. Provider trace is either preserved exactly or dropped as a whole; it is never summarized, never returned by Web session-history APIs, and adds no `.env` setting. Model/provider mismatch, summarized anchors, or insufficient budget drop the whole trace. Claude extended thinking is limited in this PR to adapter/storage-level opaque `thinking` / `redacted_thinking` / `signature` block plumbing with offline fixtures; production end-to-end Claude and multi-agent trace injection remain follow-ups. Protocol references: DeepSeek thinking mode (<https://api-docs.deepseek.com/guides/thinking_mode>) and Anthropic Claude extended thinking (<https://platform.claude.com/docs/en/docs/build-with-claude/extended-thinking>). The LiteLLM compatibility window remains `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0` from `requirements.txt`.
+
 ### Strict Temperature Model Compatibility Notes
 
 - Moonshot officially documents Kimi as an OpenAI-compatible API, with `https://api.moonshot.ai/v1` as the base URL: <https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart>
@@ -250,7 +252,7 @@ model_list:
 
 ### GitHub Actions Notes
 
-The bundled `daily_analysis.yml` explicitly passes the common LLM runtime fields to the job environment:
+The bundled `00-daily-analysis.yml` explicitly passes the common LLM runtime fields to the job environment:
 
 - Runtime selection: `LLM_CHANNELS`, `LITELLM_MODEL`, `LITELLM_FALLBACK_MODELS`, `AGENT_LITELLM_MODEL`, `VISION_MODEL`, `VISION_PROVIDER_PRIORITY`, `LLM_TEMPERATURE`
 - Multiple keys: `GEMINI_API_KEYS`, `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `DEEPSEEK_API_KEYS` (the current workflow imports these from repository Secrets only, not from same-named Variables)

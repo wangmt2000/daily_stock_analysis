@@ -3,6 +3,7 @@ import { Badge } from '../common';
 import type { HistoryItem } from '../../types/analysis';
 import { getSentimentColor } from '../../types/analysis';
 import { formatDateTime } from '../../utils/format';
+import { getMarketPhaseSummaryLabel } from '../../utils/marketPhase';
 import { truncateStockName, isStockNameTruncated } from '../../utils/stockName';
 
 interface HistoryListItemProps {
@@ -45,6 +46,7 @@ export const HistoryListItem: React.FC<HistoryListItemProps> = ({
   const sentimentColor = item.sentimentScore !== undefined ? getSentimentColor(item.sentimentScore) : null;
   const stockName = item.stockName || item.stockCode;
   const isTruncated = isStockNameTruncated(stockName);
+  const phaseLabel = getMarketPhaseSummaryLabel(item.marketPhaseSummary, 'zh')?.replace('市场阶段: ', '').replace('市场阶段：', '');
 
   return (
     <div className="flex items-start gap-2 group">
@@ -86,20 +88,27 @@ export const HistoryListItem: React.FC<HistoryListItemProps> = ({
                   </span>
                 </span>
               </div>
-              {sentimentColor && (
-                <Badge
-                  variant="default"
-                  size="sm"
-                  className={`home-history-sentiment-badge shrink-0 shadow-none text-[11px] font-semibold leading-none transition-opacity duration-200${isTruncated ? ' group-hover/item:opacity-80' : ''}`}
-                  style={{
-                    color: sentimentColor,
-                    borderColor: `${sentimentColor}30`,
-                    backgroundColor: `${sentimentColor}10`,
-                  }}
-                >
-                  {getOperationBadgeLabel(item.operationAdvice)} {item.sentimentScore}
-                </Badge>
-              )}
+              <div className="flex shrink-0 items-center gap-1">
+                {phaseLabel ? (
+                  <Badge variant="default" size="sm" className="shadow-none text-[10px] leading-none">
+                    {phaseLabel}
+                  </Badge>
+                ) : null}
+                {sentimentColor && (
+                  <Badge
+                    variant="default"
+                    size="sm"
+                    className={`home-history-sentiment-badge shrink-0 shadow-none text-[11px] font-semibold leading-none transition-opacity duration-200${isTruncated ? ' group-hover/item:opacity-80' : ''}`}
+                    style={{
+                      color: sentimentColor,
+                      borderColor: `${sentimentColor}30`,
+                      backgroundColor: `${sentimentColor}10`,
+                    }}
+                  >
+                    {getOperationBadgeLabel(item.operationAdvice)} {item.sentimentScore}
+                  </Badge>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-2 mt-1">
               <span className="text-[11px] text-secondary-text font-mono">

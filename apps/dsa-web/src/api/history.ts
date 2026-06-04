@@ -7,6 +7,8 @@ import type {
   AnalysisReport,
   NewsIntelResponse,
   NewsIntelItem,
+  RunDiagnosticSummary,
+  StockBarResponse,
 } from '../types/analysis';
 
 // ============ API 接口 ============
@@ -79,6 +81,15 @@ export const historyApi = {
   },
 
   /**
+   * 获取历史报告运行诊断摘要
+   * @param recordId 分析历史记录主键 ID
+   */
+  getDiagnostics: async (recordId: number): Promise<RunDiagnosticSummary> => {
+    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${recordId}/diagnostics`);
+    return toCamelCase<RunDiagnosticSummary>(response.data);
+  },
+
+  /**
    * 批量删除历史记录
    * @param recordIds 分析历史记录主键 ID 列表
    */
@@ -88,5 +99,38 @@ export const historyApi = {
     });
 
     return toCamelCase<{ deleted: number }>(response.data);
+  },
+
+  /**
+   * 按股票代码删除所有历史记录
+   * @param stockCode 股票代码
+   */
+  deleteByCode: async (stockCode: string): Promise<{ deleted: number }> => {
+    const response = await apiClient.delete<Record<string, unknown>>(`/api/v1/history/by-code/${encodeURIComponent(stockCode)}`);
+    return toCamelCase<{ deleted: number }>(response.data);
+  },
+
+  /**
+   * 获取个股栏列表（不重复个股，大盘复盘置顶）
+   */
+  getStockBarList: async (params: {
+    startDate?: string;
+    endDate?: string;
+    limit?: number;
+  } = {}): Promise<StockBarResponse> => {
+    const queryParams: Record<string, string | number> = {};
+    if (params.startDate) queryParams.start_date = params.startDate;
+    if (params.endDate) queryParams.end_date = params.endDate;
+    if (params.limit) queryParams.limit = params.limit;
+
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/history/stocks', {
+      params: queryParams,
+    });
+
+    const data = toCamelCase<{ total: number; items: unknown[] }>(response.data);
+    return {
+      total: data.total,
+      items: data.items.map(item => toCamelCase<Record<string, unknown>>(item) as unknown as typeof data.items[0]),
+    } as StockBarResponse;
   },
 };

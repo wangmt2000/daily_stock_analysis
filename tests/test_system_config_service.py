@@ -67,6 +67,19 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertFalse(items["GEMINI_API_KEY"]["is_masked"])
         self.assertTrue(items["GEMINI_API_KEY"]["raw_value_exists"])
 
+    def test_get_config_masks_alphasift_install_spec(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "ALPHASIFT_INSTALL_SPEC=git+https://user:token@example.com/internal/alphasift.git",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["ALPHASIFT_INSTALL_SPEC"]["value"], payload["mask_token"])
+        self.assertTrue(items["ALPHASIFT_INSTALL_SPEC"]["is_masked"])
+        self.assertTrue(items["ALPHASIFT_INSTALL_SPEC"]["schema"]["is_sensitive"])
+
     def test_get_config_uses_switch_default_for_missing_report_model_toggle(self) -> None:
         payload = self.service.get_config(include_schema=True)
         items = {item["key"]: item for item in payload["items"]}
@@ -117,6 +130,69 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         self.assertEqual(items["REPORT_SHOW_LLM_MODEL"]["value"], "")
         self.assertTrue(items["REPORT_SHOW_LLM_MODEL"]["raw_value_exists"])
+
+    def test_get_config_with_schema_hides_unregistered_env_keys(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "DATABASE_PATH=./custom/stock_analysis.db",
+            "SQLITE_WAL_ENABLED=true",
+            "USE_PROXY=true",
+            "PROXY_HOST=127.0.0.1",
+            "PROXY_PORT=10809",
+            "LOG_DIR=./logs",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertNotIn("DATABASE_PATH", items)
+        self.assertNotIn("SQLITE_WAL_ENABLED", items)
+        self.assertNotIn("USE_PROXY", items)
+        self.assertNotIn("PROXY_HOST", items)
+        self.assertNotIn("PROXY_PORT", items)
+        self.assertIn("LOG_DIR", items)
+        self.assertEqual(items["LOG_DIR"]["schema"]["help_key"], "settings.system.LOG_DIR")
+
+    def test_get_config_with_schema_keeps_declared_llm_channel_support_keys(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "LLM_CHANNELS=deepseek,my_proxy",
+            "LLM_DEEPSEEK_PROTOCOL=deepseek",
+            "LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com",
+            "LLM_DEEPSEEK_API_KEY=sk-test-value",
+            "LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro",
+            "LLM_MY_PROXY_PROTOCOL=openai",
+            "LLM_MY_PROXY_API_KEYS=sk-key-1,sk-key-2",
+            "LLM_MY_PROXY_MODELS=gpt-5.5",
+            "LLM_UNUSED_API_KEY=sk-should-not-leak",
+            "DATABASE_PATH=./custom/stock_analysis.db",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertIn("LLM_CHANNELS", items)
+        self.assertEqual(items["LLM_DEEPSEEK_API_KEY"]["value"], "sk-test-value")
+        self.assertEqual(items["LLM_DEEPSEEK_MODELS"]["value"], "deepseek-v4-flash,deepseek-v4-pro")
+        self.assertEqual(items["LLM_MY_PROXY_API_KEYS"]["value"], "sk-key-1,sk-key-2")
+        self.assertEqual(items["LLM_MY_PROXY_MODELS"]["value"], "gpt-5.5")
+        self.assertEqual(items["LLM_MY_PROXY_API_KEYS"]["schema"]["category"], "ai_model")
+        self.assertNotIn("LLM_UNUSED_API_KEY", items)
+        self.assertNotIn("DATABASE_PATH", items)
+
+    def test_get_config_without_schema_keeps_unregistered_env_keys(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "DATABASE_PATH=./custom/stock_analysis.db",
+            "SQLITE_WAL_ENABLED=true",
+        )
+
+        payload = self.service.get_config(include_schema=False)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["DATABASE_PATH"]["value"], "./custom/stock_analysis.db")
+        self.assertEqual(items["SQLITE_WAL_ENABLED"]["value"], "true")
+        self.assertNotIn("schema", items["DATABASE_PATH"])
 
     def test_get_setup_status_reports_required_gaps_for_empty_config(self) -> None:
         self._rewrite_env("")
@@ -320,6 +396,17 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(payload["config_version"], self.manager.get_config_version())
 
+    def test_export_desktop_env_preserves_hidden_web_settings_keys(self) -> None:
+        self.env_path.write_text(
+            "STOCK_LIST=600519\nDATABASE_PATH=./custom/stock_analysis.db\nUSE_PROXY=true\n",
+            encoding="utf-8",
+        )
+
+        payload = self.service.export_desktop_env()
+
+        self.assertIn("DATABASE_PATH=./custom/stock_analysis.db\n", payload["content"])
+        self.assertIn("USE_PROXY=true\n", payload["content"])
+
     def test_import_desktop_env_merges_keys_without_deleting_unspecified_values(self) -> None:
         current_version = self.manager.get_config_version()
 
@@ -334,6 +421,19 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(current_map["STOCK_LIST"], "300750")
         self.assertEqual(current_map["CUSTOM_NOTE"], "desktop backup")
         self.assertEqual(current_map["GEMINI_API_KEY"], "secret-key-value")
+
+    def test_import_desktop_env_preserves_hidden_web_settings_keys(self) -> None:
+        current_version = self.manager.get_config_version()
+
+        self.service.import_desktop_env(
+            config_version=current_version,
+            content="DATABASE_PATH=./custom/stock_analysis.db\nPROXY_HOST=127.0.0.1\n",
+            reload_now=False,
+        )
+
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["DATABASE_PATH"], "./custom/stock_analysis.db")
+        self.assertEqual(current_map["PROXY_HOST"], "127.0.0.1")
 
     def test_import_desktop_env_treats_mask_token_as_literal_value(self) -> None:
         current_version = self.manager.get_config_version()
@@ -407,6 +507,46 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         current_map = self.manager.read_config_map()
         self.assertEqual(current_map["STOCK_LIST"], "600519,300750")
         self.assertEqual(current_map["GEMINI_API_KEY"], "secret-key-value")
+
+    def test_update_alphasift_enable_does_not_rewrite_llm_fields(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "LITELLM_MODEL=openai/gpt-4o-mini",
+            "AGENT_LITELLM_MODEL=openai/gpt-4o",
+            "OPENAI_BASE_URL=https://api.openai.com/v1",
+            "LITELLM_FALLBACK_MODELS=openai/gpt-4o-mini,openai/gpt-4o",
+            "ALPHASIFT_ENABLED=false",
+            "ALPHASIFT_INSTALL_SPEC=git+https://github.com/ZhuLinsen/alphasift.git@b2ca66dd47001b9a09890cfe21c2b18c7219ccf5",
+            "GEMINI_API_KEY=legacy-secret",
+        )
+
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "ALPHASIFT_ENABLED", "value": "true"},
+                {"key": "ALPHASIFT_INSTALL_SPEC", "value": "******"},
+                {"key": "GEMINI_API_KEY", "value": "******"},
+            ],
+            mask_token="******",
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["applied_count"], 1)
+        self.assertIn("ALPHASIFT_ENABLED", response["updated_keys"])
+        self.assertEqual(response["skipped_masked_count"], 2)
+
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["ALPHASIFT_ENABLED"], "true")
+        self.assertEqual(
+            current_map["ALPHASIFT_INSTALL_SPEC"],
+            "git+https://github.com/ZhuLinsen/alphasift.git@b2ca66dd47001b9a09890cfe21c2b18c7219ccf5",
+        )
+        self.assertEqual(current_map["GEMINI_API_KEY"], "legacy-secret")
+        self.assertEqual(current_map["LITELLM_MODEL"], "openai/gpt-4o-mini")
+        self.assertEqual(current_map["AGENT_LITELLM_MODEL"], "openai/gpt-4o")
+        self.assertEqual(current_map["OPENAI_BASE_URL"], "https://api.openai.com/v1")
+        self.assertEqual(current_map["LITELLM_FALLBACK_MODELS"], "openai/gpt-4o-mini,openai/gpt-4o")
 
     def test_validate_reports_invalid_time(self) -> None:
         validation = self.service.validate(items=[{"key": "SCHEDULE_TIME", "value": "25:70"}])
@@ -736,6 +876,24 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertTrue(items["AGENT_DEEP_RESEARCH_BUDGET"]["schema"]["is_editable"])
         self.assertTrue(items["AGENT_EVENT_MONITOR_ENABLED"]["schema"]["is_editable"])
 
+        context_profile_schema = items["AGENT_CONTEXT_COMPRESSION_PROFILE"]["schema"]
+        self.assertEqual(
+            [option["label"] for option in context_profile_schema["options"]],
+            ["成本优先", "均衡推荐", "长上下文原文优先"],
+        )
+        self.assertEqual(
+            context_profile_schema["validation"]["enum"],
+            ["cost", "balanced", "long_context_raw_first"],
+        )
+        self.assertEqual(
+            items["AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS"]["schema"]["default_value"],
+            "",
+        )
+        self.assertEqual(
+            items["AGENT_CONTEXT_PROTECTED_TURNS"]["schema"]["default_value"],
+            "",
+        )
+
     def test_validate_reports_invalid_select_option(self) -> None:
         validation = self.service.validate(items=[{"key": "AGENT_ARCH", "value": "invalid-mode"}])
 
@@ -747,6 +905,73 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["issues"], [])
+
+    def test_validate_accepts_blank_context_compression_preset_fields(self) -> None:
+        validation = self.service.validate(
+            items=[
+                {"key": "AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS", "value": ""},
+                {"key": "AGENT_CONTEXT_PROTECTED_TURNS", "value": ""},
+            ]
+        )
+
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["issues"], [])
+
+    def test_validate_reports_invalid_context_compression_profile(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "AGENT_CONTEXT_COMPRESSION_PROFILE", "value": "invalid"}]
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any(issue["code"] == "invalid_enum" for issue in validation["issues"]))
+
+    def test_config_loads_context_compression_preset_when_numeric_values_are_blank(self) -> None:
+        self.env_path.write_text(
+            "\n".join(
+                [
+                    "AGENT_CONTEXT_COMPRESSION_PROFILE=cost",
+                    "AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS=",
+                    "AGENT_CONTEXT_PROTECTED_TURNS=",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.agent_context_compression_profile, "cost")
+        self.assertEqual(config.agent_context_compression_trigger_tokens, 6000)
+        self.assertEqual(config.agent_context_protected_turns, 2)
+
+        self.env_path.write_text(
+            "AGENT_CONTEXT_COMPRESSION_PROFILE=long_context_raw_first\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.agent_context_compression_profile, "long_context_raw_first")
+        self.assertEqual(config.agent_context_compression_trigger_tokens, 24000)
+        self.assertEqual(config.agent_context_protected_turns, 6)
+
+        self.env_path.write_text(
+            "\n".join(
+                [
+                    "AGENT_CONTEXT_COMPRESSION_PROFILE=bad-profile",
+                    "AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS=bad-int",
+                    "AGENT_CONTEXT_PROTECTED_TURNS=0",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.agent_context_compression_profile, "balanced")
+        self.assertEqual(config.agent_context_compression_trigger_tokens, 12000)
+        self.assertEqual(config.agent_context_protected_turns, 4)
 
     def test_validate_reports_invalid_json(self) -> None:
         validation = self.service.validate(items=[{"key": "AGENT_EVENT_ALERT_RULES_JSON", "value": "[invalid"}])

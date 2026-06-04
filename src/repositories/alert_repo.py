@@ -110,10 +110,7 @@ class AlertRepository:
             return list(rows)
 
     def create_trigger(self, fields: Dict[str, Any]) -> AlertTriggerRecord:
-        if not fields.get("target"):
-            raise ValueError("alert trigger target is required")
-        if not fields.get("status"):
-            raise ValueError("alert trigger status is required")
+        self._validate_trigger_fields(fields)
 
         with self.db.get_session() as session:
             row = AlertTriggerRecord(**fields)
@@ -121,6 +118,54 @@ class AlertRepository:
             session.commit()
             session.refresh(row)
             return row
+
+    def create_trigger_if_absent(self, fields: Dict[str, Any]) -> Tuple[AlertTriggerRecord, bool]:
+        """Create a triggered history row unless the same DB signal already exists.
+
+        Callers must use this only after they have decided the trigger is safe to
+        deduplicate. Non-triggered or timestamp-less history should use
+        ``create_trigger`` so audit rows are not silently reclassified as deduped.
+        """
+        self._validate_trigger_fields(fields)
+
+        rule_id = fields.get("rule_id")
+        data_timestamp = fields.get("data_timestamp")
+        if fields.get("status") != "triggered" or rule_id is None or data_timestamp is None:
+            raise ValueError(
+                "create_trigger_if_absent requires triggered status, rule_id, and data_timestamp"
+            )
+
+        with self.db.get_session() as session:
+            query = select(AlertTriggerRecord).where(
+                AlertTriggerRecord.rule_id == rule_id,
+                AlertTriggerRecord.target == fields.get("target"),
+                AlertTriggerRecord.status == "triggered",
+                AlertTriggerRecord.data_timestamp == data_timestamp,
+            )
+            data_source = fields.get("data_source")
+            if data_source is None:
+                query = query.where(AlertTriggerRecord.data_source.is_(None))
+            else:
+                query = query.where(AlertTriggerRecord.data_source == data_source)
+
+            existing = session.execute(
+                query.order_by(AlertTriggerRecord.id.asc()).limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing, False
+
+            row = AlertTriggerRecord(**fields)
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row, True
+
+    @staticmethod
+    def _validate_trigger_fields(fields: Dict[str, Any]) -> None:
+        if not fields.get("target"):
+            raise ValueError("alert trigger target is required")
+        if not fields.get("status"):
+            raise ValueError("alert trigger status is required")
 
     def record_notification_attempt(self, fields: Dict[str, Any]) -> AlertNotificationRecord:
         if not fields.get("channel"):

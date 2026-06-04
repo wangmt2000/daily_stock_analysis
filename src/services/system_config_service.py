@@ -91,6 +91,9 @@ class SystemConfigService:
 
     _LLM_CAPABILITY_ORDER: Tuple[str, ...] = ("json", "tools", "stream", "vision")
     _LLM_STREAM_CHUNK_LIMIT = 8
+    _WEB_SETTINGS_LLM_CHANNEL_SUPPORT_KEY_RE = re.compile(
+        r"^LLM_([A-Z0-9_]+)_(PROTOCOL|BASE_URL|API_KEY|API_KEYS|MODELS|EXTRA_HEADERS|ENABLED)$"
+    )
     _LLM_CAPABILITY_PROBE_IMAGE = (
         "data:image/png;base64,"
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -107,6 +110,7 @@ class SystemConfigService:
             "skill": "specialist",
         }
     }
+    _SERVER_MASKED_CONFIG_KEYS: Set[str] = {"ALPHASIFT_INSTALL_SPEC"}
     _NOTIFICATION_TEST_CHANNELS: Tuple[str, ...] = (
         "wechat",
         "feishu",
@@ -276,11 +280,36 @@ class SystemConfigService:
 
         return raw_value
 
+    @classmethod
+    def _get_schema_config_keys(cls, config_map: Dict[str, str], registered_keys: Set[str]) -> Set[str]:
+        """Return keys needed by the Web schema payload.
+
+        Ordinary settings must be registry-backed. LLM channel detail keys are
+        kept only as editor support data for channels declared in LLM_CHANNELS.
+        """
+        keys = set(registered_keys)
+        channel_names = {
+            segment.strip().upper()
+            for segment in config_map.get("LLM_CHANNELS", "").split(",")
+            if segment.strip()
+        }
+        if not channel_names:
+            return keys
+
+        for key in config_map:
+            match = cls._WEB_SETTINGS_LLM_CHANNEL_SUPPORT_KEY_RE.match(key)
+            if match and match.group(1) in channel_names:
+                keys.add(key)
+
+        return keys
+
     def get_config(self, include_schema: bool = True, mask_token: str = "******") -> Dict[str, Any]:
         """Return current config values without server-side secret masking."""
         config_map = self._build_display_config_map(self._manager.read_config_map())
         registered_keys = set(get_registered_field_keys())
         all_keys = set(config_map.keys()) | registered_keys
+        if include_schema:
+            all_keys = self._get_schema_config_keys(config_map, registered_keys)
 
         category_orders = {
             item["category"]: item["display_order"]
@@ -298,11 +327,15 @@ class SystemConfigService:
             raw_value = config_map.get(key, "")
             field_schema = schema_by_key[key]
             display_value = self._resolve_display_value(raw_value, field_schema, raw_value_exists)
+            is_masked = False
+            if key in self._SERVER_MASKED_CONFIG_KEYS and display_value:
+                display_value = mask_token
+                is_masked = True
             item: Dict[str, Any] = {
                 "key": key,
                 "value": display_value,
                 "raw_value_exists": raw_value_exists,
-                "is_masked": False,
+                "is_masked": is_masked,
             }
             if include_schema:
                 item["schema"] = field_schema
@@ -559,7 +592,25 @@ class SystemConfigService:
         if selected_api_key:
             request_headers["Authorization"] = f"Bearer {selected_api_key}"
 
-        models_url = self._build_llm_models_url(base_url)
+        try:
+            models_url = self._build_llm_models_url(base_url)
+        except ValueError as exc:
+            return self._build_llm_channel_result(
+                success=False,
+                message="LLM channel configuration is invalid",
+                error=str(exc),
+                stage="model_discovery",
+                error_code="invalid_config",
+                retryable=False,
+                details={
+                    "issue_key": "discover_channel_BASE_URL",
+                    "issue_code": "invalid_url",
+                    "reason": "invalid_url",
+                },
+                resolved_protocol=resolved_protocol or None,
+                models=[],
+                latency_ms=None,
+            )
 
         try:
             started_at = time.perf_counter()
@@ -725,7 +776,7 @@ class SystemConfigService:
         call_kwargs: Dict[str, Any] = {
             "model": resolved_model,
             "messages": [{"role": "user", "content": "Reply with OK"}],
-            "max_tokens": 256,  # Increased to allow MiniMax-M2.7 thinking process + response
+            "max_tokens": 256,  # Increased to allow MiniMax-M3 thinking process + response
             "timeout": max(5.0, float(timeout_seconds)),
         }
         if selected_api_key:
@@ -740,12 +791,21 @@ class SystemConfigService:
 
         try:
             import litellm
-            from src.agent.llm_adapter import LLMToolAdapter
+            from src.agent.llm_adapter import (
+                resolve_fallback_litellm_wire_models,
+                register_fallback_model_pricing,
+            )
 
-            # Register custom model pricing for MiniMax models not in LiteLLM's built-in list
-            # This must be done before litellm.completion() to prevent cost calculation errors
-            # Reuses the registration logic from LLMToolAdapter to avoid code duplication
-            LLMToolAdapter._register_custom_model_pricing()
+            # Register fallback pricing for OpenAI-compatible models to prevent cost calculation errors
+            config_model_list = None
+            if getattr(self, "_config", None) is not None:
+                config_model_list = getattr(self._config, "llm_model_list", None)
+            register_fallback_model_pricing(
+                resolve_fallback_litellm_wire_models(
+                    resolved_model,
+                    config_model_list,
+                )
+            )
 
             started_at = time.perf_counter()
             response = call_litellm_with_param_recovery(
@@ -1861,6 +1921,66 @@ class SystemConfigService:
         return parsed.scheme in allowed_schemes and bool(parsed.netloc)
 
     @staticmethod
+    def _canonical_ipv4_numeric_host(host: str) -> Optional[str]:
+        """Return canonical IPv4 for libc-style numeric host aliases."""
+        import socket
+
+        candidate = (host or "").lower()
+        if not candidate or ":" in candidate:
+            return None
+
+        try:
+            return socket.inet_ntoa(socket.inet_aton(candidate))
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _is_noncanonical_ipv4_numeric_host(host: str) -> bool:
+        canonical = SystemConfigService._canonical_ipv4_numeric_host(host)
+        return canonical is not None and host.lower() != canonical
+
+    @staticmethod
+    def _normalize_hostname_for_security(host: str) -> Optional[str]:
+        """Return a normalized ASCII host for URL safety checks."""
+        import unicodedata
+
+        candidate = (host or "").strip().lower().rstrip(".")
+        if not candidate:
+            return None
+        if ":" in candidate:
+            return candidate
+        try:
+            normalized = unicodedata.normalize("NFKC", candidate)
+            ascii_host = normalized.encode("idna").decode("ascii").lower().rstrip(".")
+        except UnicodeError:
+            return None
+        return ascii_host or None
+
+    @staticmethod
+    def _is_valid_llm_base_url(value: str, allowed_schemes: Tuple[str, ...] = ("http", "https")) -> bool:
+        """Return True when an LLM base URL is safe to parse consistently."""
+        if not value:
+            return False
+        if any(char == "\\" or char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
+            return False
+
+        try:
+            parsed = urlparse(value)
+            host = parsed.hostname
+            _ = parsed.port
+        except ValueError:
+            return False
+
+        if parsed.scheme not in allowed_schemes or not parsed.netloc or not host:
+            return False
+        if "@" in parsed.netloc or parsed.username is not None or parsed.password is not None:
+            return False
+        if SystemConfigService._is_noncanonical_ipv4_numeric_host(host):
+            return False
+
+        return True
+
+    @staticmethod
     def _split_csv(value: str) -> List[str]:
         return [item.strip() for item in (value or "").split(",") if item.strip()]
 
@@ -2660,10 +2780,16 @@ class SystemConfigService:
         """
         import ipaddress
 
-        parsed = urlparse(value)
-        host = (parsed.hostname or "").lower()
-        if not host:
+        try:
+            parsed = urlparse(value)
+            raw_host = parsed.hostname or ""
+        except ValueError:
+            return False
+        if not raw_host:
             return True
+        host = SystemConfigService._normalize_hostname_for_security(raw_host)
+        if not host:
+            return False
         # Known cloud metadata hostnames
         _BLOCKED_HOSTS = frozenset({
             "169.254.169.254",
@@ -2672,11 +2798,18 @@ class SystemConfigService:
         })
         if host in _BLOCKED_HOSTS:
             return False
-        # Numeric IPs: block link-local range (169.254.0.0/16)
+        if SystemConfigService._is_noncanonical_ipv4_numeric_host(host):
+            return False
+        # Numeric IPs: block link-local range (169.254.0.0/16), including IPv4-mapped IPv6.
         try:
             addr = ipaddress.ip_address(host)
-            if addr.is_link_local:
-                return False
+            candidate_addrs = [addr]
+            mapped_addr = getattr(addr, "ipv4_mapped", None)
+            if mapped_addr is not None:
+                candidate_addrs.append(mapped_addr)
+            for candidate_addr in candidate_addrs:
+                if str(candidate_addr) in _BLOCKED_HOSTS or candidate_addr.is_link_local:
+                    return False
         except ValueError:
             pass  # hostname, not an IP — already checked against blocklist above
         return True
@@ -2684,7 +2817,12 @@ class SystemConfigService:
     @staticmethod
     def _build_llm_models_url(base_url: str) -> str:
         """Convert a channel base URL into a `/models` endpoint."""
-        parsed = urlparse(base_url.strip())
+        if not SystemConfigService._is_valid_llm_base_url(base_url):
+            raise ValueError("LLM channel base URL must be a valid absolute URL")
+        if not SystemConfigService._is_safe_base_url(base_url):
+            raise ValueError("LLM channel base URL points to a restricted address")
+
+        parsed = urlparse(base_url)
         normalized = (parsed.path or "").rstrip("/")
         for suffix in ("/chat/completions", "/completions"):
             if normalized.endswith(suffix):
@@ -2694,7 +2832,12 @@ class SystemConfigService:
             models_path = normalized or "/models"
         else:
             models_path = f"{normalized}/models" if normalized else "/models"
-        return urlunparse(parsed._replace(path=models_path, params="", query="", fragment=""))
+        models_url = urlunparse(parsed._replace(path=models_path, params="", query="", fragment=""))
+        if not SystemConfigService._is_valid_llm_base_url(models_url):
+            raise ValueError("LLM channel models URL must be a valid absolute URL")
+        if not SystemConfigService._is_safe_base_url(models_url):
+            raise ValueError("LLM channel models URL points to a restricted address")
+        return models_url
 
     @staticmethod
     def _get_runtime_llm_temperature() -> float:
@@ -3707,10 +3850,7 @@ class SystemConfigService:
                     "actual": "",
                 }
             )
-        elif base_url_value and not SystemConfigService._is_valid_url(
-            base_url_value,
-            allowed_schemes=("http", "https"),
-        ):
+        elif base_url_value and not SystemConfigService._is_valid_llm_base_url(base_url_value):
             issues.append(
                 {
                     "key": base_url_key,

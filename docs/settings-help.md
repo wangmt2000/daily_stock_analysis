@@ -33,11 +33,26 @@ PR2 继续覆盖高频、易填错配置项：
 
 - AI 模型运行时：Agent 主模型、fallback 模型、高级 YAML 路由、temperature、provider API Key、OpenAI-compatible Base URL。
 - LLM Channels 编辑器内部字段：渠道名、协议、Base URL、API Key、模型列表、运行时能力检测、主模型、Agent 主模型、fallback、Vision 和 temperature。
-- 数据源与搜索：Tushare、实时行情优先级、实时技术指标、搜索 API Key、SearXNG、筹码分布、新闻窗口。
+- 数据源与搜索：Tushare、股票索引远程更新开关、实时行情优先级、实时技术指标、搜索 API Key、SearXNG、筹码分布、新闻窗口。
 - 通知：Webhook、Telegram、邮件、Discord/Slack 等聊天平台、报告输出、Webhook SSL 校验。
 - WebUI / auth / schedule / proxy：Host、Port、登录保护、可信反向代理、定时任务、交易日检查、网络代理。
 
-后续 PR 可以继续覆盖 Agent、回测、报告高级字段、日志、数据库、桌面端和更细分部署配置。
+PR3 registered-field slice / 阶段性补齐：聚焦 Web 设置页中实际展示/可配置字段的 Help 补齐，包括通用配置卡片当前可见字段和 AI legacy 条件可见字段：
+
+- Agent 配置（21 字段）：Agent 模式、最大推理步数、策略列表、策略目录、自然语言路由、架构、编排器模式、超时、风险否决、Deep Research 预算/超时、记忆、策略自动权重、策略路由、问股可见对话上下文压缩、事件监控开关/间隔、告警规则 JSON。
+- 回测配置（5 字段）：回测开关、评估窗口、最小记录年龄、引擎版本、中性回报带。
+- 报告配置（9 字段）：仅推送摘要、显示模型名、模板目录、渲染引擎、完整性校验/重试、历史信号对比、逐股推送、合并邮件。
+- 通知路由配置（9 字段）：报告/告警/系统错误渠道路由、去重/冷却、静默时段/时区、最低等级、每日摘要（预留）。
+- 系统运行时（7 字段）：日志级别、调试模式、最大并发、分析间隔、大盘分析开关/市场/配色。
+- AI legacy 与 Anspire 配置：provider 专用多 Key、模型名、温度、Vision 模型、max tokens 与 Anspire LLM 网关字段。
+- 数据源与搜索：TickFlow、SerpAPI、Brave、Bocha、MiniMax、SearXNG 公共实例、BIAS 阈值和 Pytdx 服务器字段。
+- 通知高级字段：飞书高级安全/应用字段、Telegram topic、Discord/Slack 高级字段、Pushover、ntfy、Gotify、PushPlus、ServerChan3、AstrBot 和自定义 Webhook 高级模板/鉴权字段。
+
+Issue #1512 收口后，Web 设置页只展示后端配置注册表中的正式字段。未注册的 `.env` key 不再作为普通可编辑设置项展示，避免 raw key、`Auto-inferred field metadata.` 和无 help 按钮的配置项进入中文界面；这些 key 仍可通过 `.env` 文件或导入/导出能力保留和维护。
+
+例外：`LLM_CHANNELS` 声明的动态渠道详情键（如 `LLM_DEEPSEEK_API_KEY`、`LLM_MY_PROXY_MODELS`）会保留在配置接口返回中，供“AI 模型接入”编辑器读取和保存；它们不作为普通配置卡片展示，也不复用 `WEB_SETTINGS_HIDDEN_FROM_UI` 的运维隐藏语义。
+
+暂不纳入 Web 设置页展示的低频/运维类 `.env` 变量包括 `DATABASE_PATH`、`SQLITE_*`、`USE_PROXY`、`PROXY_HOST`、`PROXY_PORT` 等。若后续需要在 Web 中编辑这些字段，应先在 `src/core/config_registry.py` 中正式注册并补齐 help 元数据，而不是依赖自动推断。
 
 ### 覆盖边界
 

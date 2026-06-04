@@ -11,8 +11,9 @@
 """
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 import uuid
 
 from src.config import get_config
@@ -27,6 +28,21 @@ logger = logging.getLogger(__name__)
 
 MARKET_REVIEW_HISTORY_CODE = "MARKET"
 MARKET_REVIEW_REPORT_TYPE = "market_review"
+_MARKET_REVIEW_MARKETS = (
+    ('cn', 'cn_title', 'A 股'),
+    ('hk', 'hk_title', '港股'),
+    ('us', 'us_title', '美股'),
+)
+_MARKET_REVIEW_REGION_ORDER = tuple(market for market, _, _ in _MARKET_REVIEW_MARKETS)
+_VALID_MARKET_REVIEW_REGIONS = frozenset(_MARKET_REVIEW_REGION_ORDER)
+
+
+@dataclass
+class MarketReviewRunResult:
+    """Structured result for API/Web consumers while keeping Markdown compatibility."""
+
+    report: str
+    market_review_payload: Dict[str, Any] = field(default_factory=dict)
 
 
 def _get_market_review_text(language: str) -> dict[str, str]:
@@ -50,6 +66,24 @@ def _get_market_review_text(language: str) -> dict[str, str]:
     }
 
 
+def _resolve_market_review_regions(raw_region: Optional[str]) -> list[str]:
+    """Normalize MARKET_REVIEW_REGION into an ordered, non-empty region list."""
+
+    region = str(raw_region or 'cn').strip().lower()
+    if region == 'both':
+        return list(_MARKET_REVIEW_REGION_ORDER)
+    if ',' in region:
+        requested = {
+            item.strip().lower()
+            for item in region.split(',')
+            if item.strip().lower() in _VALID_MARKET_REVIEW_REGIONS
+        }
+        return [market for market in _MARKET_REVIEW_REGION_ORDER if market in requested] or ['cn']
+    if region in _VALID_MARKET_REVIEW_REGIONS:
+        return [region]
+    return ['cn']
+
+
 def run_market_review(
     notifier: NotificationService,
     analyzer: Optional[GeminiAnalyzer] = None,
@@ -58,7 +92,8 @@ def run_market_review(
     merge_notification: bool = False,
     override_region: Optional[str] = None,
     query_id: Optional[str] = None,
-) -> Optional[str]:
+    return_structured: bool = False,
+) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
 
@@ -77,37 +112,35 @@ def run_market_review(
     logger.info("开始执行大盘复盘分析...")
     config = get_config()
     review_text = _get_market_review_text(getattr(config, "report_language", "zh"))
-    region = (
+    raw_region = (
         override_region
         if override_region is not None
         else (getattr(config, 'market_review_region', 'cn') or 'cn')
     )
-    _ALL_MARKETS = [('cn', 'cn_title', 'A 股'), ('hk', 'hk_title', '港股'), ('us', 'us_title', '美股')]
-    _VALID_SINGLES = {'cn', 'us', 'hk'}
-
-    # Determine which markets to run.
-    # region can be: 'cn', 'hk', 'us', 'both', or a comma-joined subset like 'cn,us'.
-    if ',' in region:
-        run_markets = [m.strip() for m in region.split(',') if m.strip() in _VALID_SINGLES]
-    elif region == 'both':
-        run_markets = list(_VALID_SINGLES)
-    elif region in _VALID_SINGLES:
-        run_markets = [region]
-    else:
-        run_markets = ['cn']
+    run_markets = _resolve_market_review_regions(raw_region)
+    persist_region = ','.join(run_markets) if len(run_markets) > 1 else run_markets[0]
 
     try:
         if len(run_markets) > 1:
             # 多市场顺序执行，合并报告
             parts = []
-            for mkt, title_key, label in _ALL_MARKETS:
+            market_light_snapshots: Dict[str, Dict[str, Any]] = {}
+            market_review_payloads: Dict[str, Dict[str, Any]] = {}
+            for mkt, title_key, label in _MARKET_REVIEW_MARKETS:
                 if mkt not in run_markets:
                     continue
                 logger.info("生成 %s 大盘复盘报告...", label)
                 mkt_analyzer = MarketAnalyzer(
                     search_service=search_service, analyzer=analyzer, region=mkt
                 )
-                mkt_report = mkt_analyzer.run_daily_review()
+                review_result = mkt_analyzer.run_daily_review_with_snapshot()
+                mkt_report = review_result.report
+                market_light_snapshots[mkt] = review_result.market_light_snapshot
+                market_review_payloads[mkt] = _coerce_market_review_payload(
+                    review_result,
+                    region=mkt,
+                    report=mkt_report,
+                )
                 if mkt_report:
                     parts.append(f"{review_text[title_key]}\n\n{mkt_report}")
             if parts:
@@ -115,29 +148,52 @@ def run_market_review(
             else:
                 review_report = None
         else:
+            run_region = run_markets[0]
             market_analyzer = MarketAnalyzer(
                 search_service=search_service,
                 analyzer=analyzer,
-                region=region,
+                region=run_region,
             )
-            review_report = market_analyzer.run_daily_review()
+            review_result = market_analyzer.run_daily_review_with_snapshot()
+            review_report = review_result.report
+            market_light_snapshots = {run_region: review_result.market_light_snapshot}
+            market_review_payloads = {
+                run_region: _coerce_market_review_payload(
+                    review_result,
+                    region=run_region,
+                    report=review_report,
+                )
+            }
         
         if review_report:
+            market_review_payload = _build_combined_market_review_payload(
+                review_report=review_report,
+                payloads=market_review_payloads,
+                region=persist_region,
+                language=getattr(config, "report_language", "zh"),
+                root_title=review_text["root_title"],
+            )
+            markdown_report = _render_market_review_payload_markdown(
+                market_review_payload,
+                wrapper_title=review_text["root_title"],
+            )
             # 保存报告到文件
             date_str = datetime.now().strftime('%Y%m%d')
             report_filename = f"market_review_{date_str}.md"
             filepath = notifier.save_report_to_file(
-                f"{review_text['root_title']}\n\n{review_report}",
+                markdown_report,
                 report_filename
             )
             logger.info(f"大盘复盘报告已保存: {filepath}")
 
             _persist_market_review_history(
                 review_report=review_report,
-                markdown_report=f"{review_text['root_title']}\n\n{review_report}",
-                region=region,
+                markdown_report=markdown_report,
+                region=persist_region,
                 config=config,
                 query_id=query_id,
+                market_light_snapshots=market_light_snapshots,
+                market_review_payload=market_review_payload,
             )
             
             # 推送通知（合并模式下跳过，由 main 层统一发送）
@@ -145,7 +201,10 @@ def run_market_review(
                 logger.info("合并推送模式：跳过大盘复盘单独推送，将在个股+大盘复盘后统一发送")
             elif send_notification and notifier.is_available():
                 # 添加标题
-                report_content = f"{review_text['push_title']}\n\n{review_report}"
+                report_content = _render_market_review_payload_markdown(
+                    market_review_payload,
+                    wrapper_title=review_text["push_title"],
+                )
 
                 success = notifier.send(report_content, email_send_to_all=True, route_type="report")
                 if success:
@@ -155,12 +214,129 @@ def run_market_review(
             elif not send_notification:
                 logger.info("已跳过推送通知 (--no-notify)")
             
+            if return_structured:
+                return MarketReviewRunResult(
+                    report=review_report,
+                    market_review_payload=market_review_payload,
+                )
             return review_report
         
     except Exception as e:
         logger.error(f"大盘复盘分析失败: {e}")
     
     return None
+
+
+def _coerce_market_review_payload(
+    review_result: Any,
+    *,
+    region: str,
+    report: Optional[str],
+) -> Dict[str, Any]:
+    payload = getattr(review_result, "structured_payload", None)
+    if isinstance(payload, dict) and payload:
+        return payload
+    return {
+        "version": 1,
+        "kind": MARKET_REVIEW_REPORT_TYPE,
+        "region": region,
+        "title": "",
+        "sections": [{"key": "full_review", "title": "Review", "markdown": report or ""}],
+        "markdown_report": report or "",
+    }
+
+
+def _build_combined_market_review_payload(
+    *,
+    review_report: str,
+    payloads: Dict[str, Dict[str, Any]],
+    region: str,
+    language: str,
+    root_title: str,
+) -> Dict[str, Any]:
+    normalized_language = normalize_report_language(language)
+    title = root_title.lstrip("#").strip()
+    if len(payloads) == 1:
+        payload = dict(next(iter(payloads.values())))
+        payload["version"] = payload.get("version") or 1
+        payload["kind"] = MARKET_REVIEW_REPORT_TYPE
+        payload["region"] = region
+        payload["language"] = payload.get("language") or normalized_language
+        payload["root_title"] = title
+        payload["markdown_report"] = review_report
+        return payload
+    return {
+        "version": 1,
+        "kind": MARKET_REVIEW_REPORT_TYPE,
+        "region": region,
+        "language": normalized_language,
+        "title": title,
+        "root_title": title,
+        "markets": payloads,
+        "markdown_report": review_report,
+    }
+
+
+def _render_market_review_payload_markdown(
+    payload: Dict[str, Any],
+    *,
+    wrapper_title: Optional[str] = None,
+) -> str:
+    """Render Markdown from the structured market-review payload for file/push compatibility."""
+    body = _render_market_review_payload_body(payload)
+    if wrapper_title:
+        return f"{wrapper_title}\n\n{body}".strip()
+    return body.strip()
+
+
+def _render_market_review_payload_body(payload: Dict[str, Any]) -> str:
+    markets = payload.get("markets")
+    if isinstance(markets, dict) and markets:
+        markdown_report = payload.get("markdown_report")
+        if isinstance(markdown_report, str) and markdown_report.strip():
+            return markdown_report.strip()
+        parts = []
+        for market in _MARKET_REVIEW_REGION_ORDER:
+            market_payload = markets.get(market)
+            if isinstance(market_payload, dict):
+                parts.append(_render_single_market_review_payload(market_payload))
+        return "\n\n---\n\n".join(part for part in parts if part).strip()
+    return _render_single_market_review_payload(payload)
+
+
+def _render_single_market_review_payload(payload: Dict[str, Any]) -> str:
+    sections = payload.get("sections")
+    if not isinstance(sections, list) or not sections:
+        markdown = payload.get("markdown_report")
+        return markdown if isinstance(markdown, str) else ""
+
+    title = payload.get("title")
+    normalized_title = _normalize_market_review_heading(title)
+    lines = []
+    if isinstance(title, str) and title.strip():
+        lines.extend([f"## {title.strip()}", ""])
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section_title = str(section.get("title") or "").strip()
+        markdown = str(section.get("markdown") or "").strip()
+        if not markdown:
+            continue
+        should_render_section_title = (
+            section_title
+            and section.get("key") != "overview"
+            and _normalize_market_review_heading(section_title) != normalized_title
+        )
+        if should_render_section_title:
+            lines.extend([f"### {section_title}", ""])
+        lines.extend([markdown, ""])
+    return "\n".join(lines).strip()
+
+
+def _normalize_market_review_heading(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.lstrip("#").strip().lower().split())
 
 
 def _persist_market_review_history(
@@ -170,6 +346,8 @@ def _persist_market_review_history(
     region: str,
     config: object,
     query_id: Optional[str] = None,
+    market_light_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+    market_review_payload: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Persist market review output into the existing analysis history table."""
     try:
@@ -205,6 +383,10 @@ def _persist_market_review_history(
             "market_review_region": region,
             "report_language": report_language,
         }
+        if market_light_snapshots:
+            context_snapshot["market_light_snapshots"] = market_light_snapshots
+        if market_review_payload:
+            context_snapshot["market_review_payload"] = market_review_payload
 
         saved = DatabaseManager.get_instance().save_analysis_history(
             result=result,

@@ -115,6 +115,31 @@ def _normalize_sector_rankings(value: Any) -> Optional[Dict[str, List[Dict[str, 
     }
 
 
+def _is_empty_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _deep_merge_dicts(*values: Any) -> Optional[Dict[str, Any]]:
+    merged: Dict[str, Any] = {}
+    has_value = False
+    for value in values:
+        obj = parse_json_field(value)
+        if not isinstance(obj, dict):
+            continue
+        has_value = True
+        for key, item in obj.items():
+            if _is_empty_value(item):
+                continue
+            existing = merged.get(key)
+            if isinstance(existing, dict) and isinstance(item, dict):
+                nested = _deep_merge_dicts(existing, item)
+                if nested:
+                    merged[key] = nested
+            else:
+                merged[key] = item
+    return merged if has_value else None
+
+
 def extract_fundamental_context(
     context_snapshot: Any,
     fallback_fundamental_payload: Any = None,
@@ -122,18 +147,63 @@ def extract_fundamental_context(
     """
     Resolve fundamental_context from context snapshot, with optional fallback payload.
     """
+    fallback_obj = parse_json_field(fallback_fundamental_payload)
+    top_level_fundamental = None
+    enhanced_fundamental = None
     snapshot_obj = parse_json_field(context_snapshot)
     if isinstance(snapshot_obj, dict):
         enhanced = snapshot_obj.get("enhanced_context")
         if isinstance(enhanced, dict):
             fundamental = enhanced.get("fundamental_context")
             if isinstance(fundamental, dict):
-                return fundamental
+                enhanced_fundamental = fundamental
+        raw_top_level = snapshot_obj.get("fundamental_context")
+        if isinstance(raw_top_level, dict):
+            top_level_fundamental = raw_top_level
 
-    fallback_obj = parse_json_field(fallback_fundamental_payload)
-    if isinstance(fallback_obj, dict):
-        return fallback_obj
-    return None
+    return _deep_merge_dicts(
+        fallback_obj,
+        top_level_fundamental,
+        enhanced_fundamental,
+    )
+
+
+def extract_realtime_detail_fields(context_snapshot: Any) -> Dict[str, Any]:
+    """
+    Extract stable realtime price/change fields from persisted context snapshots.
+
+    Supports both the standard `enhanced_context.realtime` layout and the
+    agent-mode top-level `realtime_quote` compatibility shape.
+    """
+    snapshot_obj = parse_json_field(context_snapshot)
+    if not isinstance(snapshot_obj, dict):
+        return {"current_price": None, "change_pct": None}
+
+    current_price = None
+    change_pct = None
+
+    enhanced = snapshot_obj.get("enhanced_context")
+    if isinstance(enhanced, dict):
+        realtime = enhanced.get("realtime")
+        if isinstance(realtime, dict):
+            current_price = realtime.get("price")
+            change_pct = realtime.get("change_pct")
+
+    for field in ("realtime_quote_raw", "realtime_quote"):
+        realtime_payload = snapshot_obj.get(field)
+        if not isinstance(realtime_payload, dict):
+            continue
+        if current_price is None:
+            current_price = realtime_payload.get("price")
+        if change_pct is None:
+            change_pct = realtime_payload.get("change_pct")
+        if change_pct is None:
+            change_pct = realtime_payload.get("pct_chg")
+
+    return {
+        "current_price": current_price,
+        "change_pct": change_pct,
+    }
 
 
 def extract_fundamental_detail_fields(

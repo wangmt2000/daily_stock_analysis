@@ -482,16 +482,27 @@ class MainScheduleModeTestCase(unittest.TestCase):
         )
         pipeline = MagicMock()
         pipeline.run.return_value = []
+        events = []
+
+        def refresh_index(config_arg):
+            events.append("refresh")
+
+        def build_pipeline(*args, **kwargs):
+            events.append("pipeline")
+            return pipeline
 
         lock_token = try_acquire_market_review_lock(config)
         self.assertIsNotNone(lock_token)
         try:
-            with patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline), \
+            with patch.object(main, "_refresh_stock_index_cache_for_analysis", side_effect=refresh_index) as refresh, \
+                 patch("src.core.pipeline.StockAnalysisPipeline", side_effect=build_pipeline), \
                  patch("src.core.market_review.run_market_review") as run_market_review:
                 main.run_full_analysis(config, args, [])
         finally:
             release_market_review_lock(lock_token)
 
+        refresh.assert_called_once_with(config)
+        self.assertEqual(events[:2], ["refresh", "pipeline"])
         pipeline.run.assert_called_once()
         run_market_review.assert_not_called()
 

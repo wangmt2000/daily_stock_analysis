@@ -31,9 +31,19 @@ try:
     from pypinyin import lazy_pinyin, Style
     PYPINYIN_AVAILABLE = True
 except ImportError:
+    lazy_pinyin = None
+    Style = None
     PYPINYIN_AVAILABLE = False
-    print("[Warning] pypinyin not available, pinyin fields will be empty")
-    print("[Info] Install with: pip install pypinyin")
+
+
+def require_pypinyin() -> bool:
+    """Ensure pypinyin is available before generating autocomplete assets."""
+    if PYPINYIN_AVAILABLE:
+        return True
+
+    print("[Error] pypinyin not available; cannot generate stock autocomplete index.")
+    print("[Info] Install dependencies with: pip install -r requirements.txt")
+    return False
 
 
 def load_csv_data(csv_path: Path) -> List[Dict[str, Any]]:
@@ -166,6 +176,11 @@ def load_akshare_data(logs_dir: Path) -> List[Dict[str, Any]]:
 
     Returns:
         股票列表
+
+    说明：
+        AkShare 这条输入路径保留其原始 name 字段，不额外套用
+        Tushare A 股那套 XD / XR / DR 状态前缀修正逻辑。这里的目标是
+        复用 AkShare 已输出的展示名，而不是对其做二次归一化。
     """
     csv_files = list(logs_dir.glob("stock_basic_*.csv"))
 
@@ -214,7 +229,7 @@ def generate_pinyin(name: str) -> tuple:
         Tuple of (pinyin_full, pinyin_abbr)
     """
     if not PYPINYIN_AVAILABLE:
-        return (None, None)
+        raise RuntimeError("pypinyin is required to generate stock autocomplete index")
 
     try:
         normalized_name = normalize_name_for_pinyin(name)
@@ -249,6 +264,23 @@ def normalize_name_for_pinyin(name: str) -> str:
     normalized = re.sub(r'^(?:\*?ST|N)+', '', normalized, flags=re.IGNORECASE)
 
     return normalized.strip() or unicodedata.normalize('NFKC', name).strip()
+
+
+def normalize_stock_name_for_index(name: str, market: str) -> str:
+    """
+    Normalize stock names before writing the long-lived autocomplete index.
+
+    For A-shares (including BSE), ``XD``/``XR``/``DR`` are
+    ex-dividend/ex-rights trading-day prefixes. They should not be stored in
+    the official static index because they can become stale almost immediately.
+    New-stock prefixes such as ``N``/``C`` and risk-warning prefixes such as
+    ``ST``/``*ST`` are preserved; they should be refreshed by the next
+    stock-list update.
+    """
+    normalized = unicodedata.normalize('NFKC', str(name or '')).strip()
+    if market in {'CN', 'BSE'}:
+        normalized = re.sub(r'^(?:XD|XR|DR)\s*', '', normalized, flags=re.IGNORECASE)
+    return normalized.strip()
 
 
 def extract_symbol_from_ts_code(ts_code: str, market: str) -> Optional[str]:
@@ -301,6 +333,7 @@ def get_stock_name(row: Dict[str, str], market: str) -> Optional[str]:
     else:
         # A股和港股使用中文名称
         name = row.get('name', '').strip()
+        name = normalize_stock_name_for_index(name, market)
         return name if name else None
 
 
@@ -568,6 +601,9 @@ def main():
     print("=" * 60)
     print(f"数据源：{args.source}")
 
+    if not require_pypinyin():
+        return 1
+
     # 加载数据
     print("\n[1/5] 读取 CSV 数据...")
     if args.source == 'tushare':
@@ -585,11 +621,6 @@ def main():
         return 1
 
     print(f"      共读取 {len(stocks)} 只股票")
-
-    # 生成拼音提示
-    if not PYPINYIN_AVAILABLE:
-        print("\n[提示] 安装 pypinyin 可获得拼音搜索功能：")
-        print("       pip install pypinyin")
 
     print("\n[2/5] 生成索引数据...")
     index = build_stock_index(stocks)
@@ -618,7 +649,7 @@ def main():
             for i, item in enumerate(compressed[:5]):
                 print(f"        {i + 1}. {item}")
     else:
-        print("\n[4/5] 写入文件：{output_path}")
+        print(f"\n[4/5] 写入文件：{output_path}")
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('[\n')
             for i, item in enumerate(compressed):

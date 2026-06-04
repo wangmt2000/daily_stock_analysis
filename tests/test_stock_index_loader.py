@@ -1,11 +1,37 @@
 # -*- coding: utf-8 -*-
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from src.data import stock_index_loader
+
+
+def _write_stock_index(path: Path, name: str, size: int = 1) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            [
+                [
+                    f"{index + 1:06d}.SZ",
+                    f"{index + 1:06d}",
+                    name,
+                    "pinganyinhang",
+                    "payh",
+                    [],
+                    "CN",
+                    "stock",
+                    True,
+                    100,
+                ]
+                for index in range(size)
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
 
 class TestStockIndexLoader(unittest.TestCase):
@@ -37,6 +63,20 @@ class TestStockIndexLoader(unittest.TestCase):
                 self.assertEqual(stock_index_loader.get_index_stock_name("00700"), "腾讯控股")
                 self.assertEqual(stock_index_loader.get_index_stock_name("700.HK"), "腾讯控股")
                 self.assertEqual(stock_index_loader.get_index_stock_name("aapl"), "苹果")
+
+    def test_default_candidate_paths_prefer_remote_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            remote_cache = Path(temp_dir) / "data" / "cache" / "stocks.index.json"
+            with patch.object(
+                stock_index_loader,
+                "get_remote_stock_index_cache_path",
+                return_value=remote_cache,
+            ):
+                paths = stock_index_loader.get_stock_index_candidate_paths()
+
+            self.assertEqual(paths[0], remote_cache)
+            self.assertTrue(str(paths[1]).endswith("apps/dsa-web/public/stocks.index.json"))
+            self.assertTrue(str(paths[2]).endswith("static/stocks.index.json"))
 
     def test_get_stock_name_index_map_is_cached_after_first_load(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -100,6 +140,61 @@ class TestStockIndexLoader(unittest.TestCase):
                 return_value=(malformed_path, valid_path),
             ):
                 self.assertEqual(stock_index_loader.get_index_stock_name("000001"), "平安银行")
+
+    def test_newer_bundled_index_wins_over_older_remote_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            remote_cache = Path(temp_dir) / "cache" / "stocks.index.json"
+            bundled_path = Path(temp_dir) / "apps" / "stocks.index.json"
+            _write_stock_index(remote_cache, "旧远程缓存", size=100)
+            _write_stock_index(bundled_path, "新内置索引")
+            os.utime(remote_cache, (1_000, 1_000))
+            os.utime(bundled_path, (2_000, 2_000))
+
+            with patch.object(stock_index_loader, "get_remote_stock_index_cache_path", return_value=remote_cache), \
+                 patch.object(
+                     stock_index_loader,
+                     "get_stock_index_candidate_paths",
+                     return_value=(remote_cache, bundled_path),
+                 ):
+                self.assertEqual(stock_index_loader.find_existing_stock_index_path(), bundled_path)
+                self.assertEqual(stock_index_loader.get_index_stock_name("000001"), "新内置索引")
+
+    def test_newer_remote_cache_wins_when_valid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            remote_cache = Path(temp_dir) / "cache" / "stocks.index.json"
+            bundled_path = Path(temp_dir) / "apps" / "stocks.index.json"
+            _write_stock_index(remote_cache, "新远程缓存", size=100)
+            _write_stock_index(bundled_path, "旧内置索引")
+            os.utime(remote_cache, (2_000, 2_000))
+            os.utime(bundled_path, (1_000, 1_000))
+
+            with patch.object(stock_index_loader, "get_remote_stock_index_cache_path", return_value=remote_cache), \
+                 patch.object(
+                     stock_index_loader,
+                     "get_stock_index_candidate_paths",
+                     return_value=(remote_cache, bundled_path),
+                 ):
+                self.assertEqual(stock_index_loader.find_existing_stock_index_path(), remote_cache)
+                self.assertEqual(stock_index_loader.get_index_stock_name("000001"), "新远程缓存")
+
+    def test_invalid_remote_cache_is_skipped_even_when_newer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            remote_cache = Path(temp_dir) / "cache" / "stocks.index.json"
+            bundled_path = Path(temp_dir) / "apps" / "stocks.index.json"
+            remote_cache.parent.mkdir(parents=True, exist_ok=True)
+            remote_cache.write_text("not-json", encoding="utf-8")
+            _write_stock_index(bundled_path, "内置索引")
+            os.utime(remote_cache, (2_000, 2_000))
+            os.utime(bundled_path, (1_000, 1_000))
+
+            with patch.object(stock_index_loader, "get_remote_stock_index_cache_path", return_value=remote_cache), \
+                 patch.object(
+                     stock_index_loader,
+                     "get_stock_index_candidate_paths",
+                     return_value=(remote_cache, bundled_path),
+                 ):
+                self.assertEqual(stock_index_loader.find_existing_stock_index_path(), bundled_path)
+                self.assertEqual(stock_index_loader.get_index_stock_name("000001"), "内置索引")
 
 
 if __name__ == "__main__":

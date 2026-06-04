@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -24,6 +26,7 @@ import src.auth as auth
 from api.app import create_app
 from src.config import Config
 from src.repositories.alert_repo import AlertRepository
+from src.services.portfolio_service import PortfolioService
 from src.storage import AlertCooldownRecord, AlertNotificationRecord, AlertTriggerRecord, Base, DatabaseManager
 
 
@@ -309,6 +312,146 @@ class AlertApiTestCase(unittest.TestCase):
             self.assertEqual(resp.status_code, 400, resp.text)
             self.assertEqual(resp.json()["error"], "validation_error")
 
+    def test_p6_scope_type_matrix_and_target_validation(self) -> None:
+        account = PortfolioService().create_account(
+            name="Main",
+            broker="Demo",
+            market="us",
+            base_currency="USD",
+        )
+        valid_cases = [
+            {
+                "target_scope": "watchlist",
+                "target": "default",
+                "alert_type": "price_cross",
+                "parameters": {"direction": "above", "price": 10},
+            },
+            {
+                "target_scope": "portfolio_holdings",
+                "target": str(account["id"]),
+                "alert_type": "rsi_threshold",
+                "parameters": {"direction": "below", "period": 12, "threshold": 30},
+            },
+            {
+                "target_scope": "portfolio_account",
+                "target": "all",
+                "alert_type": "portfolio_stop_loss",
+                "parameters": {"mode": "breach"},
+            },
+        ]
+        for body in valid_cases:
+            resp = self.client.post("/api/v1/alerts/rules", json=body)
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertEqual(resp.json()["target_scope"], body["target_scope"])
+
+        invalid_cases = [
+            {
+                "target_scope": "watchlist",
+                "target": "600519",
+                "alert_type": "price_cross",
+                "parameters": {"direction": "above", "price": 10},
+            },
+            {
+                "target_scope": "portfolio_account",
+                "target": "all",
+                "alert_type": "price_cross",
+                "parameters": {"direction": "above", "price": 10},
+            },
+            {
+                "target_scope": "portfolio_holdings",
+                "target": "all",
+                "alert_type": "portfolio_drawdown",
+                "parameters": {},
+            },
+            {
+                "target_scope": "portfolio_account",
+                "target": "99999",
+                "alert_type": "portfolio_drawdown",
+                "parameters": {},
+            },
+        ]
+        for body in invalid_cases:
+            resp = self.client.post("/api/v1/alerts/rules", json=body)
+            self.assertEqual(resp.status_code, 400, resp.text)
+            self.assertEqual(resp.json()["error"], "validation_error")
+
+    def test_p6_watchlist_dry_run_aggregates_targets_without_stock_code_validation(self) -> None:
+        rule = self._create_rule({
+            "name": "Watchlist breakout",
+            "target_scope": "watchlist",
+            "target": "default",
+            "alert_type": "price_cross",
+            "parameters": {"direction": "above", "price": 10},
+        })
+
+        async def _quote(_monitor, stock_code):
+            return SimpleNamespace(price=11.0 if stock_code == "600519" else 9.0)
+
+        with patch("src.agent.events.EventMonitor._get_realtime_quote", new=_quote):
+            resp = self.client.post(f"/api/v1/alerts/rules/{rule['id']}/test")
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["target_scope"], "watchlist")
+        self.assertTrue(payload["triggered"])
+        self.assertGreaterEqual(payload["evaluated_count"], 1)
+        self.assertEqual(payload["triggered_count"], 1)
+        self.assertEqual(payload["target_results"][0]["target"], "600519")
+
+    def test_p6_watchlist_dry_run_timeout_counts_target_as_skipped(self) -> None:
+        rule = self._create_rule({
+            "name": "Watchlist slow",
+            "target_scope": "watchlist",
+            "target": "default",
+            "alert_type": "price_cross",
+            "parameters": {"direction": "above", "price": 10},
+        })
+
+        async def _slow_quote(_monitor, _stock_code):
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(price=11.0)
+
+        with patch("src.services.alert_service.DRY_RUN_TARGET_TIMEOUT_SECONDS", 0.001), patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=_slow_quote,
+        ):
+            resp = self.client.post(f"/api/v1/alerts/rules/{rule['id']}/test")
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["status"], "not_triggered")
+        self.assertFalse(payload["triggered"])
+        self.assertEqual(payload["evaluated_count"], 1)
+        self.assertEqual(payload["skipped_count"], 1)
+        self.assertEqual(payload["target_results"][0]["record_status"], "skipped")
+        self.assertIn("timed out", payload["target_results"][0]["message"])
+
+    def test_p6_portfolio_account_cooldown_summary_uses_effective_target(self) -> None:
+        created = self._create_rule({
+            "name": "Portfolio drawdown",
+            "target_scope": "portfolio_account",
+            "target": "all",
+            "alert_type": "portfolio_drawdown",
+            "parameters": {},
+        })
+        repo = AlertRepository(self.db)
+        now_dt = datetime.now()
+        cooldown_until = now_dt + timedelta(minutes=5)
+        repo.upsert_cooldown(
+            rule_id=created["id"],
+            rule_key="portfolio_account:all:portfolio_drawdown:{}|account:all",
+            target="account:all",
+            severity="warning",
+            last_triggered_at=now_dt,
+            cooldown_until=cooldown_until,
+            reason="active cooldown",
+        )
+
+        detail_resp = self.client.get(f"/api/v1/alerts/rules/{created['id']}")
+
+        self.assertEqual(detail_resp.status_code, 200, detail_resp.text)
+        self.assertTrue(detail_resp.json()["cooldown_active"])
+
     def test_rejects_unsupported_and_invalid_rules(self) -> None:
         unsupported = self.client.post(
             "/api/v1/alerts/rules",
@@ -339,6 +482,99 @@ class AlertApiTestCase(unittest.TestCase):
             json={"target_scope": "single_symbol", "alert_type": "price_cross", "parameters": {"price": 10}},
         )
         self.assertEqual(missing_target.status_code, 422)
+
+    def test_market_alert_scope_type_matrix_and_target_normalization(self) -> None:
+        created = self._create_rule({
+            "name": "Market red/yellow",
+            "target_scope": "market",
+            "target": " CN ",
+            "alert_type": "market_light_status",
+            "parameters": {"statuses": ["red", "yellow"]},
+        })
+        self.assertEqual(created["target"], "cn")
+        self.assertEqual(created["parameters"], {"statuses": ["red", "yellow"]})
+
+        invalid_symbol_rule = self.client.post(
+            "/api/v1/alerts/rules",
+            json={
+                "target_scope": "market",
+                "target": "cn",
+                "alert_type": "price_cross",
+                "parameters": {"direction": "above", "price": 10},
+            },
+        )
+        self.assertEqual(invalid_symbol_rule.status_code, 400, invalid_symbol_rule.text)
+        self.assertEqual(invalid_symbol_rule.json()["error"], "validation_error")
+
+        invalid_market_rule = self.client.post(
+            "/api/v1/alerts/rules",
+            json={
+                "target_scope": "single_symbol",
+                "target": "600519",
+                "alert_type": "market_light_status",
+                "parameters": {"statuses": ["red"]},
+            },
+        )
+        self.assertEqual(invalid_market_rule.status_code, 400, invalid_market_rule.text)
+        self.assertEqual(invalid_market_rule.json()["error"], "validation_error")
+
+        invalid_target = self.client.post(
+            "/api/v1/alerts/rules",
+            json={
+                "target_scope": "market",
+                "target": "eu",
+                "alert_type": "market_light_score_drop",
+                "parameters": {"min_drop": 10},
+            },
+        )
+        self.assertEqual(invalid_target.status_code, 400, invalid_target.text)
+        self.assertEqual(invalid_target.json()["error"], "validation_error")
+
+    def test_dry_run_market_light_rule_uses_snapshot_and_does_not_write_history(self) -> None:
+        rule = self._create_rule({
+            "name": "Market risk-off",
+            "target_scope": "market",
+            "target": "cn",
+            "alert_type": "market_light_status",
+            "parameters": {"statuses": ["red", "yellow"]},
+        })
+        snapshot = {
+            "region": "cn",
+            "trade_date": "2026-03-07",
+            "status": "red",
+            "score": 35,
+            "label": "偏防守",
+            "temperature_label": "偏弱",
+            "reasons": ["test"],
+            "guidance": "test",
+            "dimensions": {
+                "breadth": {"score": 20, "available": True},
+                "index": {"score": 30, "available": True},
+                "limit": {"score": 10, "available": True},
+            },
+            "data_quality": "ok",
+        }
+
+        with patch("src.services.market_light_alerts.get_open_markets_today", return_value={"cn"}), patch(
+            "src.services.market_light_alerts.build_current_snapshot", return_value=snapshot
+        ) as build_snapshot:
+            resp = self.client.post(f"/api/v1/alerts/rules/{rule['id']}/test")
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["target_scope"], "market")
+        self.assertTrue(payload["triggered"])
+        self.assertEqual(payload["status"], "triggered")
+        self.assertEqual(payload["observed_value"], 35.0)
+        self.assertEqual(payload["evaluated_count"], 1)
+        self.assertEqual(payload["triggered_count"], 1)
+        self.assertEqual(payload["target_results"][0]["target"], "cn")
+        self.assertEqual(payload["target_results"][0]["display_target"], "A股大盘")
+        self.assertEqual(payload["target_results"][0]["observed_value"], 35.0)
+        build_snapshot.assert_called_once_with("cn")
+
+        self.assertEqual(self.client.get("/api/v1/alerts/triggers").json()["total"], 0)
+        self.assertEqual(self.client.get("/api/v1/alerts/notifications").json()["total"], 0)
 
     def test_dry_run_price_cross_uses_mocked_quote_and_does_not_write_history(self) -> None:
         rule = self._create_rule()
@@ -576,6 +812,9 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(trigger_payload["total"], 1)
         self.assertNotIn("secret-token", str(trigger_payload))
         self.assertNotIn("example.com/hook", str(trigger_payload))
+        self.assertIsNone(trigger_payload["items"][0]["market_phase_summary"])
+        self.assertIsNone(trigger_payload["items"][0]["analysis_context_pack_overview"])
+        self.assertEqual(trigger_payload["items"][0]["analysis_visibility_source"], "legacy_text")
 
         notification_resp = self.client.get("/api/v1/alerts/notifications", params={"channel": "wechat"})
         self.assertEqual(notification_resp.status_code, 200)
@@ -584,6 +823,57 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertTrue(notification_payload["items"][0]["retryable"])
         self.assertNotIn("secret-token", str(notification_payload))
         self.assertNotIn("example.com/webhook", str(notification_payload))
+
+    def test_trigger_query_derives_analysis_visibility_from_json_diagnostics(self) -> None:
+        rule = self._create_rule()
+        diagnostics = {
+            "existing": "keep",
+            "analysis_visibility": {
+                "source": "analysis_history_snapshot",
+                "market_phase_summary": {
+                    "phase": "postmarket",
+                    "market": "cn",
+                    "trigger_source": "alert",
+                    "is_partial_bar": False,
+                },
+                "analysis_context_pack_overview": {
+                    "pack_version": "1.0",
+                    "subject": {"code": "600519", "market": "cn"},
+                    "data_quality": {
+                        "overall_score": 88,
+                        "level": "good",
+                        "limitations": ["news: missing"],
+                    },
+                    "blocks": [
+                        {"key": "quote", "label": "行情", "status": "available"},
+                        {"key": "news", "label": "新闻", "status": "missing"},
+                    ],
+                },
+            },
+        }
+        with self.db.get_session() as session:
+            session.add(
+                AlertTriggerRecord(
+                    rule_id=rule["id"],
+                    target="600519",
+                    observed_value=1810.0,
+                    threshold=1800.0,
+                    reason="breakout",
+                    data_source="unit-test",
+                    triggered_at=datetime(2026, 1, 1, 9, 30),
+                    status="triggered",
+                    diagnostics=json.dumps(diagnostics),
+                )
+            )
+            session.commit()
+
+        resp = self.client.get("/api/v1/alerts/triggers", params={"page": 1, "page_size": 10})
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        item = resp.json()["items"][0]
+        self.assertEqual(item["analysis_visibility_source"], "analysis_history_snapshot")
+        self.assertEqual(item["market_phase_summary"]["phase"], "postmarket")
+        self.assertEqual(item["analysis_context_pack_overview"]["data_quality"]["level"], "good")
 
     def test_alert_cooldowns_table_create_all_is_idempotent(self) -> None:
         constraint_names = {constraint.name for constraint in AlertCooldownRecord.__table__.constraints}

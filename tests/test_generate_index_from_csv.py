@@ -22,7 +22,9 @@ from generate_index_from_csv import (
     determine_market,
     generate_aliases,
     normalize_name_for_pinyin,
+    normalize_stock_name_for_index,
     generate_pinyin,
+    main,
     compress_index,
     build_stock_index,
     load_tushare_data,
@@ -140,6 +142,18 @@ class TestGetStockName:
         result = get_stock_name(row, 'CN')
         assert result is None
 
+    def test_cn_stock_name_strips_ex_rights_prefix(self):
+        """测试 A股除权除息短期前缀不会写入长期索引名称"""
+        row = {'name': 'XD西藏药', 'enname': ''}
+        result = get_stock_name(row, 'CN')
+        assert result == '西藏药'
+
+    def test_cn_stock_name_preserves_new_stock_prefix(self):
+        """测试 A股新股前缀保留，等待后续数据包刷新自然消失"""
+        row = {'name': 'N惠康', 'enname': ''}
+        result = get_stock_name(row, 'CN')
+        assert result == 'N惠康'
+
 
 class TestDataCleaning:
     """测试数据清洗逻辑"""
@@ -255,6 +269,26 @@ class TestDataCleaning:
         assert get_us_delist_priority({'delist_date': ''}) == 2
         assert get_us_delist_priority({'delist_date': 'NaT'}) == 1
         assert get_us_delist_priority({'delist_date': '20250131'}) == 0
+
+
+class TestNormalizeStockNameForIndex:
+    """测试索引名称归一化"""
+
+    def test_strips_a_share_ex_rights_prefixes(self):
+        assert normalize_stock_name_for_index('XD西藏药', 'CN') == '西藏药'
+        assert normalize_stock_name_for_index('XR示例股', 'CN') == '示例股'
+        assert normalize_stock_name_for_index('DR罗曼股', 'CN') == '罗曼股'
+        assert normalize_stock_name_for_index('XD朱老六', 'BSE') == '朱老六'
+
+    def test_preserves_a_share_new_stock_and_st_prefixes(self):
+        assert normalize_stock_name_for_index('N惠康', 'CN') == 'N惠康'
+        assert normalize_stock_name_for_index('C天海', 'CN') == 'C天海'
+        assert normalize_stock_name_for_index('ST海王', 'CN') == 'ST海王'
+        assert normalize_stock_name_for_index('*ST美丽', 'CN') == '*ST美丽'
+
+    def test_does_not_strip_other_markets(self):
+        assert normalize_stock_name_for_index('DRAGONFLY ENERGY', 'US') == 'DRAGONFLY ENERGY'
+        assert normalize_stock_name_for_index('XD港股示例', 'HK') == 'XD港股示例'
 
 
 class TestAliases:
@@ -518,9 +552,24 @@ class TestPinyin:
 
     def test_generate_pinyin(self):
         """测试拼音生成"""
-        # 注意：这个测试需要 pypinyin 可用
         pinyin_full, pinyin_abbr = generate_pinyin('平安银行')
-        if pinyin_full:
-            assert isinstance(pinyin_full, str)
-        if pinyin_abbr:
-            assert isinstance(pinyin_abbr, str)
+        assert pinyin_full == 'pinganyinhang'
+        assert pinyin_abbr == 'payh'
+
+    def test_generate_pinyin_requires_dependency(self, monkeypatch):
+        """测试缺少 pypinyin 时不会生成降级拼音字段"""
+        import generate_index_from_csv
+
+        monkeypatch.setattr(generate_index_from_csv, 'PYPINYIN_AVAILABLE', False)
+
+        with pytest.raises(RuntimeError, match='pypinyin is required'):
+            generate_index_from_csv.generate_pinyin('平安银行')
+
+    def test_main_fails_without_pypinyin(self, monkeypatch):
+        """测试正式生成索引前必须具备 pypinyin"""
+        import generate_index_from_csv
+
+        monkeypatch.setattr(generate_index_from_csv, 'PYPINYIN_AVAILABLE', False)
+        monkeypatch.setattr(sys, 'argv', ['generate_index_from_csv.py'])
+
+        assert main() == 1

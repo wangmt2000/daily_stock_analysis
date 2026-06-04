@@ -145,9 +145,9 @@ test.describe('web smoke', () => {
     await page.waitForTimeout(1000);
 
     // Check for filter controls
-    const filterInput = page.getByPlaceholder(/stock code/i);
+    const filterInput = page.getByPlaceholder('按股票代码筛选（留空表示全部）');
     await expect(filterInput).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByRole('button', { name: /filter/i })).toBeVisible();
-    await expect(page.getByRole('button', { name: /run backtest/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: '筛选' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '运行回测' })).toBeVisible();
   });
 });

@@ -113,11 +113,22 @@ class SearchResult:
     url: str
     source: str  # 来源网站
     published_date: Optional[str] = None
+    relevance_score: Optional[int] = None
+    relevance_category: Optional[str] = None
+    relevance_reasons: Optional[List[str]] = None
     
     def to_text(self) -> str:
         """转换为文本格式"""
         date_str = f" ({self.published_date})" if self.published_date else ""
-        return f"【{self.source}】{self.title}{date_str}\n{self.snippet}"
+        relevance_parts: List[str] = []
+        if self.relevance_category:
+            relevance_parts.append(self.relevance_category)
+        if self.relevance_score is not None:
+            relevance_parts.append(f"score={self.relevance_score}")
+        if self.relevance_reasons:
+            relevance_parts.append(f"依据: {'；'.join(self.relevance_reasons[:3])}")
+        relevance_str = f"\n关联度: {'; '.join(relevance_parts)}" if relevance_parts else ""
+        return f"【{self.source}】{self.title}{date_str}\n{self.snippet}{relevance_str}"
 
 
 @dataclass 
@@ -2116,6 +2127,39 @@ class SearchService:
     FUTURE_TOLERANCE_DAYS = 1
     _CHINESE_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
     _US_STOCK_RE = re.compile(r"^[A-Za-z]{1,5}(\.[A-Za-z])?$")
+    _DIRECT_NEWS_CATEGORY = "direct_company_news"
+    _SECTOR_NEWS_CATEGORY = "sector_related_news"
+    _MACRO_NEWS_CATEGORY = "macro_market_news"
+    _NEWS_CATEGORY_PRIORITY = {
+        _DIRECT_NEWS_CATEGORY: 0,
+        _SECTOR_NEWS_CATEGORY: 1,
+        _MACRO_NEWS_CATEGORY: 2,
+    }
+    _AMBIGUOUS_EN_COMPANY_NAMES = {"apple", "meta", "square", "target", "gap"}
+    _AMBIGUOUS_EN_CONFIRMING_EVENT_TERMS = (
+        "earnings", "revenue", "profit", "guidance", "filing", "buyback",
+        "dividend", "lawsuit", "merger", "acquisition",
+    )
+    _COMPANY_EVENT_TERMS = (
+        "公告", "披露", "发布", "收购", "回购", "减持", "增持", "诉讼", "处罚",
+        "业绩", "财报", "营收", "净利润", "分红", "董事会", "股东大会", "订单",
+        "合作", "中标", "earnings", "revenue", "profit", "guidance", "filing",
+        "sec", "shares", "stock", "buyback", "dividend", "lawsuit", "merger",
+        "acquisition", "results", "quarterly", "annual", "announces", "launches",
+    )
+    _SECTOR_NEWS_TERMS = (
+        "行业", "板块", "产业链", "龙头", "概念股", "赛道", "sector", "industry",
+        "peers", "competitors", "supply chain", "market share",
+    )
+    _MACRO_NEWS_TERMS = (
+        "大盘", "市场", "指数", "宏观", "央行", "利率", "通胀", "a股", "港股",
+        "美股", "纳指", "标普", "market", "index", "fed", "inflation",
+        "interest rate", "nasdaq", "s&p 500", "dow jones",
+    )
+    _OFFICIAL_SOURCE_TERMS = (
+        "cninfo", "sse.com", "szse.cn", "hkexnews", "sec.gov", "nasdaq.com",
+        "nyse.com", "上交所", "深交所", "港交所", "证券交易所",
+    )
 
     def __init__(
         self,
@@ -2447,6 +2491,390 @@ class SearchService:
         return max(target, min(target * cls.NEWS_OVERSAMPLE_FACTOR, cls.NEWS_OVERSAMPLE_MAX))
 
     @staticmethod
+    def _append_unique(values: List[str], value: Optional[str]) -> None:
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in values:
+            values.append(cleaned)
+
+    @classmethod
+    def _stock_code_identity_terms(cls, stock_code: str) -> List[str]:
+        """Return code/ticker variants that should count as strong identity hits."""
+        raw = (stock_code or "").strip()
+        if not raw:
+            return []
+
+        terms: List[str] = []
+        upper = raw.upper()
+        code_for_variants = upper
+        if "." in upper:
+            base, suffix = upper.rsplit(".", 1)
+            if suffix == "HK" and base.isdigit() and 1 <= len(base) <= 5:
+                code_for_variants = f"HK{base.zfill(5)}"
+            elif suffix in {"SH", "SZ", "SS", "BJ"} and base.isdigit() and len(base) == 6:
+                code_for_variants = base
+            elif suffix == "US" and re.fullmatch(r"[A-Z]{1,5}", base):
+                code_for_variants = base
+
+        is_us_ticker = bool(cls._US_STOCK_RE.match(code_for_variants))
+        if not is_us_ticker:
+            cls._append_unique(terms, raw)
+            cls._append_unique(terms, upper)
+            if code_for_variants != upper:
+                cls._append_unique(terms, code_for_variants)
+
+        lower = code_for_variants.lower()
+        hk_digits = ""
+        if lower.startswith("hk"):
+            hk_digits = re.sub(r"\D", "", code_for_variants)
+        elif code_for_variants.isdigit() and len(code_for_variants) == 5:
+            hk_digits = code_for_variants
+
+        if hk_digits:
+            padded = hk_digits.zfill(5)
+            short = str(int(hk_digits)) if hk_digits.isdigit() else hk_digits.lstrip("0")
+            cls._append_unique(terms, padded)
+            cls._append_unique(terms, f"HK{padded}")
+            cls._append_unique(terms, f"{padded}.HK")
+            cls._append_unique(terms, f"{short}.HK")
+            cls._append_unique(terms, f"HKEX:{short}")
+            return terms
+
+        if code_for_variants.isdigit() and len(code_for_variants) == 6:
+            suffix = ".SH" if code_for_variants.startswith(("5", "6", "9")) else ".SZ"
+            cls._append_unique(terms, f"{code_for_variants}{suffix}")
+            return terms
+
+        if cls._US_STOCK_RE.match(code_for_variants):
+            cls._append_unique(terms, f"${code_for_variants}")
+            cls._append_unique(terms, f"NASDAQ:{code_for_variants}")
+            cls._append_unique(terms, f"NYSE:{code_for_variants}")
+            if len(code_for_variants) > 1:
+                cls._append_unique(terms, code_for_variants)
+            return terms
+
+        return terms
+
+    @classmethod
+    def _company_identity_terms(cls, stock_name: str) -> List[str]:
+        """Return conservative company-name variants for relevance matching."""
+        raw = (stock_name or "").strip()
+        if not raw:
+            return []
+
+        terms: List[str] = []
+        cls._append_unique(terms, raw)
+
+        without_market_suffix = re.sub(r"[-－（(].*$", "", raw).strip()
+        cls._append_unique(terms, without_market_suffix)
+
+        if cls._contains_chinese_text(raw):
+            cleaned = re.sub(
+                r"(股份有限公司|有限责任公司|有限公司|控股集团|控股|集团|股份|公司)$",
+                "",
+                without_market_suffix,
+            ).strip()
+            if len(cleaned) >= 4:
+                cls._append_unique(terms, cleaned)
+        else:
+            cleaned = re.sub(
+                r"\b(incorporated|inc|corporation|corp|company|co|plc|ltd|limited|holdings?)\.?$",
+                "",
+                without_market_suffix,
+                flags=re.IGNORECASE,
+            ).strip()
+            if len(cleaned) >= 3:
+                cls._append_unique(terms, cleaned)
+
+        return terms
+
+    @classmethod
+    def _contains_identity_term(cls, text: str, term: str) -> bool:
+        if not text or not term:
+            return False
+
+        if cls._contains_chinese_text(term):
+            start = 0
+            while True:
+                index = text.find(term, start)
+                if index < 0:
+                    return False
+                next_char = text[index + len(term):index + len(term) + 1]
+                if next_char not in {"镇", "村", "县"}:
+                    return True
+                start = index + len(term)
+
+        lower_text = text.lower()
+        lower_term = term.lower()
+        if lower_term.startswith("$"):
+            return lower_term in lower_text
+
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(lower_term) + r"(?![A-Za-z0-9])"
+        return bool(re.search(pattern, lower_text))
+
+    @classmethod
+    def _contains_stock_code_identity_term(cls, text: str, term: str) -> bool:
+        if not text or not term:
+            return False
+
+        if cls._US_STOCK_RE.match(term) and term.upper() == term and not term.startswith("$"):
+            ticker_pattern = f"(?:{re.escape(term)}|{re.escape(term.lower())})"
+            pattern = (
+                r"(?<![A-Za-z0-9$:.])"
+                + ticker_pattern
+                + r"(?=$|[^A-Za-z0-9.]|\.(?:US|us|O|o|N|n|NYSE|nyse|NASDAQ|nasdaq|AMEX|amex)\b)"
+            )
+            return bool(re.search(pattern, text))
+
+        return cls._contains_identity_term(text, term)
+
+    @classmethod
+    def _contains_any_news_term(cls, text: str, terms: Tuple[str, ...]) -> bool:
+        lower = (text or "").lower()
+        return any(term.lower() in lower for term in terms)
+
+    @classmethod
+    def _score_news_relevance(
+        cls,
+        item: SearchResult,
+        *,
+        stock_code: str,
+        stock_name: str,
+    ) -> SearchResult:
+        """Attach conservative, explainable relevance metadata to one news item."""
+        title = item.title or ""
+        snippet = item.snippet or ""
+        url = item.url or ""
+        source = item.source or ""
+        full_text = " ".join([title, snippet, url, source])
+
+        score = 0
+        direct_signal = 0
+        reasons: List[str] = []
+        has_stock_code_signal = False
+        has_unambiguous_company_signal = False
+        has_ambiguous_company_signal = False
+
+        def add_reason(reason: str) -> None:
+            if reason not in reasons and len(reasons) < 5:
+                reasons.append(reason)
+
+        for term in cls._stock_code_identity_terms(stock_code):
+            if cls._contains_stock_code_identity_term(title, term):
+                score += 55
+                direct_signal += 55
+                has_stock_code_signal = True
+                add_reason(f"标题命中股票代码 {term}")
+                break
+        else:
+            for term in cls._stock_code_identity_terms(stock_code):
+                if cls._contains_stock_code_identity_term(snippet, term):
+                    score += 34
+                    direct_signal += 34
+                    has_stock_code_signal = True
+                    add_reason(f"摘要命中股票代码 {term}")
+                    break
+            else:
+                for term in cls._stock_code_identity_terms(stock_code):
+                    if cls._contains_stock_code_identity_term(url, term):
+                        score += 18
+                        direct_signal += 18
+                        has_stock_code_signal = True
+                        add_reason(f"链接命中股票代码 {term}")
+                        break
+
+        for term in cls._company_identity_terms(stock_name):
+            ambiguous_en = (
+                not cls._contains_chinese_text(term)
+                and term.lower() in cls._AMBIGUOUS_EN_COMPANY_NAMES
+            )
+            title_score = 26 if ambiguous_en else 45
+            snippet_score = 16 if ambiguous_en else 28
+            if cls._contains_identity_term(title, term):
+                score += title_score
+                direct_signal += title_score
+                if ambiguous_en:
+                    has_ambiguous_company_signal = True
+                else:
+                    has_unambiguous_company_signal = True
+                add_reason(f"标题命中公司名 {term}")
+                break
+            if cls._contains_identity_term(snippet, term):
+                score += snippet_score
+                direct_signal += snippet_score
+                if ambiguous_en:
+                    has_ambiguous_company_signal = True
+                else:
+                    has_unambiguous_company_signal = True
+                add_reason(f"摘要命中公司名 {term}")
+                break
+
+        has_company_event = cls._contains_any_news_term(full_text, cls._COMPANY_EVENT_TERMS)
+        if has_company_event and direct_signal > 0:
+            score += 12
+            ambiguous_name_only = (
+                has_ambiguous_company_signal
+                and not has_stock_code_signal
+                and not has_unambiguous_company_signal
+            )
+            has_confirming_event = cls._contains_any_news_term(
+                full_text,
+                cls._AMBIGUOUS_EN_CONFIRMING_EVENT_TERMS,
+            )
+            if not ambiguous_name_only or has_confirming_event:
+                direct_signal += 12
+            add_reason("命中公告/财报/交易等公司事件词")
+
+        if cls._contains_any_news_term(f"{source} {url}", cls._OFFICIAL_SOURCE_TERMS):
+            score += 8
+            add_reason("来源接近公告或交易所渠道")
+
+        has_sector_signal = cls._contains_any_news_term(full_text, cls._SECTOR_NEWS_TERMS)
+        has_macro_signal = cls._contains_any_news_term(full_text, cls._MACRO_NEWS_TERMS)
+
+        if direct_signal >= 38:
+            category = cls._DIRECT_NEWS_CATEGORY
+        elif has_macro_signal and not direct_signal:
+            category = cls._MACRO_NEWS_CATEGORY
+            score = max(0, score - 12)
+            add_reason("未命中目标公司身份，归为宏观/市场新闻")
+        else:
+            category = cls._SECTOR_NEWS_CATEGORY
+            if has_sector_signal:
+                score += 6
+                add_reason("仅命中行业或板块背景")
+            else:
+                add_reason("未命中股票代码或公司全称，降级为背景新闻")
+
+        score = max(0, min(100, score))
+        return SearchResult(
+            title=item.title,
+            snippet=item.snippet,
+            url=item.url,
+            source=item.source,
+            published_date=item.published_date,
+            relevance_score=score,
+            relevance_category=category,
+            relevance_reasons=reasons,
+        )
+
+    @classmethod
+    def _rank_news_response(
+        cls,
+        response: SearchResponse,
+        *,
+        stock_code: str,
+        stock_name: str,
+        prefer_chinese: bool,
+        max_results: int,
+        log_scope: str,
+    ) -> SearchResponse:
+        """Score and sort news so direct company items are not crowded out."""
+        if not response.success or not response.results:
+            return response
+
+        scored_results = [
+            cls._score_news_relevance(item, stock_code=stock_code, stock_name=stock_name)
+            for item in response.results
+        ]
+
+        indexed_results = list(enumerate(scored_results))
+
+        def sort_key(entry: Tuple[int, SearchResult]) -> Tuple[int, int, int, int]:
+            index, result = entry
+            category = result.relevance_category or cls._SECTOR_NEWS_CATEGORY
+            category_rank = cls._NEWS_CATEGORY_PRIORITY.get(category, 9)
+            language_rank = 0 if prefer_chinese and cls._is_chinese_news_result(result) else 1
+            if not prefer_chinese:
+                language_rank = 0
+            score = result.relevance_score or 0
+            return (category_rank, language_rank, -score, index)
+
+        ranked_results = [result for _, result in sorted(indexed_results, key=sort_key)]
+        limited_results = ranked_results[:max_results]
+        category_counts = {
+            cls._DIRECT_NEWS_CATEGORY: 0,
+            cls._SECTOR_NEWS_CATEGORY: 0,
+            cls._MACRO_NEWS_CATEGORY: 0,
+        }
+        for result in limited_results:
+            if result.relevance_category in category_counts:
+                category_counts[result.relevance_category] += 1
+        if limited_results:
+            top = limited_results[0]
+            logger.info(
+                "[新闻相关度] %s: direct=%s, sector=%s, macro=%s, top_score=%s, top_category=%s, reasons=%s",
+                log_scope,
+                category_counts[cls._DIRECT_NEWS_CATEGORY],
+                category_counts[cls._SECTOR_NEWS_CATEGORY],
+                category_counts[cls._MACRO_NEWS_CATEGORY],
+                top.relevance_score,
+                top.relevance_category,
+                "；".join(top.relevance_reasons or []),
+            )
+
+        return SearchResponse(
+            query=response.query,
+            results=limited_results,
+            provider=response.provider,
+            success=response.success,
+            error_message=response.error_message,
+            search_time=response.search_time,
+        )
+
+    @classmethod
+    def _news_relevance_stats(
+        cls,
+        response: SearchResponse,
+        *,
+        prefer_chinese: bool,
+    ) -> Dict[str, int]:
+        results = response.results if response and response.results else []
+        return {
+            "direct_count": sum(
+                1 for item in results if item.relevance_category == cls._DIRECT_NEWS_CATEGORY
+            ),
+            "preferred_direct_count": sum(
+                1
+                for item in results
+                if (
+                    prefer_chinese
+                    and item.relevance_category == cls._DIRECT_NEWS_CATEGORY
+                    and cls._is_chinese_news_result(item)
+                )
+            ),
+            "preferred_count": sum(
+                1 for item in results if prefer_chinese and cls._is_chinese_news_result(item)
+            ),
+            "max_score": max((item.relevance_score or 0 for item in results), default=0),
+            "result_count": len(results),
+        }
+
+    @classmethod
+    def _is_better_ranked_news_response(
+        cls,
+        candidate: SearchResponse,
+        *,
+        candidate_stats: Dict[str, int],
+        best_response: Optional[SearchResponse],
+        best_stats: Optional[Dict[str, int]],
+        prefer_chinese: bool,
+    ) -> bool:
+        if best_response is None or best_stats is None:
+            return True
+        if candidate_stats["direct_count"] != best_stats["direct_count"]:
+            return candidate_stats["direct_count"] > best_stats["direct_count"]
+        if (
+            prefer_chinese
+            and candidate_stats["preferred_direct_count"] != best_stats["preferred_direct_count"]
+        ):
+            return candidate_stats["preferred_direct_count"] > best_stats["preferred_direct_count"]
+        if prefer_chinese and candidate_stats["preferred_count"] != best_stats["preferred_count"]:
+            return candidate_stats["preferred_count"] > best_stats["preferred_count"]
+        if candidate_stats["max_score"] != best_stats["max_score"]:
+            return candidate_stats["max_score"] > best_stats["max_score"]
+        return candidate_stats["result_count"] > best_stats["result_count"]
+
+    @staticmethod
     def _parse_relative_news_date(text: str, now: datetime) -> Optional[date]:
         """Parse common Chinese/English relative-time strings."""
         raw = (text or "").strip()
@@ -2627,6 +3055,9 @@ class SearchService:
                     url=item.url,
                     source=item.source,
                     published_date=published.isoformat(),
+                    relevance_score=item.relevance_score,
+                    relevance_category=item.relevance_category,
+                    relevance_reasons=item.relevance_reasons,
                 )
             )
             if len(filtered) >= max_results:
@@ -2677,6 +3108,9 @@ class SearchService:
                     published_date=(
                         normalized_date.isoformat() if normalized_date is not None else item.published_date
                     ),
+                    relevance_score=item.relevance_score,
+                    relevance_category=item.relevance_category,
+                    relevance_reasons=item.relevance_reasons,
                 )
             )
 
@@ -2772,7 +3206,10 @@ class SearchService:
         )
 
         cache_key = self._cache_key(
-            f"{query}|news_pref={'zh' if prefer_chinese else 'default'}",
+            (
+                f"{query}|target={stock_code}:{stock_name}|"
+                f"news_pref={'zh' if prefer_chinese else 'default'}"
+            ),
             max_results,
             search_days,
         )
@@ -2794,9 +3231,8 @@ class SearchService:
         try:
             # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
             had_provider_success = False
-            fallback_response: Optional[SearchResponse] = None
-            best_preferred_response: Optional[SearchResponse] = None
-            best_preferred_count = 0
+            best_ranked_response: Optional[SearchResponse] = None
+            best_ranked_stats: Optional[Dict[str, int]] = None
             for provider in self._providers:
                 if not provider.is_available:
                     continue
@@ -2822,46 +3258,72 @@ class SearchService:
                 had_provider_success = had_provider_success or bool(response.success)
 
                 if filtered_response.success and filtered_response.results:
-                    prioritized_response, preferred_count = self._prioritize_news_language(
+                    language_response, _preferred_count = self._prioritize_news_language(
                         filtered_response,
                         prefer_chinese=prefer_chinese,
                     )
+                    ranked_response = self._rank_news_response(
+                        language_response,
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        prefer_chinese=prefer_chinese,
+                        max_results=provider_max_results,
+                        log_scope=f"{stock_code}:{provider.name}:stock_news",
+                    )
                     limited_response = self._limit_search_response(
-                        prioritized_response,
+                        ranked_response,
                         max_results=max_results,
                     )
-                    visible_preferred_count = min(preferred_count, len(limited_response.results))
+                    stats = self._news_relevance_stats(
+                        limited_response,
+                        prefer_chinese=prefer_chinese,
+                    )
+                    if self._is_better_ranked_news_response(
+                        limited_response,
+                        candidate_stats=stats,
+                        best_response=best_ranked_response,
+                        best_stats=best_ranked_stats,
+                        prefer_chinese=prefer_chinese,
+                    ):
+                        best_ranked_response = limited_response
+                        best_ranked_stats = stats
 
-                    if not prefer_chinese:
-                        logger.info(f"使用 {provider.name} 搜索成功")
+                    if stats["direct_count"] > 0 and (
+                        not prefer_chinese or stats["preferred_direct_count"] > 0
+                    ):
+                        logger.info(
+                            "%s 搜索成功，识别到 %s 条直接个股新闻，优先返回",
+                            provider.name,
+                            stats["direct_count"],
+                        )
                         self._put_cache(cache_key, limited_response)
                         return limited_response
 
-                    if fallback_response is None:
-                        fallback_response = limited_response
-
-                    if visible_preferred_count > 0:
+                    if prefer_chinese and stats["direct_count"] > 0:
                         logger.info(
-                            "%s 搜索成功，识别到 %s/%s 条中文新闻",
+                            "%s 搜索成功，识别到 %s 条直接个股新闻但缺少中文直接命中，继续尝试下一引擎",
                             provider.name,
-                            visible_preferred_count,
+                            stats["direct_count"],
+                        )
+                        continue
+
+                    if prefer_chinese and stats["preferred_count"] >= max_results:
+                        logger.info(
+                            "%s 搜索成功，中文结果已满足目标条数但缺少直接个股命中，继续尝试下一引擎",
+                            provider.name,
+                        )
+                        continue
+
+                    if prefer_chinese and stats["preferred_count"] > 0:
+                        logger.info(
+                            "%s 搜索成功，识别到 %s/%s 条中文新闻但缺少直接个股命中，继续尝试下一引擎",
+                            provider.name,
+                            stats["preferred_count"],
                             len(limited_response.results),
                         )
-                        if self._is_better_preferred_news_response(
-                            limited_response,
-                            candidate_preferred_count=visible_preferred_count,
-                            best_response=best_preferred_response,
-                            best_preferred_count=best_preferred_count,
-                        ):
-                            best_preferred_response = limited_response
-                            best_preferred_count = visible_preferred_count
-
-                        if visible_preferred_count >= max_results:
-                            self._put_cache(cache_key, limited_response)
-                            return limited_response
                     else:
                         logger.info(
-                            "%s 搜索成功但结果仍以英文为主，继续尝试下一引擎",
+                            "%s 搜索成功但未识别直接个股新闻，继续尝试下一引擎",
                             provider.name,
                         )
                 else:
@@ -2877,11 +3339,9 @@ class SearchService:
                             response.error_message,
                         )
 
-            if prefer_chinese:
-                best_to_return = best_preferred_response or fallback_response
-                if best_to_return is not None:
-                    self._put_cache(cache_key, best_to_return)
-                    return best_to_return
+            if best_ranked_response is not None:
+                self._put_cache(cache_key, best_ranked_response)
+                return best_ranked_response
 
             if had_provider_success:
                 return SearchResponse(
@@ -3138,14 +3598,22 @@ class SearchService:
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
-                    max_results=target_per_dimension,
+                    max_results=provider_max_results,
                     log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
                 )
             else:
                 filtered_response = self._normalize_and_limit_response(
                     response,
-                    max_results=target_per_dimension,
+                    max_results=provider_max_results,
                 )
+            filtered_response = self._rank_news_response(
+                filtered_response,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                prefer_chinese=self._should_prefer_chinese_news(stock_code, stock_name),
+                max_results=target_per_dimension,
+                log_scope=f"{stock_code}:{provider.name}:{dim['name']}:rank",
+            )
             results[dim['name']] = filtered_response
             search_count += 1
             
@@ -3207,6 +3675,15 @@ class SearchService:
                     # 如果摘要太短，可能信息量不足
                     snippet = r.snippet[:150] if len(r.snippet) > 20 else r.snippet
                     lines.append(f"     {snippet}...")
+                    if r.relevance_category or r.relevance_reasons:
+                        relevance_parts = []
+                        if r.relevance_category:
+                            relevance_parts.append(r.relevance_category)
+                        if r.relevance_score is not None:
+                            relevance_parts.append(f"score={r.relevance_score}")
+                        if r.relevance_reasons:
+                            relevance_parts.append(f"依据: {'；'.join(r.relevance_reasons[:3])}")
+                        lines.append(f"     关联度: {'; '.join(relevance_parts)}")
             else:
                 lines.append("  未找到相关信息")
         

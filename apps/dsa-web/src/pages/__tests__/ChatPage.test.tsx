@@ -5,6 +5,7 @@ import { createParsedApiError } from '../../api/error';
 import { historyApi } from '../../api/history';
 import type { Message } from '../../stores/agentChatStore';
 import ChatPage from '../ChatPage';
+import { extractStockCodeFromMessage } from '../../utils/chatStockCode';
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -20,12 +21,22 @@ const {
   mockGetSkills,
   mockDeleteChatSession,
   mockSendChat,
+  mockGetSystemConfig,
+  mockUpdateSystemConfig,
+  mockGetWatchlist,
+  mockAddToWatchlist,
+  mockRemoveFromWatchlist,
   mockDownloadSession,
   mockFormatSessionAsMarkdown,
 } = vi.hoisted(() => ({
   mockGetSkills: vi.fn(),
   mockDeleteChatSession: vi.fn(),
   mockSendChat: vi.fn(),
+  mockGetSystemConfig: vi.fn(),
+  mockUpdateSystemConfig: vi.fn(),
+  mockGetWatchlist: vi.fn(),
+  mockAddToWatchlist: vi.fn(),
+  mockRemoveFromWatchlist: vi.fn(),
   mockDownloadSession: vi.fn(),
   mockFormatSessionAsMarkdown: vi.fn(),
 }));
@@ -65,6 +76,16 @@ vi.mock('../../api/agent', () => ({
     getSkills: mockGetSkills,
     deleteChatSession: mockDeleteChatSession,
     sendChat: mockSendChat,
+  },
+}));
+
+vi.mock('../../api/systemConfig', () => ({
+  systemConfigApi: {
+    getConfig: mockGetSystemConfig,
+    update: mockUpdateSystemConfig,
+    getWatchlist: mockGetWatchlist,
+    addToWatchlist: mockAddToWatchlist,
+    removeFromWatchlist: mockRemoveFromWatchlist,
   },
 }));
 
@@ -147,6 +168,28 @@ beforeEach(() => {
   });
   mockDeleteChatSession.mockResolvedValue(undefined);
   mockSendChat.mockResolvedValue({ success: true });
+  mockGetWatchlist.mockResolvedValue([]);
+  mockGetSystemConfig.mockResolvedValue({
+    configVersion: 'cfg-v1',
+    maskToken: 'mask-token',
+    items: [
+      {
+        key: 'AGENT_CONTEXT_COMPRESSION_ENABLED',
+        value: 'false',
+        rawValueExists: true,
+        isMasked: false,
+      },
+    ],
+  });
+  mockUpdateSystemConfig.mockResolvedValue({
+    success: true,
+    configVersion: 'cfg-v2',
+    appliedCount: 1,
+    skippedMaskedCount: 0,
+    reloadTriggered: true,
+    updatedKeys: ['AGENT_CONTEXT_COMPRESSION_ENABLED'],
+    warnings: [],
+  });
   mockDownloadSession.mockImplementation(() => {});
   mockFormatSessionAsMarkdown.mockReturnValue('# exported session');
 });
@@ -164,6 +207,91 @@ describe('ChatPage', () => {
     expect(screen.getByTestId('chat-message-scroll')).toBeInTheDocument();
     expect(mockLoadInitialSession).toHaveBeenCalled();
     expect(mockClearCompletionBadge).toHaveBeenCalled();
+  });
+
+  it('loads and saves the global context compression setting from the chat input area', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    const compressionToggle = await screen.findByRole('checkbox', { name: /上下文压缩/ });
+
+    await waitFor(() => {
+      expect(compressionToggle).not.toBeDisabled();
+    });
+
+    expect(compressionToggle).not.toBeChecked();
+
+    fireEvent.click(compressionToggle);
+
+    await waitFor(() => {
+      expect(mockUpdateSystemConfig).toHaveBeenCalledWith({
+        configVersion: 'cfg-v1',
+        maskToken: 'mask-token',
+        reloadNow: true,
+        items: [
+          {
+            key: 'AGENT_CONTEXT_COMPRESSION_ENABLED',
+            value: 'true',
+          },
+        ],
+      });
+    });
+
+    expect(compressionToggle).toBeChecked();
+    expect(screen.getByText('已启用')).toBeInTheDocument();
+  });
+
+  it('rolls back the context compression switch when saving fails', async () => {
+    mockGetSystemConfig.mockResolvedValue({
+      configVersion: 'cfg-v1',
+      maskToken: 'mask-token',
+      items: [
+        {
+          key: 'AGENT_CONTEXT_COMPRESSION_ENABLED',
+          value: 'true',
+          rawValueExists: true,
+          isMasked: false,
+        },
+      ],
+    });
+    mockUpdateSystemConfig.mockRejectedValue(
+      createParsedApiError({
+        title: '保存失败',
+        message: '配置服务不可用',
+        category: 'unknown',
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <ChatPage />
+      </MemoryRouter>
+    );
+
+    const compressionToggle = await screen.findByRole('checkbox', { name: /上下文压缩/ });
+
+    await waitFor(() => {
+      expect(compressionToggle).toBeChecked();
+      expect(compressionToggle).not.toBeDisabled();
+    });
+
+    fireEvent.click(compressionToggle);
+
+    await waitFor(() => {
+      expect(mockUpdateSystemConfig).toHaveBeenCalledWith(expect.objectContaining({
+        items: [
+          {
+            key: 'AGENT_CONTEXT_COMPRESSION_ENABLED',
+            value: 'false',
+          },
+        ],
+      }));
+      expect(compressionToggle).toBeChecked();
+    });
+    expect(screen.getByText('配置服务不可用')).toBeInTheDocument();
   });
 
   it('switches session when clicking anywhere on the session card', async () => {
@@ -805,5 +933,87 @@ describe('ChatPage', () => {
     fireEvent.click(jumpButton);
 
     expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+});
+
+describe('extractStockCodeFromMessage', () => {
+  it('returns 6-digit A-share code', () => {
+    expect(extractStockCodeFromMessage('分析 600519 趋势')).toBe('600519');
+    expect(extractStockCodeFromMessage('002460')).toBe('002460');
+  });
+
+  it('returns HK prefixed code (normalized)', () => {
+    expect(extractStockCodeFromMessage('分析 hk00700')).toBe('HK00700');
+  });
+
+  it('returns .HK suffix code (normalized to canonical)', () => {
+    expect(extractStockCodeFromMessage('00700.HK')).toBe('HK00700');
+    expect(extractStockCodeFromMessage('1810.HK')).toBe('HK01810');
+  });
+
+  it('returns code with .SH/.SZ suffix (normalized)', () => {
+    expect(extractStockCodeFromMessage('看 600519.SH')).toBe('600519');
+    expect(extractStockCodeFromMessage('000001.SZ')).toBe('000001');
+  });
+
+  it('returns US ticker like AAPL', () => {
+    expect(extractStockCodeFromMessage('分析 AAPL 走势')).toBe('AAPL');
+    expect(extractStockCodeFromMessage('TSLA')).toBe('TSLA');
+  });
+
+  it('does NOT return exchange prefixes as tickers', () => {
+    expect(extractStockCodeFromMessage('分析 SH 走势')).toBeNull();
+    expect(extractStockCodeFromMessage('看看 BJ')).toBeNull();
+    expect(extractStockCodeFromMessage('HK')).toBeNull();
+    expect(extractStockCodeFromMessage('买入 SZ')).toBeNull();
+    expect(extractStockCodeFromMessage('US 市场')).toBeNull();
+    expect(extractStockCodeFromMessage('SS')).toBeNull();
+  });
+
+  it('returns null for messages without stock codes', () => {
+    expect(extractStockCodeFromMessage('茅台现在适合买入吗')).toBeNull();
+    expect(extractStockCodeFromMessage('大盘走势如何')).toBeNull();
+  });
+
+  it('matches prefixed code like SH600519 (normalized)', () => {
+    expect(extractStockCodeFromMessage('分析 SH600519')).toBe('600519');
+  });
+
+  it('returns SZ-prefixed code when standalone (normalized)', () => {
+    expect(extractStockCodeFromMessage('SZ000001')).toBe('000001');
+  });
+});
+
+describe('watchlist button with code variants', () => {
+  it('shows "从自选删除" when canonical code is in watchlist and user inputs variant', async () => {
+    mockGetWatchlist.mockResolvedValue(['600519', 'HK01810']);
+
+    render(
+      <MemoryRouter>
+        <ChatPage />
+      </MemoryRouter>,
+    );
+
+    const textarea = await screen.findByPlaceholderText(/例如/);
+    fireEvent.change(textarea, { target: { value: '分析 600519.SH' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(await screen.findByText('从自选删除')).toBeInTheDocument();
+  });
+
+  it('shows "从自选删除" for HK variant codes', async () => {
+    mockGetWatchlist.mockResolvedValue(['HK01810']);
+
+    render(
+      <MemoryRouter>
+        <ChatPage />
+      </MemoryRouter>,
+    );
+
+    const textarea = await screen.findByPlaceholderText(/例如/);
+    fireEvent.change(textarea, { target: { value: '分析 1810.HK' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(await screen.findByText('从自选删除')).toBeInTheDocument();
   });
 });

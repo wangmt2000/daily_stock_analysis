@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from datetime import date, datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.agent.events import (
     EventMonitor,
@@ -27,6 +27,40 @@ from src.services.alert_indicators import (
     normalize_indicator_parameters,
     threshold_for_indicator,
 )
+from src.services.portfolio_alerts import (
+    DRY_RUN_TARGET_TIMEOUT_SECONDS,
+    DRY_RUN_TOTAL_TIMEOUT_SECONDS,
+    PORTFOLIO_ALERT_TYPES,
+    SYMBOL_BATCH_TARGET_SCOPES,
+    PortfolioRiskAlert,
+    RuntimeAlertPayload,
+    StaticAlertEvaluation,
+    aggregate_dry_run_results,
+    ensure_active_portfolio_account,
+    evaluate_portfolio_risk_alert,
+    evaluate_static_alert,
+    expand_symbol_targets,
+    make_portfolio_risk_payload,
+    make_static_payload,
+    normalize_batch_target_scope_target,
+    normalize_portfolio_alert_parameters,
+    portfolio_effective_target,
+    result_to_target_result,
+)
+from src.services.market_light_alerts import (
+    MARKET_ALERT_TYPES,
+    MARKET_LIGHT_DATA_SOURCE,
+    MarketLightAlert,
+    evaluate_market_light_alert,
+    make_market_light_payload,
+    normalize_market_alert_parameters,
+)
+from src.services.market_light_service import normalize_market_region
+from src.analysis_context_pack_overview import (
+    ANALYSIS_CONTEXT_PACK_OVERVIEW_KEY,
+    extract_analysis_context_pack_overview,
+)
+from src.market_phase_summary import MARKET_PHASE_SUMMARY_KEY, extract_market_phase_summary
 from src.storage import (
     AlertCooldownRecord,
     AlertNotificationRecord,
@@ -38,8 +72,9 @@ from src.utils.sanitize import sanitize_diagnostic_text
 
 
 LEGACY_RUNTIME_ALERT_TYPES = frozenset({"price_cross", "price_change_percent", "volume_spike"})
-SUPPORTED_ALERT_TYPES = LEGACY_RUNTIME_ALERT_TYPES | TECHNICAL_ALERT_TYPES
-SUPPORTED_TARGET_SCOPES = frozenset({"single_symbol"})
+SYMBOL_ALERT_TYPES = LEGACY_RUNTIME_ALERT_TYPES | TECHNICAL_ALERT_TYPES
+SUPPORTED_ALERT_TYPES = SYMBOL_ALERT_TYPES | PORTFOLIO_ALERT_TYPES | MARKET_ALERT_TYPES
+SUPPORTED_TARGET_SCOPES = frozenset({"single_symbol", "watchlist", "portfolio_holdings", "portfolio_account", "market"})
 SUPPORTED_SEVERITIES = frozenset({"info", "warning", "critical"})
 NULLABLE_RULE_UPDATE_FIELDS = frozenset({"cooldown_policy", "notification_policy"})
 
@@ -138,30 +173,40 @@ class AlertService:
         if row is None:
             raise AlertNotFoundError(f"Alert rule not found: {rule_id}")
 
-        rule = self._to_runtime_rule(row)
+        payloads = self.build_runtime_payloads(row)
         monitor = EventMonitor()
         try:
-            return asyncio.run(self._evaluate_rule(rule, monitor, daily_cache=None))
+            if len(payloads) == 1 and row.target_scope == "single_symbol":
+                result = asyncio.run(self._evaluate_rule(payloads[0].rule, monitor, daily_cache=None))
+                return self._dry_run_response_for_single(payloads[0], result, target_scope=row.target_scope)
+            results = asyncio.run(self._evaluate_runtime_payloads(payloads, monitor))
+            return aggregate_dry_run_results(rule_id, row.target_scope, results)
         except Exception as exc:
             sanitized_message = self._sanitize_text(str(exc) or "Alert evaluation failed")
             return {
                 "rule_id": rule_id,
+                "target_scope": row.target_scope,
                 "status": "evaluation_error",
                 "record_status": "failed",
                 "triggered": False,
                 "observed_value": None,
-                "threshold": self._threshold_for_rule(rule),
-                "data_source": self._data_source_for_rule(rule),
+                "threshold": None,
+                "data_source": None,
                 "data_timestamp": None,
                 "reason": sanitized_message,
                 "message": sanitized_message,
+                "evaluated_count": 0,
+                "triggered_count": 0,
+                "degraded_count": 0,
+                "skipped_count": 0,
+                "target_results": [],
             }
 
     async def _evaluate_rule(
         self,
         rule,
         monitor: EventMonitor,
-        daily_cache: Optional[Dict[tuple[str, int], Any]] = None,
+        daily_cache: Optional[Dict[Any, Any]] = None,
     ) -> Dict[str, Any]:
         if isinstance(rule, PriceAlert):
             return await self._evaluate_price(rule, monitor)
@@ -171,7 +216,96 @@ class AlertService:
             return await self._evaluate_volume(rule)
         if isinstance(rule, TechnicalIndicatorAlert):
             return await self._evaluate_technical_indicator(rule, daily_cache=daily_cache)
+        if isinstance(rule, PortfolioRiskAlert):
+            return await asyncio.to_thread(evaluate_portfolio_risk_alert, rule)
+        if isinstance(rule, MarketLightAlert):
+            return await asyncio.to_thread(evaluate_market_light_alert, rule, cache=daily_cache)
+        if isinstance(rule, StaticAlertEvaluation):
+            return evaluate_static_alert(rule)
         return self._evaluation_error(rule, f"unsupported runtime alert type: {rule.alert_type}")
+
+    async def _evaluate_runtime_payloads(
+        self,
+        payloads: List[RuntimeAlertPayload],
+        monitor: EventMonitor,
+    ) -> List[Dict[str, Any]]:
+        semaphore = asyncio.Semaphore(8)
+        daily_cache: Dict[Any, Any] = {}
+
+        async def _evaluate_one(payload: RuntimeAlertPayload) -> Dict[str, Any]:
+            async with semaphore:
+                try:
+                    result = await asyncio.wait_for(
+                        self._evaluate_rule(payload.rule, monitor, daily_cache=daily_cache),
+                        timeout=DRY_RUN_TARGET_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    result = {
+                        "rule_id": self._runtime_rule_id(payload.rule),
+                        "status": "not_triggered",
+                        "record_status": "skipped",
+                        "triggered": False,
+                        "observed_value": None,
+                        "threshold": self._threshold_for_rule(payload.rule),
+                        "data_source": self._data_source_for_rule(payload.rule),
+                        "data_timestamp": None,
+                        "reason": "dry-run evaluation timed out",
+                        "message": "dry-run evaluation timed out",
+                    }
+                except Exception as exc:
+                    sanitized_message = self._sanitize_text(str(exc) or "Alert evaluation failed")
+                    result = {
+                        "rule_id": self._runtime_rule_id(payload.rule),
+                        "status": "evaluation_error",
+                        "record_status": "failed",
+                        "triggered": False,
+                        "observed_value": None,
+                        "threshold": self._threshold_for_rule(payload.rule),
+                        "data_source": self._data_source_for_rule(payload.rule),
+                        "data_timestamp": None,
+                        "reason": sanitized_message,
+                        "message": sanitized_message,
+                    }
+                return result_to_target_result(payload, result)
+
+        tasks = [asyncio.create_task(_evaluate_one(payload)) for payload in payloads]
+        done, pending = await asyncio.wait(tasks, timeout=DRY_RUN_TOTAL_TIMEOUT_SECONDS)
+        for task in pending:
+            task.cancel()
+        output: List[Dict[str, Any]] = []
+        for task in done:
+            output.append(task.result())
+        for task, payload in zip(tasks, payloads):
+            if task in pending:
+                output.append({
+                    "target": payload.effective_target,
+                    "display_target": payload.display_target,
+                    "status": "not_triggered",
+                    "record_status": "skipped",
+                    "triggered": False,
+                    "observed_value": None,
+                    "threshold": None,
+                    "message": "dry-run evaluation timed out",
+                })
+        return output
+
+    @staticmethod
+    def _dry_run_response_for_single(payload: RuntimeAlertPayload, result: Dict[str, Any], *, target_scope: str) -> Dict[str, Any]:
+        target_result = result_to_target_result(payload, result)
+        response = {
+            "rule_id": result.get("rule_id") or 0,
+            "target_scope": target_scope,
+            "status": result.get("status") or "evaluation_error",
+            "triggered": bool(result.get("triggered")),
+            "observed_value": result.get("observed_value"),
+            "message": result.get("message") or result.get("reason") or "",
+            "evaluated_count": 1,
+            "triggered_count": 1 if result.get("triggered") else 0,
+            "degraded_count": 1 if result.get("record_status") == "degraded" else 0,
+            "skipped_count": 1 if result.get("record_status") == "skipped" else 0,
+            "target_results": [target_result],
+        }
+        return response
 
     async def _evaluate_price(self, rule: PriceAlert, monitor: EventMonitor) -> Dict[str, Any]:
         threshold = float(rule.price)
@@ -560,6 +694,12 @@ class AlertService:
             return abs(float(rule.change_pct))
         if isinstance(rule, TechnicalIndicatorAlert):
             return threshold_for_indicator(rule.alert_type, rule.indicator_params)
+        if isinstance(rule, PortfolioRiskAlert):
+            return None
+        if isinstance(rule, MarketLightAlert):
+            if rule.alert_type == "market_light_score_drop":
+                return float(rule.parameters.get("min_drop", 0) or 0)
+            return None
         return None
 
     @staticmethod
@@ -570,6 +710,10 @@ class AlertService:
             return "daily_data"
         if isinstance(rule, TechnicalIndicatorAlert):
             return "daily_data"
+        if isinstance(rule, PortfolioRiskAlert):
+            return "portfolio_risk"
+        if isinstance(rule, MarketLightAlert):
+            return MARKET_LIGHT_DATA_SOURCE
         return None
 
     @classmethod
@@ -734,13 +878,15 @@ class AlertService:
         alert_type = str(payload.get("alert_type") or "").strip().lower()
         if alert_type not in SUPPORTED_ALERT_TYPES:
             raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {alert_type or '<empty>'}")
+        self._validate_scope_alert_type(target_scope, alert_type)
 
         severity = str(payload.get("severity") or "warning").strip().lower()
         if severity not in SUPPORTED_SEVERITIES:
             raise AlertServiceError(f"unsupported severity: {severity}")
 
         parameters = self._normalize_parameters(alert_type, payload.get("parameters") or {})
-        if alert_type in LEGACY_RUNTIME_ALERT_TYPES:
+        target = self._normalize_target(target_scope, target)
+        if target_scope == "single_symbol" and alert_type in LEGACY_RUNTIME_ALERT_TYPES:
             serialized_rule = {"stock_code": target, "alert_type": alert_type, **parameters}
             try:
                 validate_event_alert_rule(serialized_rule)
@@ -768,6 +914,39 @@ class AlertService:
         for field_name, value in payload.items():
             if value is None and field_name not in NULLABLE_RULE_UPDATE_FIELDS:
                 raise AlertServiceError(f"{field_name} must not be null")
+
+    @staticmethod
+    def _validate_scope_alert_type(target_scope: str, alert_type: str) -> None:
+        if target_scope == "market":
+            if alert_type not in MARKET_ALERT_TYPES:
+                raise AlertServiceError("market target_scope only supports market alert types")
+            return
+        if alert_type in MARKET_ALERT_TYPES:
+            raise AlertServiceError("market alert types require target_scope=market")
+        if target_scope == "portfolio_account":
+            if alert_type not in PORTFOLIO_ALERT_TYPES:
+                raise AlertServiceError("portfolio_account only supports portfolio alert types")
+            return
+        if alert_type in PORTFOLIO_ALERT_TYPES:
+            raise AlertServiceError("portfolio alert types require target_scope=portfolio_account")
+        if target_scope in {"single_symbol", "watchlist", "portfolio_holdings"} and alert_type not in SYMBOL_ALERT_TYPES:
+            raise UnsupportedAlertTypeError(f"unsupported alert_type for {target_scope}: {alert_type}")
+
+    def _normalize_target(self, target_scope: str, target: str) -> str:
+        if target_scope == "single_symbol":
+            return target.strip()
+        if target_scope == "market":
+            try:
+                return normalize_market_region(target)
+            except ValueError as exc:
+                raise AlertServiceError(str(exc)) from exc
+        try:
+            normalized = normalize_batch_target_scope_target(target_scope, target)
+            if target_scope in {"portfolio_holdings", "portfolio_account"}:
+                ensure_active_portfolio_account(normalized)
+            return normalized
+        except ValueError as exc:
+            raise AlertServiceError(str(exc)) from exc
 
     def _normalize_parameters(self, alert_type: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(parameters, dict):
@@ -797,6 +976,18 @@ class AlertService:
             except ValueError as exc:
                 raise AlertServiceError(str(exc)) from exc
 
+        if alert_type in PORTFOLIO_ALERT_TYPES:
+            try:
+                return normalize_portfolio_alert_parameters(alert_type, parameters)
+            except ValueError as exc:
+                raise AlertServiceError(str(exc)) from exc
+
+        if alert_type in MARKET_ALERT_TYPES:
+            try:
+                return normalize_market_alert_parameters(alert_type, parameters)
+            except ValueError as exc:
+                raise AlertServiceError(str(exc)) from exc
+
         raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {alert_type}")
 
     @staticmethod
@@ -809,37 +1000,151 @@ class AlertService:
             raise AlertServiceError(f"{field_name} must be > 0")
         return number
 
+    def build_runtime_payloads(
+        self,
+        row: AlertRuleRecord,
+        *,
+        config: Optional[Any] = None,
+        include_overflow_payload: bool = True,
+    ) -> List[RuntimeAlertPayload]:
+        data = self._serialize_rule_base(row)
+        parent_key = self._semantic_key(
+            data["target_scope"],
+            data["target"],
+            data["alert_type"],
+            data["parameters"],
+        )
+
+        if data["alert_type"] in PORTFOLIO_ALERT_TYPES:
+            return [make_portfolio_risk_payload(parent_key=parent_key, data=data)]
+
+        if data["alert_type"] in MARKET_ALERT_TYPES:
+            return [make_market_light_payload(parent_key=parent_key, data=data, config=config)]
+
+        if data["target_scope"] in SYMBOL_BATCH_TARGET_SCOPES:
+            if config is None:
+                from src.config import get_config
+
+                config = get_config()
+            try:
+                targets, overflow_count = expand_symbol_targets(
+                    target_scope=data["target_scope"],
+                    target=data["target"],
+                    config=config,
+                )
+            except Exception as exc:
+                return [
+                    make_static_payload(
+                        parent_key=parent_key,
+                        rule_id=int(data["id"] or 0),
+                        alert_type=data["alert_type"],
+                        effective_target=f"{data['target_scope']}:{data['target']}",
+                        display_target=f"{data['target_scope']} {data['target']}",
+                        message=self._sanitize_text(str(exc) or "target expansion failed"),
+                        record_status="failed",
+                    )
+                ]
+
+            payloads: List[RuntimeAlertPayload] = []
+            for target in targets:
+                child_data = dict(data)
+                child_data["target"] = target.symbol
+                rule = self._to_runtime_rule(row, child_data)
+                effective_target = target.symbol
+                payloads.append(
+                    RuntimeAlertPayload(
+                        key=f"{parent_key}|{effective_target}",
+                        rule=rule,
+                        effective_target=effective_target,
+                        display_target=target.display_target,
+                    )
+                )
+            if overflow_count:
+                if include_overflow_payload:
+                    payloads.append(
+                        make_static_payload(
+                            parent_key=parent_key,
+                            rule_id=int(data["id"] or 0),
+                            alert_type=data["alert_type"],
+                            effective_target=f"{data['target_scope']}:{data['target']}:overflow",
+                            display_target="展开目标超限",
+                            message=f"Skipped {overflow_count} targets over soft cap",
+                            record_status="degraded",
+                        )
+                    )
+                logger.warning(
+                    "[AlertService] Alert rule %s expansion exceeded soft cap by %s targets",
+                    data["id"],
+                    overflow_count,
+                )
+            if not payloads:
+                scope_label = "watchlist" if data["target_scope"] == "watchlist" else "portfolio holdings"
+                payloads.append(
+                    make_static_payload(
+                        parent_key=parent_key,
+                        rule_id=int(data["id"] or 0),
+                        alert_type=data["alert_type"],
+                        effective_target=f"{data['target_scope']}:{data['target']}",
+                        display_target=scope_label,
+                        message=f"No {scope_label} targets to evaluate",
+                        record_status="skipped",
+                    )
+                )
+            return payloads
+
+        rule = self._to_runtime_rule(row, data)
+        effective_target = str(data["target"])
+        return [
+            RuntimeAlertPayload(
+                key=parent_key,
+                rule=rule,
+                effective_target=effective_target,
+                display_target=effective_target,
+            )
+        ]
+
     def _to_runtime_rule(self, row: AlertRuleRecord, data: Optional[Dict[str, Any]] = None):
         data = data or self._serialize_rule_base(row)
         parameters = data["parameters"]
+        metadata = {
+            "persisted_rule_id": data["id"],
+            "target_scope": data.get("target_scope"),
+            "parent_target": row.target,
+            "effective_target": data.get("target"),
+        }
         if data["alert_type"] == "price_cross":
             return PriceAlert(
                 stock_code=data["target"],
                 direction=str(parameters["direction"]),
                 price=float(parameters["price"]),
-                metadata={"persisted_rule_id": data["id"]},
+                metadata=metadata,
             )
         if data["alert_type"] == "price_change_percent":
             return PriceChangeAlert(
                 stock_code=data["target"],
                 direction=str(parameters["direction"]),
                 change_pct=float(parameters["change_pct"]),
-                metadata={"persisted_rule_id": data["id"]},
+                metadata=metadata,
             )
         if data["alert_type"] == "volume_spike":
             return VolumeAlert(
                 stock_code=data["target"],
                 multiplier=float(parameters["multiplier"]),
-                metadata={"persisted_rule_id": data["id"]},
+                metadata=metadata,
             )
         if data["alert_type"] in TECHNICAL_ALERT_TYPES:
             return TechnicalIndicatorAlert(
                 stock_code=data["target"],
                 alert_type=data["alert_type"],
                 indicator_params=parameters,
-                metadata={"persisted_rule_id": data["id"]},
+                metadata=metadata,
             )
         raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {data['alert_type']}")
+
+    @staticmethod
+    def _semantic_key(target_scope: str, target: str, alert_type: str, parameters: Dict[str, Any]) -> str:
+        canonical_params = json.dumps(parameters or {}, ensure_ascii=False, sort_keys=True)
+        return f"{target_scope}:{target}:{alert_type}:{canonical_params}"
 
     def _serialize_rule(self, row: AlertRuleRecord) -> Dict[str, Any]:
         data = self._serialize_rule_base(row)
@@ -870,9 +1175,14 @@ class AlertService:
 
     def _cooldown_summary_for_rule(self, row: AlertRuleRecord) -> Dict[str, Any]:
         try:
+            cooldown_target = (
+                portfolio_effective_target(str(row.target))
+                if str(row.target_scope) == "portfolio_account"
+                else str(row.target)
+            )
             cooldown = self.repo.get_rule_cooldown_summary(
                 rule_id=int(row.id),
-                target=str(row.target),
+                target=cooldown_target,
                 severity=str(row.severity) if row.severity else None,
             )
         except Exception as exc:
@@ -900,6 +1210,7 @@ class AlertService:
         }
 
     def _serialize_trigger(self, row: AlertTriggerRecord) -> Dict[str, Any]:
+        visibility = self._parse_analysis_visibility(row.diagnostics)
         return {
             "id": row.id,
             "rule_id": row.rule_id,
@@ -912,7 +1223,39 @@ class AlertService:
             "triggered_at": row.triggered_at.isoformat() if row.triggered_at else None,
             "status": row.status,
             "diagnostics": self._sanitize_text(row.diagnostics) if row.diagnostics else None,
+            "market_phase_summary": visibility.get("market_phase_summary"),
+            "analysis_context_pack_overview": visibility.get("analysis_context_pack_overview"),
+            "analysis_visibility_source": visibility.get("analysis_visibility_source"),
         }
+
+    @staticmethod
+    def _parse_analysis_visibility(diagnostics: Optional[str]) -> Dict[str, Any]:
+        result = {
+            "market_phase_summary": None,
+            "analysis_context_pack_overview": None,
+            "analysis_visibility_source": None,
+        }
+        if not diagnostics:
+            return result
+        try:
+            parsed = json.loads(diagnostics)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result["analysis_visibility_source"] = "legacy_text"
+            return result
+        if not isinstance(parsed, dict):
+            result["analysis_visibility_source"] = "legacy_text"
+            return result
+        visibility = parsed.get("analysis_visibility")
+        if not isinstance(visibility, dict):
+            return result
+        phase = extract_market_phase_summary({MARKET_PHASE_SUMMARY_KEY: visibility.get("market_phase_summary")})
+        overview = extract_analysis_context_pack_overview(
+            {ANALYSIS_CONTEXT_PACK_OVERVIEW_KEY: visibility.get("analysis_context_pack_overview")}
+        )
+        result["market_phase_summary"] = phase
+        result["analysis_context_pack_overview"] = overview
+        result["analysis_visibility_source"] = visibility.get("source")
+        return result
 
     def _serialize_notification(self, row: AlertNotificationRecord) -> Dict[str, Any]:
         return {
@@ -946,6 +1289,19 @@ class AlertService:
             return f"{target} KDJ {parameters['direction']}"
         if alert_type == "cci_threshold":
             return f"{target} CCI{parameters['period']} {parameters['direction']} {parameters['threshold']}"
+        if alert_type == "portfolio_stop_loss":
+            return f"{target} portfolio stop loss {parameters.get('mode', 'near')}"
+        if alert_type == "portfolio_concentration":
+            return f"{target} portfolio concentration"
+        if alert_type == "portfolio_drawdown":
+            return f"{target} portfolio drawdown"
+        if alert_type == "portfolio_price_stale":
+            return f"{target} portfolio stale price"
+        if alert_type == "market_light_status":
+            statuses = ",".join(parameters.get("statuses") or ["red", "yellow"])
+            return f"{target} market light status {statuses}"
+        if alert_type == "market_light_score_drop":
+            return f"{target} market light score drop {parameters['min_drop']}"
         return f"{target} {alert_type}"
 
     @staticmethod

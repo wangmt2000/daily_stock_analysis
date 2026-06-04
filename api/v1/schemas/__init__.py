@@ -14,6 +14,7 @@ from api.v1.schemas.common import (
     ErrorResponse,
     SuccessResponse,
 )
+from api.v1.schemas.market_phase import MarketPhaseSummary
 from api.v1.schemas.analysis import (
     AnalyzeRequest,
     AnalysisResultResponse,
@@ -82,6 +83,7 @@ from api.v1.schemas.portfolio import (
     PortfolioCashLedgerListResponse,
     PortfolioCorporateActionListItem,
     PortfolioCorporateActionListResponse,
+    PortfolioPositionAnalysisRequest,
     PortfolioPositionItem,
     PortfolioAccountSnapshot,
     PortfolioSnapshotResponse,
@@ -112,6 +114,8 @@ __all__ = [
     "HealthResponse",
     "ErrorResponse",
     "SuccessResponse",
+    # market phase
+    "MarketPhaseSummary",
     # analysis
     "AnalyzeRequest",
     "AnalysisResultResponse",
@@ -175,6 +179,7 @@ __all__ = [
     "PortfolioCashLedgerListResponse",
     "PortfolioCorporateActionListItem",
     "PortfolioCorporateActionListResponse",
+    "PortfolioPositionAnalysisRequest",
     "PortfolioPositionItem",
     "PortfolioAccountSnapshot",
     "PortfolioSnapshotResponse",

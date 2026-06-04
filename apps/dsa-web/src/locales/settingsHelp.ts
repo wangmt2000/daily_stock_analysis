@@ -119,6 +119,28 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响对应 provider 的模型调用、连接测试和可用模型发现。'],
     notes: ['不要在 issue、日志或截图里暴露真实 Key。'],
   },
+  'settings.ai_model.anspire_llm': {
+    title: 'Anspire LLM 网关',
+    summary: '使用 Anspire API Key 作为 OpenAI-compatible 模型网关的兼容入口。',
+    usage: 'ANSPIRE_LLM_ENABLED 控制是否启用该兼容路径；ANSPIRE_LLM_BASE_URL 指定网关地址；ANSPIRE_LLM_MODEL 指定未显式选择主模型时的默认模型。',
+    valueNotes: [
+      '该路径主要用于兼容未配置 LLM_CHANNELS 或 LITELLM_MODEL 的简化场景。',
+      '如果已配置 LITELLM_CONFIG、LLM_CHANNELS 或明确的 LITELLM_MODEL，运行时会按既有优先级选择模型来源。',
+    ],
+    impact: ['影响 Anspire API Key 参与 LLM 调用时的默认模型和网关地址。'],
+    notes: ['不要把 Base URL 改成其他 provider 的地址后继续复用 Anspire Key。'],
+  },
+  'settings.ai_model.legacy_provider_params': {
+    title: 'Legacy Provider 参数',
+    summary: '为旧版 provider 专用配置路径设置模型名、温度或 token 上限。',
+    usage: '这些字段用于兼容历史配置；新配置优先使用 LITELLM_MODEL、LITELLM_FALLBACK_MODELS、VISION_MODEL、LLM_TEMPERATURE 或 LLM Channels。',
+    valueNotes: [
+      '启用 LLM Channels 后，相关 legacy 字段通常会从通用表单隐藏。',
+      '字段只影响对应 provider 的 legacy 路径，不会自动迁移到渠道配置。',
+    ],
+    impact: ['影响未使用渠道/YAML 路由时的 legacy provider 模型选择和采样参数。'],
+    notes: ['如果同时维护 legacy 字段和 Channels，请以设置页实际显示的运行时模型来源为准。'],
+  },
   'settings.ai_model.OPENAI_BASE_URL': {
     title: 'OpenAI 兼容 Base URL',
     summary: '指定 OpenAI-compatible 服务的接口根地址。',
@@ -137,6 +159,38 @@ const settingsHelpZhCN: SettingsHelpMap = {
     valueNotes: ['不同 Tushare 权限会影响可用接口和数据完整度。'],
     impact: ['影响部分 A 股基础数据、股票列表和相关增强数据获取。'],
     notes: ['不要把 token 提交到仓库或公开日志。'],
+  },
+  'settings.data_source.TICKFLOW_API_KEY': {
+    title: 'TickFlow API Key',
+    summary: '用于增强大盘复盘中的指数、市场统计等数据。',
+    usage: '在 TickFlow 获取 API Key 后填入；未配置时系统会继续使用其他可用数据源和降级路径。',
+    valueNotes: ['该 Key 是可选增强项，不是运行主分析流程的必填项。'],
+    impact: ['影响大盘复盘和市场统计增强数据的覆盖度。'],
+    notes: ['不要在 issue、日志或截图中暴露真实 Key。'],
+  },
+  'settings.data_source.stock_index_remote': {
+    title: '股票索引远程更新',
+    summary: '从 GitHub main 分支获取最新股票自动补全索引，并缓存到本地。',
+    usage: '默认开启；如运行环境无法访问 GitHub raw，可关闭开关。远程 URL、检查频率和超时时间均为系统内置值。',
+    valueNotes: ['系统默认 48 小时检查一次更新，避免频繁访问 GitHub。', '远程检查失败不会阻断 WebUI 或分析流程。'],
+    impact: ['影响 Web 自动补全和后端股票名称解析使用的股票简称新鲜度。'],
+    notes: ['远程下载失败时会继续使用已有缓存或随应用打包的内置索引。'],
+  },
+  'settings.data_source.ALPHASIFT_ENABLED': {
+    title: 'AlphaSift 选股',
+    summary: '控制是否启用可选的 AlphaSift 第三方选股页。',
+    usage: '默认关闭。设为 true 后，Web 会检查 alphasift.dsa_adapter；若缺失，会使用受信任来源尝试自动安装。',
+    valueNotes: ['自动安装会在 DSA 后端 Python 环境执行，并且只允许使用默认受信任安装来源。', '选股结果仅用于研究辅助，不构成投资建议。'],
+    impact: ['影响 Web 选股入口、AlphaSift 策略读取和选股 API。'],
+    notes: ['AlphaSift 复用 DSA 环境变量；关闭时不影响原有分析、报告和通知流程。'],
+  },
+  'settings.data_source.ALPHASIFT_INSTALL_SPEC': {
+    title: 'AlphaSift 安装来源',
+    summary: '配置源码部署或打包阶段使用的受信任 AlphaSift pip 来源。',
+    usage: '默认固定到已验证的 ZhuLinsen/alphasift commit；开启 AlphaSift 时若适配层缺失，会用该来源自动安装。',
+    valueNotes: ['自定义本地路径或 wheel 不会走自动安装；请先手动安装到当前后端 Python 环境。', '该字段按敏感值处理，设置页不会直接展示完整内容。'],
+    impact: ['影响 AlphaSift 适配层可用性检查和桌面打包预置。'],
+    notes: ['请确认来源可信；AlphaSift 是第三方选股能力，启用前应理解相关风险。'],
   },
   'settings.data_source.REALTIME_SOURCE_PRIORITY': {
     title: '实时行情源优先级',
@@ -181,6 +235,22 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响报告中的筹码分布、成本区间等相关判断。'],
     notes: ['该能力依赖外部数据源稳定性。'],
   },
+  'settings.data_source.BIAS_THRESHOLD': {
+    title: '乖离率阈值',
+    summary: '设置股价偏离 MA5 的风险提示阈值。',
+    usage: '填写百分比数值；当价格偏离 MA5 超过阈值时，报告会提示避免追高或注意回归风险。',
+    valueNotes: ['强趋势股票可能按运行时规则适当放宽阈值。'],
+    impact: ['影响技术分析中追高风险、均线偏离和操作建议的提示强度。'],
+    notes: ['阈值过低会增加风险提示噪声，过高可能弱化追高提醒。'],
+  },
+  'settings.data_source.pytdx': {
+    title: 'Pytdx 通达信服务器',
+    summary: '配置通达信行情服务器地址，覆盖内置默认服务器。',
+    usage: '可分别填写 PYTDX_HOST/PYTDX_PORT，也可使用 PYTDX_SERVERS 填写多个 ip:port；PYTDX_SERVERS 优先级更高。',
+    valueNotes: ['多个服务器使用英文逗号分隔，系统会按既有数据源逻辑尝试连接。'],
+    impact: ['影响使用 Pytdx 数据源时的行情连接目标和可用性。'],
+    notes: ['服务器不可达时应依赖数据源 fallback，不建议只配置单个不稳定地址。'],
+  },
   'settings.data_source.news_window': {
     title: '新闻时间窗口',
     summary: '控制纳入分析上下文的新闻时效范围。',
@@ -204,6 +274,41 @@ const settingsHelpZhCN: SettingsHelpMap = {
     notes: [
       '不要把 FEISHU_APP_SECRET 当作 FEISHU_WEBHOOK_SECRET 使用。',
       '如果飞书侧配置 IP 白名单，需要确认当前运行环境出口 IP 已加入白名单。',
+    ],
+  },
+  'settings.notification.FEISHU_STREAM_ENABLED': {
+    title: '飞书 Stream 模式',
+    summary: '启用飞书应用机器人 / Stream Bot 长连接模式，不是飞书群 Webhook 推送开关。',
+    usage: '只有在已创建飞书应用、完成应用发布、权限和事件订阅配置后才开启；同时需要 FEISHU_APP_ID 和 FEISHU_APP_SECRET。',
+    valueNotes: [
+      'true 表示允许运行时使用应用机器人 Stream 模式。',
+      'false 表示不启用 Stream 模式；群消息推送仍应使用 FEISHU_WEBHOOK_URL。',
+      '只填写 App ID/Secret 或只开启 Stream，不等于启用群 Webhook 推送。',
+    ],
+    impact: [
+      '影响飞书应用机器人交互或 Stream Bot 链路。',
+      '不会改变 FEISHU_WEBHOOK_URL 的群机器人 Webhook 推送语义。',
+    ],
+    notes: [
+      '保存后通常需要重启相关 bot/服务进程，已运行的长连接不会自动重建。',
+      '失败只应影响飞书应用机器人链路，不应拖垮主分析流程。',
+    ],
+  },
+  'settings.notification.DINGTALK_STREAM_ENABLED': {
+    title: '钉钉 Stream 模式',
+    summary: '启用钉钉应用机器人长连接模式，不是普通钉钉群机器人 Webhook 开关。',
+    usage: '需要先在钉钉开放平台配置应用机器人，并填写 DINGTALK_APP_KEY 和 DINGTALK_APP_SECRET。',
+    valueNotes: [
+      'true 表示允许运行时使用钉钉应用机器人 Stream/长连接模式。',
+      'false 表示不启用该长连接模式；自定义 Webhook 中的钉钉群机器人地址仍走 CUSTOM_WEBHOOK_URLS。',
+    ],
+    impact: [
+      '影响钉钉应用机器人交互或长连接链路。',
+      '不会改变自定义 Webhook 通知的发送路径。',
+    ],
+    notes: [
+      '保存后通常需要重启相关 bot/服务进程，已运行的长连接不会自动重建。',
+      '不要把 Stream 模式和群机器人 Webhook 混为一条配置路径。',
     ],
   },
   'settings.notification.webhooks': {
@@ -299,6 +404,54 @@ const settingsHelpZhCN: SettingsHelpMap = {
     ],
     impact: ['影响重启后浏览器访问 WebUI 的 URL 端口。'],
     notes: ['修改 WEBUI_PORT 后需要重启当前进程、Docker 容器或服务管理器才会生效。'],
+  },
+  'settings.system.LOG_DIR': {
+    title: '日志目录',
+    summary: '配置应用日志输出目录。',
+    usage: '填写运行用户或容器可写的目录路径；本地默认 ./logs，容器内常见路径为 /app/logs。',
+    valueNotes: [
+      '相对路径按运行进程的工作目录解析。',
+      'Longbridge SDK 等组件也可能在该目录下写入日志文件。',
+    ],
+    impact: [
+      '影响应用日志、部分 SDK 日志和排障文件的落盘位置。',
+    ],
+    notes: [
+      '修改后通常需要重启进程，已初始化的 logger 不一定会立即切换目录。',
+      'Docker、桌面端和本地源码运行的可写路径不同，保存前需确认权限。',
+    ],
+  },
+  'settings.system.WEBUI_ENABLED': {
+    title: '默认启动 WebUI',
+    summary: '控制启动期是否默认进入 WebUI/API 服务模式。',
+    usage: '这是兼容旧启动入口的启动期配置；保存后不会让当前页面立即启动或关闭 WebUI。',
+    valueNotes: [
+      'true 表示后续按默认入口启动时倾向进入 WebUI/API 服务模式。',
+      'false 表示保持非 WebUI 默认启动行为；显式 CLI 参数仍可能覆盖该配置。',
+    ],
+    impact: [
+      '影响 main.py 或相关服务入口下一次启动时的默认模式。',
+    ],
+    notes: [
+      '保存后需要重启相关进程才会生效。',
+      '不要把该开关理解为当前 Web 设置页的即时启停按钮。',
+    ],
+  },
+  'settings.system.WEBUI_AUTO_BUILD': {
+    title: '启动前自动构建前端',
+    summary: '控制后端启动 WebUI 前是否自动检查并构建前端静态产物。',
+    usage: '源码部署通常保持 true；已预构建镜像、离线环境或受限环境可设为 false。',
+    valueNotes: [
+      'true 时启动流程会尝试准备 apps/dsa-web 静态产物。',
+      'false 时只检查已有构建产物；如果产物缺失，WebUI 可能不可用或只看到后端警告。',
+    ],
+    impact: [
+      '影响 WebUI 下一次启动时前端静态资源是否自动准备。',
+    ],
+    notes: [
+      '保存后不会立即触发构建，需要重启相关后端进程。',
+      '在 Docker 或发布包中关闭前，请确认构建产物已经随镜像或安装包提供。',
+    ],
   },
   'settings.system.ADMIN_AUTH_ENABLED': {
     title: 'Web 登录保护',
@@ -446,6 +599,392 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响图片/截图相关提取和视觉分析能力。'],
     notes: ['DeepSeek 等文本模型不一定支持 vision，请用能力检测确认。'],
   },
+  // ------------------------------------------------------------------
+  // Agent configuration
+  // ------------------------------------------------------------------
+  'settings.agent.AGENT_MODE': {
+    title: 'Agent 模式',
+    summary: '启用 ReAct Agent 进行股票分析，替代普通分析流程。',
+    usage: '开启后，系统使用多步推理 Agent 替代单轮 LLM 分析，可调用工具、检索新闻和执行复杂推理链路。',
+    valueNotes: [
+      '关闭时使用普通单轮 LLM 分析模式。',
+      'Agent 模式可配合 AGENT_ARCH 选择 single（经典 ReAct）或 multi（编排器 pipeline）。',
+    ],
+    impact: ['影响个股分析流程、报告生成质量和 LLM 调用次数。'],
+    notes: ['Agent 模式会消耗更多 token 和时间，适合需要深度推理的场景。'],
+  },
+  'settings.agent.AGENT_MAX_STEPS': {
+    title: 'Agent 最大推理步数',
+    summary: '控制 Agent 推理链路的最大步数上限。',
+    usage: '设为默认值时，每个子 Agent 使用各自预设步数；调高后所有子 Agent 统一提升；调低后会裁剪子 Agent 的预设步数。',
+    valueNotes: [
+      '步数越高，推理越深入，但耗时和 token 消耗也越大。',
+      '部分复杂场景（如多策略编排）可能需要更高步数。',
+    ],
+    impact: ['影响 Agent 推理深度、耗时和 token 消耗。'],
+    notes: ['设为 0 或极低值可能导致推理不完整。'],
+  },
+  'settings.agent.AGENT_SKILLS': {
+    title: 'Agent 策略列表',
+    summary: '指定 Agent 使用的策略技能列表。',
+    usage: '使用英文逗号分隔策略名；留空使用默认策略（bull_trend）；设为 all 启用全部策略。',
+    valueNotes: [
+      '设置具体策略（非 all）时，定时任务会自动使用 Agent pipeline。',
+      '可用策略取决于 strategies/ 目录中的定义文件。',
+    ],
+    impact: ['影响 Agent 分析时使用的策略选择和最终信号综合。'],
+    notes: ['自定义策略需放在 AGENT_SKILL_DIR 指定的目录中。'],
+  },
+  'settings.agent.AGENT_SKILL_DIR': {
+    title: '策略目录',
+    summary: '存放 Agent 策略定义文件的目录。',
+    usage: '填写相对于项目根目录的路径；目录内可放置 YAML 或 SKILL.md 格式的策略定义。',
+    valueNotes: ['默认 strategies 目录包含内置策略。'],
+    impact: ['影响 Agent 可发现的策略列表。'],
+    notes: ['修改目录后需要确保新目录中包含有效的策略定义文件。'],
+  },
+  'settings.agent.AGENT_NL_ROUTING': {
+    title: '自然语言路由',
+    summary: '允许 bot dispatcher 通过自然语言识别将股票查询路由到 Agent。',
+    usage: '开启后，私聊中高置信度的股票相关消息（或群聊 @机器人）会自动路由到 Agent，无需显式命令。',
+    valueNotes: ['仅影响 bot 接入场景（飞书、Telegram 等），不影响 Web API。'],
+    impact: ['影响 bot 交互体验和 Agent 触发方式。'],
+    notes: ['需要同时启用 Agent 模式和对应 bot 渠道。'],
+  },
+  'settings.agent.AGENT_ARCH': {
+    title: 'Agent 架构',
+    summary: '选择 Agent 执行架构。',
+    usage: 'single 使用经典 ReAct 执行器；multi 使用编排器 pipeline，可分配多个专项子 Agent。',
+    valueNotes: [
+      'single 适合简单场景，推理链路短。',
+      'multi 适合复杂分析，支持技术分析、情报收集、风险评估等专项子 Agent 协作。',
+    ],
+    impact: ['影响 Agent 分析流程、子 Agent 调度和最终报告结构。'],
+    notes: ['选择 multi 后可通过 AGENT_ORCHESTRATOR_MODE 调整 pipeline 模式。'],
+  },
+  'settings.agent.AGENT_ORCHESTRATOR_MODE': {
+    title: '编排器模式',
+    summary: '仅在 AGENT_ARCH=multi 时生效，控制 pipeline 包含哪些子 Agent。',
+    usage: 'quick：技术→决策；standard：技术→情报→决策；full：技术→情报→风险→决策；specialist：full + 每策略专项 Agent。',
+    valueNotes: [
+      '模式越完整，分析越深入，但耗时和 token 消耗也越大。',
+      'specialist 模式会为每个策略启动独立 Agent。',
+    ],
+    impact: ['影响多 Agent 分析流程的深度和资源消耗。'],
+    notes: ['该字段仅在 AGENT_ARCH=multi 时生效。'],
+  },
+  'settings.agent.AGENT_ORCHESTRATOR_TIMEOUT_S': {
+    title: 'Agent 超时',
+    summary: 'Agent 执行的共享超时预算（秒）。',
+    usage: 'single 模式下作为整体 ReAct 循环超时；multi 模式下作为协作 pipeline 总超时。设为 0 禁用超时。',
+    valueNotes: [
+      '超时后 Agent 会返回已完成的部分结果。',
+      '分析多只股票或 specialist 模式建议适当调高。',
+    ],
+    impact: ['影响 Agent 分析的最大等待时间。'],
+    notes: ['超时不影响其他股票的分析流程。'],
+  },
+  'settings.agent.AGENT_RISK_OVERRIDE': {
+    title: '风险 Agent 否决权',
+    summary: '允许风险 Agent 在检测到关键风险信号时否决买入信号。',
+    usage: '开启后，full/specialist 模式中的风险 Agent 可将买入建议降级为观望或卖出。',
+    valueNotes: ['仅在 AGENT_ORCHESTRATOR_MODE 包含风险阶段时生效。'],
+    impact: ['影响最终投资建议的风险保守程度。'],
+    notes: ['关闭后风险 Agent 的意见仅作参考，不会否决决策。'],
+  },
+  'settings.agent.DEEP_RESEARCH': {
+    title: 'Deep Research',
+    summary: '控制 Deep Research 的 token 预算和超时。',
+    usage: 'AGENT_DEEP_RESEARCH_BUDGET 设定最大 token 预算；AGENT_DEEP_RESEARCH_TIMEOUT 设定超时秒数。',
+    valueNotes: [
+      '预算覆盖规划、后续研究和最终综合所有阶段。',
+      '预算越高，研究越深入，但消耗也越大。',
+    ],
+    impact: ['影响 Deep Research 功能的深度和耗时。'],
+    notes: ['Deep Research 在 Agent 模式下可用。'],
+  },
+  'settings.agent.AGENT_MEMORY_ENABLED': {
+    title: 'Agent 记忆系统',
+    summary: '启用记忆与校准系统，跟踪 Agent 预测准确率并调整置信度。',
+    usage: '开启后，系统会记录每次预测结果，与后续实际走势对比，用于校准未来分析的置信度。',
+    valueNotes: ['记忆数据需要积累一定量后才产生校准效果。'],
+    impact: ['影响 Agent 置信度校准和长期分析质量。'],
+    notes: ['需要配合回测功能使用效果更佳。'],
+  },
+  'settings.agent.AGENT_SKILL_AUTOWEIGHT': {
+    title: '策略自动权重',
+    summary: '根据历史回测表现自动调整策略权重。',
+    usage: '开启后，系统按各策略的历史回测准确率加权综合信号。',
+    valueNotes: ['依赖回测数据；回测记录不足时可能无法有效加权。'],
+    impact: ['影响多策略综合时的信号权重分配。'],
+    notes: ['需要先开启回测功能并积累足够的回测数据。'],
+  },
+  'settings.agent.AGENT_SKILL_ROUTING': {
+    title: '策略路由模式',
+    summary: '控制策略选择方式。',
+    usage: 'auto 模式根据市场环境自动检测并选择相关策略；manual 模式仅使用 AGENT_SKILLS 中手动指定的策略。',
+    valueNotes: ['auto 模式会根据市场状态（牛市/熊市/震荡等）动态调整策略选择。'],
+    impact: ['影响 Agent 分析时的策略覆盖面。'],
+    notes: ['manual 模式下需要确保 AGENT_SKILLS 已正确配置。'],
+  },
+  'settings.agent.context_compression': {
+    title: '问股上下文压缩',
+    summary: '控制问股可见对话历史的滚动摘要压缩，默认关闭以保持既有行为。',
+    usage: 'AGENT_CONTEXT_COMPRESSION_ENABLED 开启后，仅压缩同一 session_id 下用户可见的 user/assistant 文本历史；profile 控制默认触发阈值和保留轮次。',
+    valueNotes: [
+      'cost、balanced、long_context_raw_first 分别偏向节省 token、均衡推荐和保留更多原文。',
+      'AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS 和 AGENT_CONTEXT_PROTECTED_TURNS 留空时跟随当前 profile preset，显式填写时覆盖 preset。',
+    ],
+    impact: ['降低长问股会话的 token 消耗，但可能让更早的对话细节以摘要形式参与后续回答。'],
+    notes: [
+      '该功能不处理 provider trace、thinking blocks、tool calls 或 tool results，也不改变同轮工具调用透传。',
+      '该配置只影响问股可见历史压缩，不改变 LLM provider、模型、Base URL、保存清理或运行时优先级语义。',
+    ],
+  },
+  'settings.agent.event_monitor': {
+    title: '事件监控',
+    summary: '在定时模式下启用后台事件监控，定期轮询告警规则。',
+    usage: 'AGENT_EVENT_MONITOR_ENABLED 开启后台监控；AGENT_EVENT_MONITOR_INTERVAL_MINUTES 设定轮询间隔（分钟）。',
+    valueNotes: [
+      '仅在定时（schedule）模式下生效。',
+      '轮询间隔过短可能增加 API 调用频率。',
+    ],
+    impact: ['影响后台告警检测频率和通知推送时机。'],
+    notes: ['需要配合告警规则使用。'],
+  },
+  'settings.agent.EVENT_ALERT_RULES_JSON': {
+    title: '事件告警规则（Legacy JSON）',
+    summary: '通过 JSON 数组配置基础价格和成交量告警规则。',
+    usage: 'JSON 数组格式，每条规则包含 alert_type、stock_code 和条件字段。仅支持 price_cross、price_change_percent 和 volume_spike 三种基础类型。',
+    valueNotes: [
+      '技术指标、自选股、持仓、大盘红绿灯等高级规则需通过 Alert API 或 Web 告警中心管理，不在此 JSON 中配置。',
+      '规则在定时模式下由事件监控定期评估。',
+    ],
+    impact: ['影响后台告警检测和通知推送。'],
+    notes: ['该字段为 Legacy 配置方式，高级规则请使用告警中心。'],
+  },
+  // ------------------------------------------------------------------
+  // Backtest configuration
+  // ------------------------------------------------------------------
+  'settings.backtest.BACKTEST_ENABLED': {
+    title: '回测开关',
+    summary: '启用或关闭历史分析回测功能。',
+    usage: '开启后，系统会定期将历史分析结果与后续实际走势对比，评估策略准确率。',
+    valueNotes: [
+      '回测数据用于策略自动权重（AGENT_SKILL_AUTOWEIGHT）和记忆校准。',
+      '关闭回测不影响已有回测记录，但会停止新回测评估。',
+    ],
+    impact: ['影响策略权重校准、记忆校准和回测报告生成。'],
+    notes: ['Agent 策略自动权重功能依赖回测数据。'],
+  },
+  'settings.backtest.eval_params': {
+    title: '回测评估参数',
+    summary: '控制回测评估窗口、最小记录年龄和中性回报带的参数组。',
+    usage: 'BACKTEST_EVAL_WINDOW_DAYS 设定评估窗口（交易日数）；BACKTEST_MIN_AGE_DAYS 仅评估创建时间超过此天数的记录；BACKTEST_NEUTRAL_BAND_PCT 设定中性回报带百分比。',
+    valueNotes: [
+      '评估窗口越长，包含的交易日越多，结果越稳定但延迟越高。',
+      'BACKTEST_MIN_AGE_DAYS 用于排除过新的分析记录，等待足够后续走势数据。',
+      'BACKTEST_NEUTRAL_BAND_PCT 内的涨跌标记为中性，不判定为正确或错误。',
+    ],
+    impact: ['影响回测结果的判定标准、覆盖范围和策略权重计算。'],
+    notes: ['三个参数共同影响回测结果，建议组合调整。'],
+  },
+  'settings.backtest.BACKTEST_ENGINE_VERSION': {
+    title: '回测引擎版本',
+    summary: '回测引擎版本标签。',
+    usage: '一般无需修改；版本标签用于标识当前使用的回测逻辑版本。',
+    valueNotes: ['不同版本可能使用不同的评估算法或判定规则。'],
+    impact: ['影响回测评估算法和结果。'],
+    notes: ['除非明确要求切换版本，否则保持默认。'],
+  },
+  // ------------------------------------------------------------------
+  // Report configuration
+  // ------------------------------------------------------------------
+  'settings.report.REPORT_SUMMARY_ONLY': {
+    title: '仅推送摘要',
+    summary: '只推送分析摘要，不推送个股详情。适合跟踪大量股票时快速概览。',
+    usage: '开启后，通知只包含整体摘要信息；关闭后包含每只股票的详细分析。',
+    valueNotes: ['跟踪股票较多时开启可减少通知篇幅。'],
+    impact: ['影响通知推送的内容详细程度。'],
+    notes: ['不影响 Web 端报告查看。'],
+  },
+  'settings.report.REPORT_SHOW_LLM_MODEL': {
+    title: '报告显示模型名',
+    summary: '在报告页脚展示本次分析使用的 LLM 模型名称。',
+    usage: '开启后，通知报告页脚会显示模型标识；关闭后隐藏。',
+    valueNotes: ['仅影响报告渲染，不改变模型选择、运行时路由或迁移行为。'],
+    impact: ['影响通知报告中的模型信息可见性。'],
+    notes: ['用于排查模型切换问题时可以临时开启。'],
+  },
+  'settings.report.REPORT_TEMPLATES_DIR': {
+    title: '报告模板目录',
+    summary: 'Jinja2 报告模板的存放目录。',
+    usage: '填写相对于项目根目录的路径；目录内放置 Jinja2 模板文件。',
+    valueNotes: ['需要同时开启 REPORT_RENDERER_ENABLED 才会使用模板渲染。'],
+    impact: ['影响报告渲染使用的模板来源。'],
+    notes: ['自定义模板需要符合 Jinja2 语法并包含必要的变量占位。'],
+  },
+  'settings.report.REPORT_RENDERER_ENABLED': {
+    title: '报告渲染引擎',
+    summary: '启用 Jinja2 模板渲染引擎处理报告输出。',
+    usage: '默认关闭；开启后报告会通过 Jinja2 模板渲染，支持自定义格式。',
+    valueNotes: ['默认关闭以确保零回归风险。'],
+    impact: ['影响报告最终输出格式。'],
+    notes: ['开启前请确认 REPORT_TEMPLATES_DIR 中有有效的模板文件。'],
+  },
+  'settings.report.REPORT_INTEGRITY_ENABLED': {
+    title: '报告完整性校验',
+    summary: 'LLM 输出后校验必填字段，缺失时重试或使用占位符。',
+    usage: '开启后系统会检查报告是否包含必要的分析字段；REPORT_INTEGRITY_RETRY 控制重试次数。',
+    valueNotes: [
+      '校验失败的字段会用占位符填充。',
+      '重试会增加 LLM 调用次数和耗时。',
+    ],
+    impact: ['影响报告完整度和 LLM 调用次数。'],
+    notes: ['REPORT_INTEGRITY_RETRY=0 时不重试，仅用占位符。'],
+  },
+  'settings.report.REPORT_HISTORY_COMPARE_N': {
+    title: '历史信号对比',
+    summary: '展示每只股票最近 N 次分析的信号对比。设为 0 关闭。',
+    usage: '开启后，报告中会展示最近 N 次分析信号的对比表格。',
+    valueNotes: ['N 越大对比范围越广，但表格越长。'],
+    impact: ['影响报告中历史信号对比部分的展示。'],
+    notes: ['设为 0 关闭该功能。'],
+  },
+  'settings.report.SINGLE_STOCK_NOTIFY': {
+    title: '逐股即时推送',
+    summary: '每完成一只股票分析后立即推送，而不是等全部完成后批量推送。',
+    usage: '开启后，每只股票分析完成后独立发送通知；关闭后汇总发送。',
+    valueNotes: ['开启后通知更及时，但推送频率更高。'],
+    impact: ['影响通知推送时机和频率。'],
+    notes: ['跟踪大量股票时可能产生较多通知消息。'],
+  },
+  'settings.report.MERGE_EMAIL_NOTIFICATION': {
+    title: '合并邮件通知',
+    summary: '将个股分析与大盘复盘合并为一封邮件发送。',
+    usage: '开启后，个股分析和大盘复盘会合并在同一封邮件中发送。',
+    valueNotes: ['仅在同时启用了个股分析和大盘复盘时有效。'],
+    impact: ['影响邮件通知的封数和内容组织。'],
+    notes: ['关闭后个股分析和大盘复盘会分别发送邮件。'],
+  },
+  // ------------------------------------------------------------------
+  // Notification routing
+  // ------------------------------------------------------------------
+  'settings.notification.channel_routing': {
+    title: '通知渠道路由',
+    summary: '为不同类型的通知指定目标推送渠道。',
+    usage: '三个路由字段分别控制报告推送、告警推送和系统错误推送的目标渠道。使用英文逗号分隔渠道名；留空则推送到所有已配置渠道。',
+    valueNotes: [
+      'NOTIFICATION_REPORT_CHANNELS 控制日常分析报告推送渠道。',
+      'NOTIFICATION_ALERT_CHANNELS 控制事件告警推送渠道。',
+      'NOTIFICATION_SYSTEM_ERROR_CHANNELS 控制系统错误推送渠道。',
+      '可用渠道取决于已配置的通知渠道（如 email、feishu、telegram 等）。',
+    ],
+    impact: ['影响不同通知类型的推送目标。'],
+    notes: ['指定的渠道必须已完成对应配置，否则不会生效。'],
+  },
+  'settings.notification.dedup': {
+    title: '通知去重与冷却',
+    summary: '控制静态通知的去重时间窗口和冷却时间。',
+    usage: 'NOTIFICATION_DEDUP_TTL_SECONDS 设定去重时间窗口，同一去重 key 在窗口内只推送一次；NOTIFICATION_COOLDOWN_SECONDS 设定冷却时间，同一冷却 key 在窗口内只推送一次。',
+    valueNotes: [
+      '两个机制独立生效，互不影响。',
+      '都设为 0 时关闭对应去重或冷却功能。',
+    ],
+    impact: ['影响通知推送频率和重复控制。'],
+    notes: ['动态通知（如告警）有独立的触发和冷却逻辑。'],
+  },
+  'settings.notification.quiet_hours': {
+    title: '静默时段',
+    summary: '在指定时间段内抑制通知推送。',
+    usage: 'NOTIFICATION_QUIET_HOURS 使用 HH:MM-HH:MM 格式，支持跨夜；NOTIFICATION_TIMEZONE 指定对应时区。',
+    valueNotes: [
+      '留空关闭静默时段。',
+      '时区留空时使用系统本地时区。',
+    ],
+    impact: ['影响通知推送的时段。'],
+    notes: ['静默时段内的静态通知会被抑制并跳过，不会在时段结束后补发。'],
+  },
+  'settings.notification.MIN_SEVERITY': {
+    title: '最低通知等级',
+    summary: '过滤低于指定等级的静态通知。',
+    usage: '设为 warning 时，只有 warning 及以上等级的通知会被推送；留空保留当前行为。',
+    valueNotes: ['等级从低到高依次为 info、warning、error、critical。'],
+    impact: ['影响静态通知的推送量。'],
+    notes: ['动态通知（如告警）有独立的事件和等级评估。'],
+  },
+  'settings.notification.DAILY_DIGEST_ENABLED': {
+    title: '每日摘要（预留）',
+    summary: '预留功能开关，当前不会发送每日摘要。',
+    usage: '该字段为 P4 预留功能，当前开启后不会产生任何效果。',
+    valueNotes: ['保留用于后续每日摘要聚合推送功能。'],
+    impact: ['当前无实际影响。'],
+    notes: ['未来版本启用后会聚合当日通知为一条摘要推送。'],
+  },
+  // ------------------------------------------------------------------
+  // System runtime
+  // ------------------------------------------------------------------
+  'settings.system.LOG_LEVEL': {
+    title: '日志级别',
+    summary: '控制应用日志输出的详细程度。',
+    usage: '可选 DEBUG、INFO、WARNING、ERROR、CRITICAL；级别越高输出越少。',
+    valueNotes: [
+      'DEBUG 输出最详细的日志，适合排查问题。',
+      '部分运行时组件可能在重启后才完全生效。',
+    ],
+    impact: ['影响日志输出量和详细程度。'],
+    notes: ['修改后部分运行时组件可能需要重启才能完全生效。'],
+  },
+  'settings.system.DEBUG': {
+    title: '调试模式',
+    summary: '开启调试模式，输出详细日志信息。',
+    usage: '开启后会输出更多内部状态和调试信息。',
+    valueNotes: ['生产环境建议关闭以减少日志量。'],
+    impact: ['影响日志详细程度和运行时行为。'],
+    notes: ['调试模式可能影响性能，不建议长期开启。'],
+  },
+  'settings.system.MAX_WORKERS': {
+    title: '最大并发线程数',
+    summary: '控制同时执行的股票分析线程数量。',
+    usage: '设置并发分析的工作线程数；数值越高并发越高，但 API 限流风险也越大。',
+    valueNotes: [
+      '建议保持较低值以避免触发数据源或 LLM API 的频率限制。',
+      '受限于 API Key 配额和网络带宽。',
+    ],
+    impact: ['影响分析总耗时和 API 调用频率。'],
+    notes: ['并发过高可能导致 API 返回限流错误。'],
+  },
+  'settings.system.ANALYSIS_DELAY': {
+    title: '分析间隔',
+    summary: '控制每只股票分析之间的间隔秒数，用于限速。',
+    usage: '设为 0 无间隔；设为正值时每完成一只股票后等待指定秒数再分析下一只。',
+    valueNotes: ['适合在 API 有严格频率限制时使用。'],
+    impact: ['影响分析总耗时。'],
+    notes: ['总耗时 ≈ 股票数 × 单股耗时 + (股票数-1) × ANALYSIS_DELAY。'],
+  },
+  'settings.system.SAVE_CONTEXT_SNAPSHOT': {
+    title: '保存分析上下文快照',
+    summary: '控制是否将分析历史的整份 context_snapshot 持久化到数据库。',
+    usage: '默认开启。关闭后，新历史记录不会保存 enhanced_context、market_phase_summary、AnalysisContextPack overview 或运行诊断快照等 context_snapshot 内容。',
+    valueNotes: [
+      '关闭后，新历史记录的历史详情、completed 任务状态和 Web 报告页无法读取低敏输入数据块摘要。',
+      '该开关不关闭当次 AnalysisContextPack 构建，也不关闭 LLM Prompt 中的低敏 pack summary。',
+      'CLI 的 --no-context-snapshot 与设为 false 的持久化效果一致。',
+    ],
+    impact: ['影响历史透明度、回测/诊断可用的上下文快照信息和 Web 报告页的数据来源摘要。'],
+    notes: ['若需要完全关闭 P3-P5 pack 接入，需要回滚相关代码；当前没有运行时 pack 总开关。'],
+  },
+  'settings.system.market_review': {
+    title: '大盘分析',
+    summary: '控制大盘分析功能的开关、覆盖市场和配色方案。',
+    usage: 'MARKET_REVIEW_ENABLED 开启大盘分析；MARKET_REVIEW_REGION 选择市场（cn/hk/us/both）；MARKET_REVIEW_COLOR_SCHEME 选择配色。',
+    valueNotes: [
+      'cn 覆盖 A 股，hk 覆盖港股，us 覆盖美股，both 覆盖全部。',
+      '配色方案影响大盘报告中指数涨跌的颜色显示：green_up 为绿涨红跌，red_up 为红涨绿跌。',
+    ],
+    impact: ['影响分析报告中大盘概览部分的内容和视觉呈现。'],
+    notes: ['大盘分析依赖对应市场的指数数据源可用性。'],
+  },
 };
 
 const settingsHelpEnUS: SettingsHelpMap = {
@@ -531,6 +1070,28 @@ const settingsHelpEnUS: SettingsHelpMap = {
     impact: ['Affects model calls, connection tests, and model discovery for the provider.'],
     notes: ['Do not expose real keys in issues, logs, or screenshots.'],
   },
+  'settings.ai_model.anspire_llm': {
+    title: 'Anspire LLM Gateway',
+    summary: 'Uses Anspire API keys as a compatible OpenAI-style LLM gateway.',
+    usage: 'ANSPIRE_LLM_ENABLED controls this compatibility path; ANSPIRE_LLM_BASE_URL sets the gateway endpoint; ANSPIRE_LLM_MODEL sets the default model when no primary model is explicitly selected.',
+    valueNotes: [
+      'This path is mainly for simplified setups without LLM_CHANNELS or LITELLM_MODEL.',
+      'When LITELLM_CONFIG, LLM_CHANNELS, or an explicit LITELLM_MODEL is configured, runtime selection follows the existing priority order.',
+    ],
+    impact: ['Affects the default gateway and model used when Anspire keys participate in LLM calls.'],
+    notes: ['Do not point the Base URL at another provider while reusing an Anspire key.'],
+  },
+  'settings.ai_model.legacy_provider_params': {
+    title: 'Legacy Provider Parameters',
+    summary: 'Configures model names, temperature, or token limits for legacy provider-specific paths.',
+    usage: 'These fields preserve older configurations. Prefer LITELLM_MODEL, LITELLM_FALLBACK_MODELS, VISION_MODEL, LLM_TEMPERATURE, or LLM Channels for new setups.',
+    valueNotes: [
+      'When LLM Channels are active, related legacy fields are often hidden from the generic form.',
+      'These fields affect only the matching legacy provider path and are not automatically migrated into channels.',
+    ],
+    impact: ['Affects legacy provider model selection and sampling parameters when channel/YAML routing is not used.'],
+    notes: ['If both legacy fields and Channels exist, trust the runtime source shown by the settings page.'],
+  },
   'settings.ai_model.OPENAI_BASE_URL': {
     title: 'OpenAI-compatible Base URL',
     summary: 'Sets the endpoint root for an OpenAI-compatible service.',
@@ -546,6 +1107,38 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['Available APIs depend on your Tushare permission level.'],
     impact: ['Affects some A-share base data, stock lists, and enrichment data.'],
     notes: ['Do not commit the token or print it in public logs.'],
+  },
+  'settings.data_source.TICKFLOW_API_KEY': {
+    title: 'TickFlow API Key',
+    summary: 'Enhances market review with index and market-statistics data.',
+    usage: 'Paste a TickFlow API key here. When empty, the system continues with other data sources and fallback paths.',
+    valueNotes: ['This key is an optional enhancement, not required for the main analysis flow.'],
+    impact: ['Affects market-review and market-statistics coverage.'],
+    notes: ['Do not expose real keys in issues, logs, or screenshots.'],
+  },
+  'settings.data_source.stock_index_remote': {
+    title: 'Remote Stock Index',
+    summary: 'Fetches the latest stock autocomplete index from GitHub main and caches it locally.',
+    usage: 'Enabled by default. If GitHub raw is unreachable, disable it. The URL, check frequency, and timeout are built-in system values.',
+    valueNotes: ['The system checks for updates every 48 hours to avoid frequent GitHub access.', 'Remote check failures do not block WebUI or analysis.'],
+    impact: ['Affects stock-name freshness for Web autocomplete and backend stock-name resolution.'],
+    notes: ['When remote download fails, the app keeps using an existing cache or the bundled index.'],
+  },
+  'settings.data_source.ALPHASIFT_ENABLED': {
+    title: 'AlphaSift Screening',
+    summary: 'Controls the optional third-party AlphaSift stock screening page.',
+    usage: 'Disabled by default. When true, the Web app checks alphasift.dsa_adapter and attempts a trusted auto-install when it is missing.',
+    valueNotes: ['Auto-install runs in the DSA backend Python environment and only allows the default trusted install source.', 'Screening output is for research support only and is not investment advice.'],
+    impact: ['Affects the Web screening entry, AlphaSift strategy loading, and screening API.'],
+    notes: ['AlphaSift reuses DSA environment variables; disabling it does not affect existing analysis, reports, or notifications.'],
+  },
+  'settings.data_source.ALPHASIFT_INSTALL_SPEC': {
+    title: 'AlphaSift Install Source',
+    summary: 'Configures the trusted AlphaSift pip source used by source deployments or desktop packaging.',
+    usage: 'Defaults to a verified ZhuLinsen/alphasift commit. When AlphaSift is enabled and the adapter is missing, this source is used for auto-install.',
+    valueNotes: ['Custom local paths or wheels are not auto-installed; install them into the backend Python environment first.', 'This field is treated as sensitive, so the settings page does not show the full value.'],
+    impact: ['Affects AlphaSift adapter availability checks and desktop packaging.'],
+    notes: ['Use a trusted source only. AlphaSift is a third-party screening capability, so understand the risk before enabling it.'],
   },
   'settings.data_source.REALTIME_SOURCE_PRIORITY': {
     title: 'Realtime Source Priority',
@@ -587,6 +1180,22 @@ const settingsHelpEnUS: SettingsHelpMap = {
     impact: ['Affects chip distribution and cost-area analysis in reports.'],
     notes: ['This feature depends on external data-source stability.'],
   },
+  'settings.data_source.BIAS_THRESHOLD': {
+    title: 'BIAS Threshold',
+    summary: 'Sets the risk-warning threshold for price deviation from MA5.',
+    usage: 'Enter a percentage. When price deviation from MA5 exceeds the threshold, reports can warn against chasing or highlight mean-reversion risk.',
+    valueNotes: ['Strong-trend stocks may widen the threshold according to runtime rules.'],
+    impact: ['Affects technical-analysis warnings about chasing, MA deviation, and trading advice.'],
+    notes: ['Too low can add noisy warnings; too high can weaken chase-risk alerts.'],
+  },
+  'settings.data_source.pytdx': {
+    title: 'Pytdx Servers',
+    summary: 'Configures Tongdaxin quote servers and overrides built-in defaults.',
+    usage: 'Use PYTDX_HOST/PYTDX_PORT for a single server, or PYTDX_SERVERS for multiple ip:port entries. PYTDX_SERVERS takes priority.',
+    valueNotes: ['Separate multiple servers with English commas; runtime data-source logic tries them as configured.'],
+    impact: ['Affects quote connectivity and availability when the Pytdx data source is used.'],
+    notes: ['If a server is unreachable, rely on data-source fallback and avoid a single unstable endpoint.'],
+  },
   'settings.data_source.news_window': {
     title: 'News Window',
     summary: 'Controls how old news can be before it is excluded from analysis context.',
@@ -608,6 +1217,41 @@ const settingsHelpEnUS: SettingsHelpMap = {
     notes: [
       'Do not use FEISHU_APP_SECRET as FEISHU_WEBHOOK_SECRET.',
       'If IP allowlisting is enabled in Feishu, add the outbound IP of your runtime environment.',
+    ],
+  },
+  'settings.notification.FEISHU_STREAM_ENABLED': {
+    title: 'Feishu Stream Mode',
+    summary: 'Enables Feishu application bot / Stream Bot long-connection mode. It is not the Feishu group webhook switch.',
+    usage: 'Enable it only after the Feishu app is created, published, granted permissions, and configured for events. FEISHU_APP_ID and FEISHU_APP_SECRET are also required.',
+    valueNotes: [
+      'true allows runtime Feishu app bot stream mode.',
+      'false disables stream mode; group message delivery still uses FEISHU_WEBHOOK_URL.',
+      'App credentials or this switch alone do not enable group webhook delivery.',
+    ],
+    impact: [
+      'Affects Feishu application bot interaction or Stream Bot paths.',
+      'Does not change FEISHU_WEBHOOK_URL group webhook delivery semantics.',
+    ],
+    notes: [
+      'Restart the relevant bot/service process after saving; existing long connections are not rebuilt automatically.',
+      'Failures should affect only the Feishu app bot path, not the main analysis flow.',
+    ],
+  },
+  'settings.notification.DINGTALK_STREAM_ENABLED': {
+    title: 'DingTalk Stream Mode',
+    summary: 'Enables DingTalk application bot long-connection mode. It is not the regular DingTalk group webhook switch.',
+    usage: 'Configure a DingTalk application bot first, then provide DINGTALK_APP_KEY and DINGTALK_APP_SECRET.',
+    valueNotes: [
+      'true allows runtime DingTalk app bot stream/long-connection mode.',
+      'false disables that long-connection mode; DingTalk group webhook URLs in CUSTOM_WEBHOOK_URLS still use the custom webhook path.',
+    ],
+    impact: [
+      'Affects DingTalk application bot interaction or long-connection paths.',
+      'Does not change custom webhook notification delivery.',
+    ],
+    notes: [
+      'Restart the relevant bot/service process after saving; existing long connections are not rebuilt automatically.',
+      'Do not treat Stream mode and group bot Webhook as the same delivery path.',
     ],
   },
   'settings.notification.webhooks': {
@@ -692,6 +1336,48 @@ const settingsHelpEnUS: SettingsHelpMap = {
     ],
     impact: ['Affects the browser URL used to open WebUI after restart.'],
     notes: ['Restart the process, Docker container, or service manager after changing WEBUI_PORT.'],
+  },
+  'settings.system.LOG_DIR': {
+    title: 'Log Directory',
+    summary: 'Configures where application logs are written.',
+    usage: 'Use a directory writable by the runtime user or container. The local default is ./logs; container deployments often use /app/logs.',
+    valueNotes: [
+      'Relative paths are resolved from the process working directory.',
+      'Components such as the Longbridge SDK can also write log files under this directory.',
+    ],
+    impact: ['Affects application logs, some SDK logs, and troubleshooting files.'],
+    notes: [
+      'Restart the process after changing this field; already initialized loggers may not switch immediately.',
+      'Docker, desktop, and source deployments can have different writable paths.',
+    ],
+  },
+  'settings.system.WEBUI_ENABLED': {
+    title: 'Default WebUI Startup',
+    summary: 'Controls whether startup defaults to WebUI/API service mode.',
+    usage: 'This is a startup-time compatibility flag. Saving it does not immediately start or stop the current WebUI process.',
+    valueNotes: [
+      'true makes later default entrypoint starts prefer WebUI/API service mode.',
+      'false keeps the non-WebUI default startup behavior; explicit CLI arguments can still override it.',
+    ],
+    impact: ['Affects the default mode on the next main.py or service-entry startup.'],
+    notes: [
+      'Restart the relevant process before the change takes effect.',
+      'Do not treat this switch as an immediate on/off control for the current settings page.',
+    ],
+  },
+  'settings.system.WEBUI_AUTO_BUILD': {
+    title: 'Auto-build Web Frontend',
+    summary: 'Controls whether backend WebUI startup automatically checks and builds frontend static assets.',
+    usage: 'Keep true for source deployments. Set false for prebuilt images, offline environments, or restricted runtimes.',
+    valueNotes: [
+      'true makes startup prepare apps/dsa-web static assets.',
+      'false only verifies existing build artifacts; if assets are missing, WebUI may be unavailable or only backend warnings will be logged.',
+    ],
+    impact: ['Affects frontend asset preparation on the next WebUI backend startup.'],
+    notes: [
+      'Saving does not trigger a build immediately; restart the backend process.',
+      'Before disabling it in Docker or packages, make sure the built assets are already included.',
+    ],
   },
   'settings.system.ADMIN_AUTH_ENABLED': {
     title: 'Web Login Protection',
@@ -838,6 +1524,392 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['Saving writes VISION_MODEL.'],
     impact: ['Affects screenshot extraction and vision analysis.'],
     notes: ['Text-only models may not support vision; use capability checks to confirm.'],
+  },
+  // ------------------------------------------------------------------
+  // Agent configuration
+  // ------------------------------------------------------------------
+  'settings.agent.AGENT_MODE': {
+    title: 'Agent Mode',
+    summary: 'Enables the ReAct Agent for stock analysis, replacing the single-turn LLM flow.',
+    usage: 'When enabled, the system uses a multi-step reasoning Agent that can call tools, search news, and execute complex reasoning chains.',
+    valueNotes: [
+      'When disabled, the regular single-turn LLM analysis is used.',
+      'Agent mode can be combined with AGENT_ARCH to choose single (classic ReAct) or multi (orchestrator pipeline).',
+    ],
+    impact: ['Affects stock analysis flow, report quality, and LLM call count.'],
+    notes: ['Agent mode consumes more tokens and time; best for scenarios requiring deep reasoning.'],
+  },
+  'settings.agent.AGENT_MAX_STEPS': {
+    title: 'Agent Max Steps',
+    summary: 'Controls the maximum reasoning-step limit for the Agent.',
+    usage: 'At the default, each sub-agent keeps its preset. Raising it lifts all sub-agents; lowering it caps sub-agents that exceed it.',
+    valueNotes: [
+      'Higher steps enable deeper reasoning but increase time and token cost.',
+      'Complex scenarios (e.g. multi-strategy orchestration) may need higher values.',
+    ],
+    impact: ['Affects reasoning depth, duration, and token consumption.'],
+    notes: ['Very low values may cause incomplete reasoning.'],
+  },
+  'settings.agent.AGENT_SKILLS': {
+    title: 'Agent Strategies',
+    summary: 'Specifies the list of strategy skills the Agent uses.',
+    usage: 'Use comma-separated strategy names. Leave empty for the default (bull_trend). Set to all to enable all strategies.',
+    valueNotes: [
+      'Setting specific strategies (not all) makes scheduled tasks automatically use the Agent pipeline.',
+      'Available strategies depend on the definition files in the strategies/ directory.',
+    ],
+    impact: ['Affects strategy selection and final signal aggregation in Agent analysis.'],
+    notes: ['Custom strategies must be placed in the AGENT_SKILL_DIR directory.'],
+  },
+  'settings.agent.AGENT_SKILL_DIR': {
+    title: 'Strategy Directory',
+    summary: 'Directory containing Agent strategy definition files.',
+    usage: 'Enter a path relative to the project root. The directory can contain YAML or SKILL.md strategy definitions.',
+    valueNotes: ['The default strategies directory includes built-in strategies.'],
+    impact: ['Affects which strategies the Agent can discover.'],
+    notes: ['After changing the directory, make sure it contains valid strategy definition files.'],
+  },
+  'settings.agent.AGENT_NL_ROUTING': {
+    title: 'Natural Language Routing',
+    summary: 'Allows the bot dispatcher to route stock queries to the Agent via natural language.',
+    usage: 'When enabled, high-confidence stock messages in private chat (or @mentions in groups) are automatically routed to the Agent without an explicit command.',
+    valueNotes: ['Only affects bot integrations (Feishu, Telegram, etc.), not the Web API.'],
+    impact: ['Affects bot interaction experience and Agent trigger method.'],
+    notes: ['Requires both Agent mode and the corresponding bot channel to be enabled.'],
+  },
+  'settings.agent.AGENT_ARCH': {
+    title: 'Agent Architecture',
+    summary: 'Selects the Agent execution architecture.',
+    usage: 'single uses the classic ReAct executor; multi uses the orchestrator pipeline with specialised sub-agents.',
+    valueNotes: [
+      'single is suitable for simple scenarios with short reasoning chains.',
+      'multi supports collaboration among technical analysis, intel, risk, and other specialist sub-agents.',
+    ],
+    impact: ['Affects the Agent analysis flow, sub-agent scheduling, and report structure.'],
+    notes: ['When multi is selected, use AGENT_ORCHESTRATOR_MODE to adjust the pipeline.'],
+  },
+  'settings.agent.AGENT_ORCHESTRATOR_MODE': {
+    title: 'Orchestrator Mode',
+    summary: 'Only effective when AGENT_ARCH=multi. Controls which sub-agents the pipeline includes.',
+    usage: 'quick: tech→decision; standard: tech→intel→decision; full: tech→intel→risk→decision; specialist: full + per-strategy agents.',
+    valueNotes: [
+      'More complete modes produce deeper analysis but consume more time and tokens.',
+      'specialist mode starts a dedicated Agent for each strategy.',
+    ],
+    impact: ['Affects multi-Agent analysis depth and resource consumption.'],
+    notes: ['This field only takes effect when AGENT_ARCH=multi.'],
+  },
+  'settings.agent.AGENT_ORCHESTRATOR_TIMEOUT_S': {
+    title: 'Agent Timeout',
+    summary: 'Shared timeout budget in seconds for Agent execution.',
+    usage: 'In single mode it is the overall ReAct loop budget; in multi mode it is the cooperative pipeline budget. Set 0 to disable.',
+    valueNotes: [
+      'When timed out, the Agent returns partial results.',
+      'Consider raising it for multi-stock analysis or specialist mode.',
+    ],
+    impact: ['Affects the maximum wait time for Agent analysis.'],
+    notes: ['Timeout does not affect other stocks in the analysis pipeline.'],
+  },
+  'settings.agent.AGENT_RISK_OVERRIDE': {
+    title: 'Risk Agent Veto',
+    summary: 'Allows the risk agent to veto buy signals when critical risk flags are detected.',
+    usage: 'When enabled, the risk agent in full/specialist mode can downgrade buy recommendations to hold or sell.',
+    valueNotes: ['Only effective when AGENT_ORCHESTRATOR_MODE includes the risk stage.'],
+    impact: ['Affects the risk conservatism of final investment recommendations.'],
+    notes: ['When disabled, the risk agent opinion is advisory only and cannot override decisions.'],
+  },
+  'settings.agent.DEEP_RESEARCH': {
+    title: 'Deep Research',
+    summary: 'Controls the token budget and timeout for Deep Research.',
+    usage: 'AGENT_DEEP_RESEARCH_BUDGET sets the maximum token budget; AGENT_DEEP_RESEARCH_TIMEOUT sets the timeout in seconds.',
+    valueNotes: [
+      'The budget covers planning, follow-up research, and final synthesis.',
+      'Higher budgets enable deeper research but increase cost.',
+    ],
+    impact: ['Affects Deep Research depth and duration.'],
+    notes: ['Deep Research is available in Agent mode.'],
+  },
+  'settings.agent.AGENT_MEMORY_ENABLED': {
+    title: 'Agent Memory',
+    summary: 'Enables the memory and calibration system that tracks prediction accuracy over time.',
+    usage: 'When enabled, the system records each prediction and compares it with actual outcomes to calibrate future confidence.',
+    valueNotes: ['Calibration takes effect after sufficient prediction data accumulates.'],
+    impact: ['Affects Agent confidence calibration and long-term analysis quality.'],
+    notes: ['Works best when combined with the backtest feature.'],
+  },
+  'settings.agent.AGENT_SKILL_AUTOWEIGHT': {
+    title: 'Auto-Weight Strategies',
+    summary: 'Automatically weights strategy opinions by their historical backtest performance.',
+    usage: 'When enabled, strategies with higher historical accuracy receive more weight in signal aggregation.',
+    valueNotes: ['Depends on backtest data; insufficient records may prevent effective weighting.'],
+    impact: ['Affects signal weight distribution when multiple strategies contribute.'],
+    notes: ['Requires the backtest feature to be enabled with sufficient historical data.'],
+  },
+  'settings.agent.AGENT_SKILL_ROUTING': {
+    title: 'Strategy Routing Mode',
+    summary: 'Controls how strategies are selected.',
+    usage: 'auto mode detects market regime and picks relevant strategies; manual mode uses only the strategies listed in AGENT_SKILLS.',
+    valueNotes: ['auto mode dynamically adjusts strategy selection based on market conditions (bull/bear/range).'],
+    impact: ['Affects the strategy coverage during Agent analysis.'],
+    notes: ['In manual mode, make sure AGENT_SKILLS is correctly configured.'],
+  },
+  'settings.agent.context_compression': {
+    title: 'Ask-Stock Context Compression',
+    summary: 'Controls rolling summary compression for visible ask-stock chat history. It is off by default to preserve existing behavior.',
+    usage: 'When AGENT_CONTEXT_COMPRESSION_ENABLED is on, only visible user/assistant text history under the same session_id is compressed; the profile controls the default trigger threshold and protected turns.',
+    valueNotes: [
+      'cost, balanced, and long_context_raw_first respectively prioritize token savings, balanced behavior, and retaining more raw context.',
+      'AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS and AGENT_CONTEXT_PROTECTED_TURNS follow the current profile preset when blank, and override the preset when explicitly set.',
+    ],
+    impact: ['Reduces token usage in long ask-stock conversations, while older details may participate in later answers as summaries.'],
+    notes: [
+      'This feature does not process provider traces, thinking blocks, tool calls, or tool results, and does not change same-turn tool passthrough.',
+      'It only affects visible ask-stock history compression; it does not change LLM provider, model, Base URL, save cleanup, or runtime priority semantics.',
+    ],
+  },
+  'settings.agent.event_monitor': {
+    title: 'Event Monitor',
+    summary: 'Enables background event monitoring in schedule mode with periodic rule polling.',
+    usage: 'AGENT_EVENT_MONITOR_ENABLED turns on monitoring; AGENT_EVENT_MONITOR_INTERVAL_MINUTES sets the polling interval.',
+    valueNotes: [
+      'Only effective in schedule mode.',
+      'Very short intervals may increase API call frequency.',
+    ],
+    impact: ['Affects background alert detection frequency and notification timing.'],
+    notes: ['Must be used with alert rules.'],
+  },
+  'settings.agent.EVENT_ALERT_RULES_JSON': {
+    title: 'Event Alert Rules (Legacy JSON)',
+    summary: 'Configures basic price and volume alert rules via a JSON array.',
+    usage: 'JSON array format. Each rule has alert_type, stock_code, and condition fields. Only price_cross, price_change_percent, and volume_spike are supported.',
+    valueNotes: [
+      'Technical indicator, watchlist, portfolio, and market light rules are managed through the Alert API or Web alert center, not this JSON.',
+      'Rules are evaluated periodically by the event monitor in schedule mode.',
+    ],
+    impact: ['Affects background alert detection and notification delivery.'],
+    notes: ['This is a legacy configuration method. For advanced rules, use the alert center.'],
+  },
+  // ------------------------------------------------------------------
+  // Backtest configuration
+  // ------------------------------------------------------------------
+  'settings.backtest.BACKTEST_ENABLED': {
+    title: 'Backtest Switch',
+    summary: 'Enables or disables historical analysis backtesting.',
+    usage: 'When enabled, the system periodically compares past analysis results with subsequent actual price movements to evaluate strategy accuracy.',
+    valueNotes: [
+      'Backtest data feeds into strategy auto-weighting (AGENT_SKILL_AUTOWEIGHT) and memory calibration.',
+      'Disabling backtest stops new evaluations but preserves existing records.',
+    ],
+    impact: ['Affects strategy weight calibration, memory calibration, and backtest report generation.'],
+    notes: ['The Agent strategy auto-weight feature depends on backtest data.'],
+  },
+  'settings.backtest.eval_params': {
+    title: 'Backtest Evaluation Parameters',
+    summary: 'Controls the evaluation window, minimum record age, and neutral return band.',
+    usage: 'BACKTEST_EVAL_WINDOW_DAYS sets the window in trading days; BACKTEST_MIN_AGE_DAYS only evaluates records older than this; BACKTEST_NEUTRAL_BAND_PCT sets the neutral return band percentage.',
+    valueNotes: [
+      'Longer evaluation windows include more trading days and produce more stable but delayed results.',
+      'BACKTEST_MIN_AGE_DAYS excludes very recent analysis records until enough follow-up price data is available.',
+      'Returns within BACKTEST_NEUTRAL_BAND_PCT are labeled neutral, not judged as correct or incorrect.',
+    ],
+    impact: ['Affects backtest judgment criteria, coverage, and strategy weight calculations.'],
+    notes: ['All three parameters jointly affect backtest results; adjust them together.'],
+  },
+  'settings.backtest.BACKTEST_ENGINE_VERSION': {
+    title: 'Backtest Engine Version',
+    summary: 'Backtest engine version label.',
+    usage: 'Usually no need to change. The label identifies the current evaluation logic version.',
+    valueNotes: ['Different versions may use different evaluation algorithms or judgment rules.'],
+    impact: ['Affects the evaluation algorithm and results.'],
+    notes: ['Keep the default unless instructed to switch versions.'],
+  },
+  // ------------------------------------------------------------------
+  // Report configuration
+  // ------------------------------------------------------------------
+  'settings.report.REPORT_SUMMARY_ONLY': {
+    title: 'Summary Only',
+    summary: 'Push only the analysis summary without per-stock details. Useful for quick overview when tracking many stocks.',
+    usage: 'When enabled, notifications contain only overall summary info. When disabled, detailed per-stock analysis is included.',
+    valueNotes: ['Enable when tracking many stocks to reduce notification length.'],
+    impact: ['Affects notification content detail level.'],
+    notes: ['Does not affect report viewing in the Web UI.'],
+  },
+  'settings.report.REPORT_SHOW_LLM_MODEL': {
+    title: 'Show Model Name in Reports',
+    summary: 'Display the LLM model name in report footers.',
+    usage: 'When enabled, the notification footer shows the model identifier. When disabled, it is hidden.',
+    valueNotes: ['Only affects report rendering, not model selection, routing, or migration.'],
+    impact: ['Affects model information visibility in notification reports.'],
+    notes: ['Enable temporarily when diagnosing model switching issues.'],
+  },
+  'settings.report.REPORT_TEMPLATES_DIR': {
+    title: 'Report Templates Directory',
+    summary: 'Directory for Jinja2 report templates.',
+    usage: 'Enter a path relative to the project root. Place Jinja2 template files in the directory.',
+    valueNotes: ['REPORT_RENDERER_ENABLED must also be on for templates to take effect.'],
+    impact: ['Affects the template source used for report rendering.'],
+    notes: ['Custom templates must follow Jinja2 syntax and include required variable placeholders.'],
+  },
+  'settings.report.REPORT_RENDERER_ENABLED': {
+    title: 'Report Rendering Engine',
+    summary: 'Enable the Jinja2 template rendering engine for report output.',
+    usage: 'Off by default. When enabled, reports are rendered through Jinja2 templates for custom formatting.',
+    valueNotes: ['Default is off for zero regression risk.'],
+    impact: ['Affects the final report output format.'],
+    notes: ['Make sure REPORT_TEMPLATES_DIR contains valid template files before enabling.'],
+  },
+  'settings.report.REPORT_INTEGRITY_ENABLED': {
+    title: 'Report Integrity Check',
+    summary: 'Validate mandatory fields after LLM output; retry or use placeholders for missing fields.',
+    usage: 'When enabled, the system checks whether reports contain required analysis fields. REPORT_INTEGRITY_RETRY controls retry count.',
+    valueNotes: [
+      'Missing fields are filled with placeholders.',
+      'Retries increase LLM call count and latency.',
+    ],
+    impact: ['Affects report completeness and LLM call count.'],
+    notes: ['REPORT_INTEGRITY_RETRY=0 disables retries and uses placeholders only.'],
+  },
+  'settings.report.REPORT_HISTORY_COMPARE_N': {
+    title: 'Historical Signal Comparison',
+    summary: 'Show the last N analyses signal comparison per stock. Set 0 to disable.',
+    usage: 'When enabled, reports include a comparison table of the last N analysis signals.',
+    valueNotes: ['Larger N gives a broader comparison but longer tables.'],
+    impact: ['Affects the historical signal comparison section in reports.'],
+    notes: ['Set to 0 to disable.'],
+  },
+  'settings.report.SINGLE_STOCK_NOTIFY': {
+    title: 'Per-Stock Immediate Notify',
+    summary: 'Push immediately after each stock analysis instead of batching all results.',
+    usage: 'When enabled, each stock analysis sends a separate notification. When disabled, results are batched.',
+    valueNotes: ['Enabled mode is more timely but increases push frequency.'],
+    impact: ['Affects notification timing and frequency.'],
+    notes: ['Tracking many stocks can produce a large number of notifications when enabled.'],
+  },
+  'settings.report.MERGE_EMAIL_NOTIFICATION': {
+    title: 'Merge Email Notification',
+    summary: 'Merge stock analysis and market review into a single email.',
+    usage: 'When enabled, stock analysis and market review are combined into one email.',
+    valueNotes: ['Only effective when both stock analysis and market review are enabled.'],
+    impact: ['Affects email count and content organization.'],
+    notes: ['When disabled, stock analysis and market review are sent as separate emails.'],
+  },
+  // ------------------------------------------------------------------
+  // Notification routing
+  // ------------------------------------------------------------------
+  'settings.notification.channel_routing': {
+    title: 'Notification Channel Routing',
+    summary: 'Specifies target push channels for different notification types.',
+    usage: 'Three routing fields control the target channels for report pushes, alert pushes, and system error pushes. Use comma-separated channel names. Leave empty to push to all configured channels.',
+    valueNotes: [
+      'NOTIFICATION_REPORT_CHANNELS controls daily analysis report delivery.',
+      'NOTIFICATION_ALERT_CHANNELS controls event alert delivery.',
+      'NOTIFICATION_SYSTEM_ERROR_CHANNELS controls system error delivery.',
+      'Available channels depend on configured notification channels (e.g. email, feishu, telegram).',
+    ],
+    impact: ['Affects the push targets for different notification types.'],
+    notes: ['Specified channels must be properly configured, or they will not work.'],
+  },
+  'settings.notification.dedup': {
+    title: 'Notification Dedup & Cooldown',
+    summary: 'Controls the dedup window and cooldown period for static notifications.',
+    usage: 'NOTIFICATION_DEDUP_TTL_SECONDS sets the dedup window where the same dedup key is pushed only once. NOTIFICATION_COOLDOWN_SECONDS sets the cooldown window for the same cooldown key.',
+    valueNotes: [
+      'The two mechanisms work independently.',
+      'Setting either to 0 disables that mechanism.',
+    ],
+    impact: ['Affects notification push frequency and duplicate control.'],
+    notes: ['Dynamic notifications (e.g. alerts) have independent trigger and cooldown logic.'],
+  },
+  'settings.notification.quiet_hours': {
+    title: 'Quiet Hours',
+    summary: 'Suppress notification delivery during a specified time window.',
+    usage: 'NOTIFICATION_QUIET_HOURS uses HH:MM-HH:MM format and supports overnight ranges. NOTIFICATION_TIMEZONE specifies the timezone.',
+    valueNotes: [
+      'Leave empty to disable quiet hours.',
+      'When timezone is empty, the local system timezone is used.',
+    ],
+    impact: ['Affects when notifications are delivered.'],
+    notes: ['Static notifications during quiet hours are suppressed and skipped; they are not queued for later delivery.'],
+  },
+  'settings.notification.MIN_SEVERITY': {
+    title: 'Minimum Notification Severity',
+    summary: 'Filters static notifications below the specified severity level.',
+    usage: 'When set to warning, only warning and above are pushed. Leave empty for current behavior.',
+    valueNotes: ['Severity levels from low to high: info, warning, error, critical.'],
+    impact: ['Affects static notification volume.'],
+    notes: ['Dynamic notifications (e.g. alerts) have independent event and severity evaluation.'],
+  },
+  'settings.notification.DAILY_DIGEST_ENABLED': {
+    title: 'Daily Digest (Reserved)',
+    summary: 'Reserved feature flag. Currently does not send daily digests.',
+    usage: 'This is a P4 reserved feature. Enabling it has no effect at this time.',
+    valueNotes: ['Preserved for a future daily digest aggregation feature.'],
+    impact: ['No current effect.'],
+    notes: ['A future version will aggregate the day\'s notifications into a single digest push.'],
+  },
+  // ------------------------------------------------------------------
+  // System runtime
+  // ------------------------------------------------------------------
+  'settings.system.LOG_LEVEL': {
+    title: 'Log Level',
+    summary: 'Controls application log verbosity.',
+    usage: 'Choose DEBUG, INFO, WARNING, ERROR, or CRITICAL. Higher levels produce fewer logs.',
+    valueNotes: [
+      'DEBUG outputs the most detailed logs, useful for troubleshooting.',
+      'Some runtime components may require a restart to fully apply the new level.',
+    ],
+    impact: ['Affects log output volume and detail.'],
+    notes: ['Some runtime components may need a restart for full effect.'],
+  },
+  'settings.system.DEBUG': {
+    title: 'Debug Mode',
+    summary: 'Enables debug mode with verbose logging.',
+    usage: 'When enabled, more internal state and debug information is output.',
+    valueNotes: ['Disable in production to reduce log volume.'],
+    impact: ['Affects log detail and runtime behavior.'],
+    notes: ['Debug mode can affect performance; not recommended for long-term use.'],
+  },
+  'settings.system.MAX_WORKERS': {
+    title: 'Max Workers',
+    summary: 'Controls the number of concurrent stock analysis threads.',
+    usage: 'Set the number of parallel analysis workers. Higher values increase concurrency but also API rate-limit risk.',
+    valueNotes: [
+      'Keep low to avoid triggering data-source or LLM API rate limits.',
+      'Limited by API key quotas and network bandwidth.',
+    ],
+    impact: ['Affects total analysis time and API call frequency.'],
+    notes: ['Too many workers can cause API rate-limit errors.'],
+  },
+  'settings.system.ANALYSIS_DELAY': {
+    title: 'Analysis Delay',
+    summary: 'Delay in seconds between stock analyses for rate limiting.',
+    usage: 'Set 0 for no delay. A positive value waits the specified seconds after each stock before starting the next.',
+    valueNotes: ['Useful when APIs have strict rate limits.'],
+    impact: ['Affects total analysis time.'],
+    notes: ['Total time ≈ stock count × per-stock time + (count-1) × ANALYSIS_DELAY.'],
+  },
+  'settings.system.SAVE_CONTEXT_SNAPSHOT': {
+    title: 'Save Context Snapshot',
+    summary: 'Controls whether the full analysis history context_snapshot is persisted to the database.',
+    usage: 'Enabled by default. When disabled, new history records do not persist enhanced_context, market_phase_summary, AnalysisContextPack overview, diagnostic snapshots, or other context_snapshot content.',
+    valueNotes: [
+      'When disabled, history detail, completed task status, and Web report pages cannot read low-sensitivity input-block summaries from persisted records.',
+      'This switch does not disable AnalysisContextPack construction for the current run and does not remove the low-sensitivity pack summary from LLM prompts.',
+      'The CLI --no-context-snapshot flag has the same persistence effect as setting this to false.',
+    ],
+    impact: ['Affects historical transparency, diagnostics that rely on context snapshots, and Web report data-source summaries.'],
+    notes: ['To disable the P3-P5 pack integration itself, roll back the related code; there is no runtime pack master switch.'],
+  },
+  'settings.system.market_review': {
+    title: 'Market Review',
+    summary: 'Controls the market review feature: on/off, coverage region, and color scheme.',
+    usage: 'MARKET_REVIEW_ENABLED toggles market review; MARKET_REVIEW_REGION selects markets (cn/hk/us/both); MARKET_REVIEW_COLOR_SCHEME selects colors.',
+    valueNotes: [
+      'cn covers A-shares, hk covers Hong Kong, us covers US stocks, both covers all.',
+      'Color scheme affects how index changes are displayed: green_up = green for gains/red for losses; red_up = red for gains/green for losses.',
+    ],
+    impact: ['Affects the market overview section in analysis reports.'],
+    notes: ['Market review depends on the availability of index data sources for the selected markets.'],
   },
 };
 

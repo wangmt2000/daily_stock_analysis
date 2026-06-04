@@ -117,6 +117,85 @@ describe('AlertRuleList', () => {
     expect(screen.getByText('未冷却')).toBeInTheDocument();
   });
 
+  it('renders portfolio scope labels and child-target cooldown hint', () => {
+    renderList({
+      rules: [
+        {
+          id: 4,
+          name: '持仓 RSI',
+          targetScope: 'portfolio_holdings',
+          target: 'all',
+          alertType: 'rsi_threshold',
+          parameters: { direction: 'below', period: 12, threshold: 30 },
+          severity: 'warning',
+          enabled: true,
+          source: 'api',
+          cooldownActive: false,
+        },
+        {
+          id: 5,
+          name: '组合止损',
+          targetScope: 'portfolio_account',
+          target: '9',
+          alertType: 'portfolio_stop_loss',
+          parameters: { mode: 'breach' },
+          severity: 'critical',
+          enabled: true,
+          source: 'api',
+          cooldownActive: false,
+        },
+      ],
+    });
+
+    expect(screen.getByText('持仓标的')).toBeInTheDocument();
+    expect(screen.getByText('子目标见触发历史')).toBeInTheDocument();
+    expect(screen.getByText('账户 9')).toBeInTheDocument();
+    expect(screen.getAllByText('组合止损').length).toBeGreaterThan(0);
+    expect(screen.getByText('已触发止损')).toBeInTheDocument();
+  });
+
+  it('renders market scope labels, filters, and parameters', () => {
+    renderList({
+      rules: [
+        {
+          id: 6,
+          name: 'A 股红黄灯',
+          targetScope: 'market',
+          target: 'cn',
+          alertType: 'market_light_status',
+          parameters: { statuses: ['red', 'yellow'] },
+          severity: 'critical',
+          enabled: true,
+          source: 'api',
+          cooldownActive: false,
+        },
+        {
+          id: 7,
+          name: '美股分数下降',
+          targetScope: 'market',
+          target: 'us',
+          alertType: 'market_light_score_drop',
+          parameters: { minDrop: 15 },
+          severity: 'warning',
+          enabled: true,
+          source: 'api',
+          cooldownActive: false,
+        },
+      ],
+    });
+
+    expect(screen.getByText('A 股')).toBeInTheDocument();
+    expect(screen.getByText('美股')).toBeInTheDocument();
+    expect(screen.getAllByText('大盘市场').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('大盘红绿灯状态').length).toBeGreaterThan(0);
+    expect(screen.getByText('红灯 / 黄灯')).toBeInTheDocument();
+    expect(screen.getByText('Score 下降 >= 15')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('规则类型'), { target: { value: 'market_light_score_drop' } });
+
+    expect(onAlertTypeFilterChange).toHaveBeenCalledWith('market_light_score_drop');
+  });
+
   it('runs test and toggles enabled state', () => {
     renderList();
 

@@ -1,10 +1,20 @@
 import type React from 'react';
-import { useState } from 'react';
-import { Button, Card, Checkbox, Input, Select } from '../common';
-import type { AlertRuleCreateRequest, AlertSeverity, AlertType } from '../../types/alerts';
+import { useEffect, useMemo, useState } from 'react';
+import { portfolioApi } from '../../api/portfolio';
+import type {
+  AlertRuleCreateRequest,
+  AlertSeverity,
+  AlertTargetScope,
+  AlertType,
+  MarketLightStatus,
+  MarketRegion,
+  PortfolioStopLossMode,
+} from '../../types/alerts';
+import type { PortfolioAccountItem } from '../../types/portfolio';
 import { validateStockCode } from '../../utils/validation';
+import { Button, Card, Checkbox, Input, Select } from '../common';
 
-const ALERT_TYPE_OPTIONS = [
+const SYMBOL_ALERT_TYPE_OPTIONS = [
   { value: 'price_cross', label: '价格突破' },
   { value: 'price_change_percent', label: '涨跌幅' },
   { value: 'volume_spike', label: '成交量放大' },
@@ -13,6 +23,26 @@ const ALERT_TYPE_OPTIONS = [
   { value: 'macd_cross', label: 'MACD 金叉/死叉' },
   { value: 'kdj_cross', label: 'KDJ 金叉/死叉' },
   { value: 'cci_threshold', label: 'CCI 阈值' },
+];
+
+const PORTFOLIO_ALERT_TYPE_OPTIONS = [
+  { value: 'portfolio_stop_loss', label: '组合止损' },
+  { value: 'portfolio_concentration', label: '组合集中度' },
+  { value: 'portfolio_drawdown', label: '组合回撤' },
+  { value: 'portfolio_price_stale', label: '组合价格状态' },
+];
+
+const MARKET_ALERT_TYPE_OPTIONS = [
+  { value: 'market_light_status', label: '大盘红绿灯状态' },
+  { value: 'market_light_score_drop', label: '大盘红绿灯分数下降' },
+];
+
+const TARGET_SCOPE_OPTIONS = [
+  { value: 'single_symbol', label: '单标的' },
+  { value: 'watchlist', label: '自选股' },
+  { value: 'portfolio_holdings', label: '持仓标的' },
+  { value: 'portfolio_account', label: '持仓账户' },
+  { value: 'market', label: '大盘市场' },
 ];
 
 const SEVERITY_OPTIONS = [
@@ -41,6 +71,22 @@ const CROSS_DIRECTION_OPTIONS = [
   { value: 'bearish_cross', label: '死叉' },
 ];
 
+const STOP_LOSS_MODE_OPTIONS = [
+  { value: 'near', label: '接近止损' },
+  { value: 'breach', label: '已触发止损' },
+];
+
+const MARKET_REGION_OPTIONS = [
+  { value: 'cn', label: 'A 股（cn）' },
+  { value: 'hk', label: '港股（hk）' },
+  { value: 'us', label: '美股（us）' },
+];
+
+const MARKET_LIGHT_STATUS_OPTIONS: Array<{ value: MarketLightStatus; label: string }> = [
+  { value: 'red', label: '红灯' },
+  { value: 'yellow', label: '黄灯' },
+];
+
 const MAX_REQUESTED_DAYS = 365;
 
 interface AlertRuleFormProps {
@@ -48,9 +94,28 @@ interface AlertRuleFormProps {
   isSubmitting?: boolean;
 }
 
+function isPortfolioScope(scope: AlertTargetScope): boolean {
+  return scope === 'portfolio_holdings' || scope === 'portfolio_account';
+}
+
+function defaultAlertTypeForScope(scope: AlertTargetScope): AlertType {
+  if (scope === 'market') return 'market_light_status';
+  return scope === 'portfolio_account' ? 'portfolio_stop_loss' : 'price_cross';
+}
+
+function optionsForScope(scope: AlertTargetScope) {
+  if (scope === 'market') return MARKET_ALERT_TYPE_OPTIONS;
+  return scope === 'portfolio_account' ? PORTFOLIO_ALERT_TYPE_OPTIONS : SYMBOL_ALERT_TYPE_OPTIONS;
+}
+
 export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmitting = false }) => {
   const [name, setName] = useState('');
+  const [targetScope, setTargetScope] = useState<AlertTargetScope>('single_symbol');
   const [target, setTarget] = useState('');
+  const [portfolioTarget, setPortfolioTarget] = useState('all');
+  const [marketRegion, setMarketRegion] = useState<MarketRegion>('cn');
+  const [accounts, setAccounts] = useState<PortfolioAccountItem[]>([]);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
   const [alertType, setAlertType] = useState<AlertType>('price_cross');
   const [severity, setSeverity] = useState<AlertSeverity>('warning');
   const [enabled, setEnabled] = useState(true);
@@ -58,6 +123,7 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
   const [changeDirection, setChangeDirection] = useState<'up' | 'down'>('up');
   const [thresholdDirection, setThresholdDirection] = useState<'above' | 'below'>('above');
   const [crossDirection, setCrossDirection] = useState<'bullish_cross' | 'bearish_cross'>('bullish_cross');
+  const [stopLossMode, setStopLossMode] = useState<PortfolioStopLossMode>('near');
   const [price, setPrice] = useState('');
   const [changePct, setChangePct] = useState('');
   const [multiplier, setMultiplier] = useState('');
@@ -69,7 +135,37 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
   const [signalPeriod, setSignalPeriod] = useState('9');
   const [kPeriod, setKPeriod] = useState('3');
   const [dPeriod, setDPeriod] = useState('3');
+  const [marketLightStatuses, setMarketLightStatuses] = useState<MarketLightStatus[]>(['red', 'yellow']);
+  const [minDrop, setMinDrop] = useState('10');
   const [formError, setFormError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isPortfolioScope(targetScope)) return undefined;
+    let cancelled = false;
+    void portfolioApi.getAccounts(false)
+      .then((response) => {
+        if (cancelled) return;
+        setAccounts(response.accounts ?? []);
+        setAccountsError(null);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setAccounts([]);
+        setAccountsError(error instanceof Error ? error.message : '账户加载失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [targetScope]);
+
+  const alertTypeOptions = useMemo(() => optionsForScope(targetScope), [targetScope]);
+  const portfolioTargetOptions = useMemo(() => [
+    { value: 'all', label: '全部账户' },
+    ...accounts.map((account) => ({
+      value: String(account.id),
+      label: `${account.name} #${account.id}`,
+    })),
+  ], [accounts]);
 
   const resetParameters = (nextType: AlertType) => {
     if (nextType === 'price_cross') {
@@ -101,7 +197,21 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
       setThresholdDirection('above');
       setPeriod('14');
       setThreshold('');
+    } else if (nextType === 'portfolio_stop_loss') {
+      setStopLossMode('near');
+    } else if (nextType === 'market_light_status') {
+      setMarketLightStatuses(['red', 'yellow']);
+    } else if (nextType === 'market_light_score_drop') {
+      setMinDrop('10');
     }
+  };
+
+  const toggleMarketLightStatus = (status: MarketLightStatus) => {
+    setMarketLightStatuses((current) => (
+      current.includes(status)
+        ? current.filter((item) => item !== status)
+        : [...current, status]
+    ));
   };
 
   const parsePositiveNumber = (value: string, label: string): number | null => {
@@ -153,71 +263,119 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
     return true;
   };
 
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const targetValidation = validateStockCode(target);
-    if (!targetValidation.valid) {
-      setFormError(targetValidation.message ?? '股票代码格式不正确');
-      return;
-    }
-
-    let parameters: AlertRuleCreateRequest['parameters'];
+  const buildParameters = (): AlertRuleCreateRequest['parameters'] | null => {
     if (alertType === 'price_cross') {
       const parsedPrice = parsePositiveNumber(price, '价格阈值');
-      if (parsedPrice == null) return;
-      parameters = { direction: priceDirection, price: parsedPrice };
-    } else if (alertType === 'price_change_percent') {
+      if (parsedPrice == null) return null;
+      return { direction: priceDirection, price: parsedPrice };
+    }
+    if (alertType === 'price_change_percent') {
       const parsedChangePct = parsePositiveNumber(changePct, '涨跌幅阈值');
-      if (parsedChangePct == null) return;
-      parameters = { direction: changeDirection, changePct: parsedChangePct };
-    } else if (alertType === 'volume_spike') {
+      if (parsedChangePct == null) return null;
+      return { direction: changeDirection, changePct: parsedChangePct };
+    }
+    if (alertType === 'volume_spike') {
       const parsedMultiplier = parsePositiveNumber(multiplier, '成交量倍数');
-      if (parsedMultiplier == null) return;
-      parameters = { multiplier: parsedMultiplier };
-    } else if (alertType === 'ma_price_cross') {
+      if (parsedMultiplier == null) return null;
+      return { multiplier: parsedMultiplier };
+    }
+    if (alertType === 'ma_price_cross') {
       const parsedWindow = parseIntegerInRange(window, '均线周期');
-      if (parsedWindow == null) return;
-      parameters = { direction: thresholdDirection, window: parsedWindow };
-    } else if (alertType === 'rsi_threshold') {
+      if (parsedWindow == null) return null;
+      return { direction: thresholdDirection, window: parsedWindow };
+    }
+    if (alertType === 'rsi_threshold') {
       const parsedPeriod = parseIntegerInRange(period, 'RSI 周期');
       const parsedThreshold = parseRsiThreshold(threshold);
-      if (parsedPeriod == null || parsedThreshold == null) return;
-      parameters = { direction: thresholdDirection, period: parsedPeriod, threshold: parsedThreshold };
-    } else if (alertType === 'macd_cross') {
+      if (parsedPeriod == null || parsedThreshold == null) return null;
+      return { direction: thresholdDirection, period: parsedPeriod, threshold: parsedThreshold };
+    }
+    if (alertType === 'macd_cross') {
       const parsedFast = parseIntegerInRange(fastPeriod, '快线周期');
       const parsedSlow = parseIntegerInRange(slowPeriod, '慢线周期');
       const parsedSignal = parseIntegerInRange(signalPeriod, '信号周期');
-      if (parsedFast == null || parsedSlow == null || parsedSignal == null) return;
+      if (parsedFast == null || parsedSlow == null || parsedSignal == null) return null;
       if (parsedFast >= parsedSlow) {
         setFormError('快线周期必须小于慢线周期');
-        return;
+        return null;
       }
-      if (!ensureRequiredBarsWithinLimit('MACD', parsedSlow + parsedSignal + 1)) return;
-      parameters = {
+      if (!ensureRequiredBarsWithinLimit('MACD', parsedSlow + parsedSignal + 1)) return null;
+      return {
         direction: crossDirection,
         fastPeriod: parsedFast,
         slowPeriod: parsedSlow,
         signalPeriod: parsedSignal,
       };
-    } else if (alertType === 'kdj_cross') {
+    }
+    if (alertType === 'kdj_cross') {
       const parsedPeriod = parseIntegerInRange(period, 'KDJ 周期');
       const parsedK = parseIntegerInRange(kPeriod, 'K 平滑周期');
       const parsedD = parseIntegerInRange(dPeriod, 'D 平滑周期');
-      if (parsedPeriod == null || parsedK == null || parsedD == null) return;
-      if (!ensureRequiredBarsWithinLimit('KDJ', parsedPeriod + parsedK + parsedD + 1)) return;
-      parameters = { direction: crossDirection, period: parsedPeriod, kPeriod: parsedK, dPeriod: parsedD };
-    } else {
+      if (parsedPeriod == null || parsedK == null || parsedD == null) return null;
+      if (!ensureRequiredBarsWithinLimit('KDJ', parsedPeriod + parsedK + parsedD + 1)) return null;
+      return { direction: crossDirection, period: parsedPeriod, kPeriod: parsedK, dPeriod: parsedD };
+    }
+    if (alertType === 'cci_threshold') {
       const parsedPeriod = parseIntegerInRange(period, 'CCI 周期');
       const parsedThreshold = parseFiniteNumber(threshold, 'CCI 阈值');
-      if (parsedPeriod == null || parsedThreshold == null) return;
-      parameters = { direction: thresholdDirection, period: parsedPeriod, threshold: parsedThreshold };
+      if (parsedPeriod == null || parsedThreshold == null) return null;
+      return { direction: thresholdDirection, period: parsedPeriod, threshold: parsedThreshold };
     }
+    if (alertType === 'portfolio_stop_loss') {
+      return { mode: stopLossMode };
+    }
+    if (alertType === 'market_light_status') {
+      if (marketLightStatuses.length === 0) {
+        setFormError('至少选择一个红绿灯状态');
+        return null;
+      }
+      return { statuses: marketLightStatuses };
+    }
+    if (alertType === 'market_light_score_drop') {
+      const parsedMinDrop = parsePositiveNumber(minDrop, 'Score 下降阈值');
+      if (parsedMinDrop == null) return null;
+      return { minDrop: parsedMinDrop };
+    }
+    return {};
+  };
+
+  const handleScopeChange = (value: string) => {
+    const nextScope = value as AlertTargetScope;
+    const nextType = defaultAlertTypeForScope(nextScope);
+    setTargetScope(nextScope);
+    setAlertType(nextType);
+    setPortfolioTarget('all');
+    setMarketRegion('cn');
+    resetParameters(nextType);
+    setFormError(null);
+  };
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    let resolvedTarget = target.trim();
+    if (targetScope === 'single_symbol') {
+      const targetValidation = validateStockCode(target);
+      if (!targetValidation.valid) {
+        setFormError(targetValidation.message ?? '股票代码格式不正确');
+        return;
+      }
+      resolvedTarget = targetValidation.normalized;
+    } else if (targetScope === 'watchlist') {
+      resolvedTarget = 'default';
+    } else if (targetScope === 'market') {
+      resolvedTarget = marketRegion;
+    } else {
+      resolvedTarget = portfolioTarget;
+    }
+
+    const parameters = buildParameters();
+    if (parameters == null) return;
 
     setFormError(null);
     const submitted = await onSubmit({
       name: name.trim() || undefined,
-      targetScope: 'single_symbol',
-      target: targetValidation.normalized,
+      targetScope,
+      target: resolvedTarget,
       alertType,
       parameters,
       severity,
@@ -226,6 +384,8 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
     if (submitted === false) return;
     setName('');
     setTarget('');
+    setPortfolioTarget('all');
+    setMarketRegion('cn');
     setPrice('');
     setChangePct('');
     setMultiplier('');
@@ -237,8 +397,57 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
     setSignalPeriod('9');
     setKPeriod('3');
     setDPeriod('3');
+    setMarketLightStatuses(['red', 'yellow']);
+    setMinDrop('10');
     resetParameters(alertType);
     setEnabled(true);
+  };
+
+  const renderTargetControl = () => {
+    if (targetScope === 'single_symbol') {
+      return (
+        <Input
+          label="标的代码"
+          value={target}
+          onChange={(event) => setTarget(event.target.value)}
+          placeholder="600519 / AAPL / hk00700"
+          disabled={isSubmitting}
+        />
+      );
+    }
+    if (targetScope === 'watchlist') {
+      return (
+        <Input
+          label="目标"
+          value="default"
+          onChange={() => undefined}
+          disabled
+        />
+      );
+    }
+    if (targetScope === 'market') {
+      return (
+        <Select
+          label="市场区域"
+          value={marketRegion}
+          options={MARKET_REGION_OPTIONS}
+          disabled={isSubmitting}
+          onChange={(value) => setMarketRegion(value as MarketRegion)}
+        />
+      );
+    }
+    return (
+      <div className="space-y-2">
+        <Select
+          label="账户"
+          value={portfolioTarget}
+          options={portfolioTargetOptions}
+          disabled={isSubmitting}
+          onChange={setPortfolioTarget}
+        />
+        {accountsError ? <p role="alert" className="text-xs text-warning">{accountsError}</p> : null}
+      </div>
+    );
   };
 
   return (
@@ -252,17 +461,18 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
             placeholder="可选，例如 茅台价格突破"
             disabled={isSubmitting}
           />
-          <Input
-            label="标的代码"
-            value={target}
-            onChange={(event) => setTarget(event.target.value)}
-            placeholder="600519 / AAPL / hk00700"
+          <Select
+            label="目标范围"
+            value={targetScope}
+            options={TARGET_SCOPE_OPTIONS}
             disabled={isSubmitting}
+            onChange={handleScopeChange}
           />
+          {renderTargetControl()}
           <Select
             label="规则类型"
             value={alertType}
-            options={ALERT_TYPE_OPTIONS}
+            options={alertTypeOptions}
             disabled={isSubmitting}
             onChange={(value) => {
               const nextType = value as AlertType;
@@ -499,6 +709,46 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
               disabled={isSubmitting}
             />
           </div>
+        ) : null}
+
+        {alertType === 'portfolio_stop_loss' ? (
+          <Select
+            label="止损模式"
+            value={stopLossMode}
+            options={STOP_LOSS_MODE_OPTIONS}
+            disabled={isSubmitting}
+            onChange={(value) => setStopLossMode(value as PortfolioStopLossMode)}
+          />
+        ) : null}
+
+        {alertType === 'market_light_status' ? (
+          <div className="space-y-2">
+            <div className="text-sm font-medium text-foreground">触发状态</div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {MARKET_LIGHT_STATUS_OPTIONS.map((option) => (
+                <Checkbox
+                  key={option.value}
+                  label={option.label}
+                  checked={marketLightStatuses.includes(option.value)}
+                  disabled={isSubmitting}
+                  onChange={() => toggleMarketLightStatus(option.value)}
+                />
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {alertType === 'market_light_score_drop' ? (
+          <Input
+            label="Score 下降阈值"
+            type="number"
+            min="0"
+            max="100"
+            step="1"
+            value={minDrop}
+            onChange={(event) => setMinDrop(event.target.value)}
+            disabled={isSubmitting}
+          />
         ) : null}
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

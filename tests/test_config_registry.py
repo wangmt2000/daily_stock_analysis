@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from src.core.config_registry import (
+    WEB_SETTINGS_HIDDEN_FROM_UI,
     build_schema_response,
     get_field_definition,
     get_registered_field_keys,
@@ -148,8 +149,47 @@ class TestAstrBotFieldsRegistered(unittest.TestCase):
             self.assertIn(key, field_keys, f"{key} missing from schema response")
 
 
+class TestAlphaSiftFieldsRegistered(unittest.TestCase):
+    def test_install_spec_is_sensitive(self):
+        field = get_field_definition("ALPHASIFT_INSTALL_SPEC")
+
+        self.assertTrue(field["is_sensitive"])
+        self.assertEqual(field["ui_control"], "password")
+
+
 class TestSettingsHelpMetadata(unittest.TestCase):
     """Field help metadata should be available for covered settings help slices."""
+
+    _AI_MODEL_HIDDEN_KEYS = {
+        "LLM_CHANNELS",
+        "LLM_TEMPERATURE",
+        "LITELLM_MODEL",
+        "AGENT_LITELLM_MODEL",
+        "LITELLM_FALLBACK_MODELS",
+        "AIHUBMIX_KEY",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_API_KEYS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEYS",
+        "GEMINI_MODEL",
+        "GEMINI_MODEL_FALLBACK",
+        "GEMINI_TEMPERATURE",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEYS",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_TEMPERATURE",
+        "ANTHROPIC_MAX_TOKENS",
+        "OPENAI_API_KEY",
+        "OPENAI_API_KEYS",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "OPENAI_VISION_MODEL",
+        "OPENAI_TEMPERATURE",
+        "VISION_MODEL",
+    }
+    _SYSTEM_HIDDEN_KEYS = {
+        "ADMIN_AUTH_ENABLED",
+    }
 
     _HELP_KEYS = (
         "STOCK_LIST",
@@ -167,6 +207,68 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         "EMAIL_RECEIVERS",
         "SCHEDULE_TIME",
         "ADMIN_AUTH_ENABLED",
+        # PR3 Phase 1: Agent + Event Alert
+        "AGENT_MODE",
+        "AGENT_MAX_STEPS",
+        "AGENT_SKILLS",
+        "AGENT_SKILL_DIR",
+        "AGENT_NL_ROUTING",
+        "AGENT_ARCH",
+        "AGENT_ORCHESTRATOR_MODE",
+        "AGENT_ORCHESTRATOR_TIMEOUT_S",
+        "AGENT_RISK_OVERRIDE",
+        "AGENT_DEEP_RESEARCH_BUDGET",
+        "AGENT_DEEP_RESEARCH_TIMEOUT",
+        "AGENT_MEMORY_ENABLED",
+        "AGENT_SKILL_AUTOWEIGHT",
+        "AGENT_SKILL_ROUTING",
+        "AGENT_CONTEXT_COMPRESSION_ENABLED",
+        "AGENT_CONTEXT_COMPRESSION_PROFILE",
+        "AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS",
+        "AGENT_CONTEXT_PROTECTED_TURNS",
+        "AGENT_EVENT_MONITOR_ENABLED",
+        "AGENT_EVENT_MONITOR_INTERVAL_MINUTES",
+        "AGENT_EVENT_ALERT_RULES_JSON",
+        # PR3 Phase 2: Backtest
+        "BACKTEST_ENABLED",
+        "BACKTEST_EVAL_WINDOW_DAYS",
+        "BACKTEST_MIN_AGE_DAYS",
+        "BACKTEST_ENGINE_VERSION",
+        "BACKTEST_NEUTRAL_BAND_PCT",
+        # PR3 Phase 3: Report + Notification Route
+        "REPORT_SUMMARY_ONLY",
+        "REPORT_SHOW_LLM_MODEL",
+        "REPORT_TEMPLATES_DIR",
+        "REPORT_RENDERER_ENABLED",
+        "REPORT_INTEGRITY_ENABLED",
+        "REPORT_INTEGRITY_RETRY",
+        "REPORT_HISTORY_COMPARE_N",
+        "SINGLE_STOCK_NOTIFY",
+        "MERGE_EMAIL_NOTIFICATION",
+        "NOTIFICATION_REPORT_CHANNELS",
+        "NOTIFICATION_ALERT_CHANNELS",
+        "NOTIFICATION_SYSTEM_ERROR_CHANNELS",
+        "NOTIFICATION_DEDUP_TTL_SECONDS",
+        "NOTIFICATION_COOLDOWN_SECONDS",
+        "NOTIFICATION_QUIET_HOURS",
+        "NOTIFICATION_TIMEZONE",
+        "NOTIFICATION_MIN_SEVERITY",
+        "NOTIFICATION_DAILY_DIGEST_ENABLED",
+        # PR3 Phase 4: System Runtime
+        "LOG_LEVEL",
+        "DEBUG",
+        "MAX_WORKERS",
+        "ANALYSIS_DELAY",
+        "SAVE_CONTEXT_SNAPSHOT",
+        "MARKET_REVIEW_ENABLED",
+        "MARKET_REVIEW_REGION",
+        "MARKET_REVIEW_COLOR_SCHEME",
+        # Issue #1512: stream, log, and WebUI startup fields
+        "DINGTALK_STREAM_ENABLED",
+        "FEISHU_STREAM_ENABLED",
+        "LOG_DIR",
+        "WEBUI_ENABLED",
+        "WEBUI_AUTO_BUILD",
     )
 
     def test_representative_fields_have_help_metadata(self):
@@ -176,10 +278,43 @@ class TestSettingsHelpMetadata(unittest.TestCase):
             self.assertTrue(field.get("examples"), f"{key} missing examples")
             self.assertTrue(field.get("docs"), f"{key} missing docs")
 
+    def test_web_settings_visible_fields_have_help_metadata(self):
+        """Every field rendered by SettingsField must have Help metadata."""
+
+        missing = []
+        for key in get_registered_field_keys():
+            field = get_field_definition(key)
+            if key in self._SYSTEM_HIDDEN_KEYS:
+                continue
+            if field.get("category") == "ai_model" and key in self._AI_MODEL_HIDDEN_KEYS:
+                # These legacy fields are hidden only when channel config is active;
+                # they are still visible/configurable in legacy setups.
+                pass
+
+            if not field.get("help_key") or not field.get("examples") or not field.get("docs"):
+                missing.append(key)
+
+        self.assertEqual([], missing)
+
     def test_webui_host_is_explicitly_registered(self):
         field = get_field_definition("WEBUI_HOST")
         self.assertEqual(field["category"], "system")
         self.assertNotEqual(field["display_order"], 9000)
+
+    def test_save_context_snapshot_is_explicitly_registered(self):
+        field = get_field_definition("SAVE_CONTEXT_SNAPSHOT")
+
+        self.assertEqual(field["category"], "system")
+        self.assertEqual(field["data_type"], "boolean")
+        self.assertEqual(field["ui_control"], "switch")
+        self.assertFalse(field["is_sensitive"])
+        self.assertTrue(field["is_editable"])
+        self.assertEqual(field["default_value"], "true")
+        self.assertEqual(field["display_order"], 52)
+        self.assertEqual(field["help_key"], "settings.system.SAVE_CONTEXT_SNAPSHOT")
+        self.assertTrue(field.get("examples"))
+        self.assertTrue(field.get("docs"))
+        self.assertIn("analysis-context-pack.md#p6-", field["docs"][0]["href"])
 
     def test_restart_warning_codes_match_runtime_behavior(self):
         restart_required_keys = (
@@ -188,6 +323,12 @@ class TestSettingsHelpMetadata(unittest.TestCase):
             "SCHEDULE_RUN_IMMEDIATELY",
             "WEBUI_HOST",
             "WEBUI_PORT",
+            "WEBUI_ENABLED",
+            "WEBUI_AUTO_BUILD",
+            "LOG_DIR",
+            "DINGTALK_STREAM_ENABLED",
+            "FEISHU_STREAM_ENABLED",
+            "LOG_LEVEL",
         )
         for key in restart_required_keys:
             field = get_field_definition(key)
@@ -211,6 +352,67 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         field = get_field_definition("ADMIN_AUTH_ENABLED")
         self.assertFalse(field["is_editable"])
         self.assertIn("auth_settings_endpoint_required", field.get("warning_codes", []))
+
+
+class TestIssue1512SettingsFields(unittest.TestCase):
+    """Issue #1512 visible fields must be explicitly registered."""
+
+    def test_stream_fields_are_registered_as_notification_switches(self) -> None:
+        expected = {
+            "FEISHU_STREAM_ENABLED": 17,
+            "DINGTALK_STREAM_ENABLED": 35,
+        }
+        for key, display_order in expected.items():
+            field = get_field_definition(key)
+            self.assertEqual(field["category"], "notification")
+            self.assertEqual(field["data_type"], "boolean")
+            self.assertEqual(field["ui_control"], "switch")
+            self.assertEqual(field["default_value"], "false")
+            self.assertEqual(field["display_order"], display_order)
+            self.assertTrue(field.get("help_key"))
+            self.assertTrue(field.get("examples"))
+            self.assertTrue(field.get("docs"))
+            self.assertIn("not_webhook_delivery", field.get("warning_codes", []))
+            self.assertIn("restart_required", field.get("warning_codes", []))
+
+    def test_system_runtime_fields_are_registered_with_restart_boundary(self) -> None:
+        expected = {
+            "LOG_DIR": ("string", "text", "./logs", 31),
+            "WEBUI_ENABLED": ("boolean", "switch", "false", 37),
+            "WEBUI_AUTO_BUILD": ("boolean", "switch", "true", 38),
+        }
+        for key, (data_type, ui_control, default_value, display_order) in expected.items():
+            field = get_field_definition(key)
+            self.assertEqual(field["category"], "system")
+            self.assertEqual(field["data_type"], data_type)
+            self.assertEqual(field["ui_control"], ui_control)
+            self.assertEqual(field["default_value"], default_value)
+            self.assertEqual(field["display_order"], display_order)
+            self.assertTrue(field.get("help_key"))
+            self.assertTrue(field.get("examples"))
+            self.assertTrue(field.get("docs"))
+            self.assertIn("restart_required", field.get("warning_codes", []))
+
+
+class TestEnvExampleWebSettingsCoverage(unittest.TestCase):
+    """Active .env.example keys must be registered or intentionally hidden."""
+
+    _ENV_EXAMPLE = Path(__file__).resolve().parents[1] / ".env.example"
+    _ACTIVE_ENV_ASSIGNMENT_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")
+
+    def test_active_env_example_keys_are_registered_or_hidden_from_web_ui(self) -> None:
+        active_keys = {
+            match.group(1)
+            for line in self._ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+            for match in [self._ACTIVE_ENV_ASSIGNMENT_RE.match(line.strip())]
+            if match
+        }
+        registered_keys = set(get_registered_field_keys())
+
+        self.assertEqual(
+            sorted(active_keys - registered_keys - WEB_SETTINGS_HIDDEN_FROM_UI),
+            [],
+        )
 
 
 class TestSettingsHelpContract(unittest.TestCase):
@@ -316,6 +518,50 @@ class TestNotificationRouteFieldsRegistered(unittest.TestCase):
         field_keys = {f["key"] for f in notification_cat["fields"]}
         for key in self._ROUTE_KEYS:
             self.assertIn(key, field_keys, f"{key} missing from schema response")
+
+
+class TestAgentEventAlertRulesJsonField(unittest.TestCase):
+    """Event Monitor legacy JSON config must advertise its P8 boundary."""
+
+    def test_description_marks_legacy_and_web_api_boundaries(self):
+        field = get_field_definition("AGENT_EVENT_ALERT_RULES_JSON")
+        description = field["description"]
+
+        self.assertIn("Legacy JSON supports only price_cross, price_change_percent, and volume_spike", description)
+        self.assertIn("Technical indicator", description)
+        self.assertIn("watchlist", description)
+        self.assertIn("portfolio", description)
+        self.assertIn("market light", description)
+        self.assertIn("Alert API/Web center", description)
+
+
+class TestAgentContextCompressionFields(unittest.TestCase):
+    """Visible chat context compression config must be exposed consistently."""
+
+    def test_profile_uses_chinese_labels_and_enum(self):
+        field = get_field_definition("AGENT_CONTEXT_COMPRESSION_PROFILE")
+
+        self.assertEqual(field["category"], "agent")
+        self.assertEqual(field["ui_control"], "select")
+        self.assertEqual(
+            field["validation"]["enum"],
+            ["cost", "balanced", "long_context_raw_first"],
+        )
+        self.assertEqual(
+            [option["label"] for option in field["options"]],
+            ["成本优先", "均衡推荐", "长上下文原文优先"],
+        )
+
+    def test_trigger_and_protected_turns_can_follow_profile_preset(self):
+        trigger = get_field_definition("AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS")
+        protected = get_field_definition("AGENT_CONTEXT_PROTECTED_TURNS")
+
+        self.assertEqual(trigger["default_value"], "")
+        self.assertEqual(protected["default_value"], "")
+        self.assertFalse(trigger["is_required"])
+        self.assertFalse(protected["is_required"])
+        self.assertIn("Leave empty", trigger["description"])
+        self.assertIn("Leave empty", protected["description"])
 
 
 class TestNotificationNoiseFieldsRegistered(unittest.TestCase):

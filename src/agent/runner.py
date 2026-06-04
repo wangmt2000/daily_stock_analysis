@@ -502,11 +502,14 @@ def run_agent_loop(
             assistant_msg: Dict[str, Any] = {
                 "role": "assistant",
                 "content": response.content,
+                "_trace_provider": response.provider,
+                "_trace_model": m,
                 "tool_calls": [
                     {
                         "id": tc.id,
                         "name": tc.name,
                         "arguments": tc.arguments,
+                        **({"provider_specific_fields": tc.provider_specific_fields} if tc.provider_specific_fields else {}),
                         **({"thought_signature": tc.thought_signature} if tc.thought_signature is not None else {}),
                     }
                     for tc in response.tool_calls
@@ -514,6 +517,8 @@ def run_agent_loop(
             }
             if response.reasoning_content is not None:
                 assistant_msg["reasoning_content"] = response.reasoning_content
+            if response.provider_blocks:
+                assistant_msg["provider_blocks"] = response.provider_blocks
             messages.append(assistant_msg)
 
             # Execute tools (parallel when > 1)

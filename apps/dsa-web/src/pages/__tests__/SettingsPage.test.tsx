@@ -7,6 +7,11 @@ import SettingsPage from '../SettingsPage';
 const {
   exportEnv,
   importEnv,
+  updateSystemConfig,
+  alphasiftEnable,
+  alphasiftInstall,
+  notifyAlphaSiftConfigChanged,
+  notifySystemConfigChanged,
   desktopCheckForUpdates,
   desktopGetUpdateState,
   desktopInstallDownloadedUpdate,
@@ -19,6 +24,7 @@ const {
   resetDraft,
   setDraftValue,
   applyPartialUpdate,
+  getChangedItems,
   refreshAfterExternalSave,
   refreshStatus,
   settingsPanelErrorBoundary,
@@ -28,6 +34,11 @@ const {
 } = vi.hoisted(() => ({
   exportEnv: vi.fn(),
   importEnv: vi.fn(),
+  updateSystemConfig: vi.fn(),
+  alphasiftEnable: vi.fn(),
+  alphasiftInstall: vi.fn(),
+  notifyAlphaSiftConfigChanged: vi.fn(),
+  notifySystemConfigChanged: vi.fn(),
   desktopCheckForUpdates: vi.fn(),
   desktopGetUpdateState: vi.fn(),
   desktopInstallDownloadedUpdate: vi.fn(),
@@ -40,6 +51,7 @@ const {
   resetDraft: vi.fn(),
   setDraftValue: vi.fn(),
   applyPartialUpdate: vi.fn(),
+  getChangedItems: vi.fn(),
   refreshAfterExternalSave: vi.fn(),
   refreshStatus: vi.fn(),
   settingsPanelErrorBoundary: vi.fn(),
@@ -65,7 +77,17 @@ vi.mock('../../api/systemConfig', () => ({
   systemConfigApi: {
     exportEnv: (...args: unknown[]) => exportEnv(...args),
     importEnv: (...args: unknown[]) => importEnv(...args),
+    update: (...args: unknown[]) => updateSystemConfig(...args),
   },
+}));
+
+vi.mock('../../api/alphasift', () => ({
+  alphasiftApi: {
+    enable: (...args: unknown[]) => alphasiftEnable(...args),
+    install: (...args: unknown[]) => alphasiftInstall(...args),
+  },
+  notifyAlphaSiftConfigChanged: (...args: unknown[]) => notifyAlphaSiftConfigChanged(...args),
+  notifySystemConfigChanged: (...args: unknown[]) => notifySystemConfigChanged(...args),
 }));
 
 vi.mock('../../utils/constants', async () => {
@@ -85,16 +107,21 @@ vi.mock('../../components/settings', () => ({
     </button>
   ),
   LLMChannelEditor: ({
+    items,
     onSaved,
   }: {
+    items: Array<{ key: string; value: string }>;
     onSaved: (items: Array<{ key: string; value: string }>) => void;
   }) => (
-    <button
-      type="button"
-      onClick={() => onSaved([{ key: 'LLM_CHANNELS', value: 'primary,backup' }])}
-    >
-      save llm channels
-    </button>
+    <div>
+      <div data-testid="llm-channel-editor-items">{items.map((item) => item.key).join(',')}</div>
+      <button
+        type="button"
+        onClick={() => onSaved([{ key: 'LLM_CHANNELS', value: 'primary,backup' }])}
+      >
+        save llm channels
+      </button>
+    </div>
   ),
   NotificationTestPanel: ({ items }: { items: Array<{ key: string; value: string }> }) => (
     <div>通知测试面板:{items.map((item) => item.key).join(',')}</div>
@@ -141,7 +168,27 @@ vi.mock('../../components/settings', () => ({
       ))}
     </nav>
   ),
-  SettingsField: ({ item }: { item: { key: string } }) => <div>{item.key}</div>,
+  SettingsField: ({
+    item,
+  }: {
+    item: {
+      key: string;
+      schema?: {
+        description?: string;
+        options?: Array<string | { label: string; value: string }>;
+      };
+    };
+  }) => (
+    <div data-testid={`settings-field-${item.key}`}>
+      <div>{item.key}</div>
+      {item.schema?.description ? <p>{item.schema.description}</p> : null}
+      {item.schema?.options?.map((option) => {
+        const label = typeof option === 'string' ? option : option.label;
+        const value = typeof option === 'string' ? option : option.value;
+        return <span key={`${item.key}-${value}`}>{label}</span>;
+      })}
+    </div>
+  ),
   SettingsLoading: () => <div>loading</div>,
   SettingsPanelErrorBoundary: ({
     title,
@@ -218,6 +265,7 @@ type ConfigState = {
   resetDraft: typeof resetDraft;
   setDraftValue: typeof setDraftValue;
   applyPartialUpdate: typeof applyPartialUpdate;
+  getChangedItems: () => Array<{ key: string; value: string }>;
   refreshAfterExternalSave: typeof refreshAfterExternalSave;
   configVersion: string;
   maskToken: string;
@@ -348,6 +396,7 @@ function buildSystemConfigState(overrides: ConfigOverride = {}) {
     resetDraft,
     setDraftValue,
     applyPartialUpdate,
+    getChangedItems: () => [],
     refreshAfterExternalSave,
     configVersion: 'v1',
     maskToken: '******',
@@ -381,6 +430,18 @@ describe('SettingsPage', () => {
       updatedKeys: ['STOCK_LIST'],
       warnings: [],
     });
+    updateSystemConfig.mockResolvedValue({
+      success: true,
+      configVersion: 'v2',
+      updatedKeys: ['ALPHASIFT_ENABLED'],
+      reloadTriggered: true,
+    });
+    alphasiftInstall.mockResolvedValue({
+      installed: true,
+      alreadyInstalled: true,
+      installSpecIsDefault: true,
+    });
+    alphasiftEnable.mockResolvedValue(undefined);
     desktopGetUpdateState.mockResolvedValue({
       status: 'idle',
       currentVersion: '3.12.0',
@@ -600,6 +661,89 @@ describe('SettingsPage', () => {
     expect(settingsPanelErrorBoundary).toHaveBeenCalledWith('Agent 设置');
   });
 
+  it('renders context compression profile labels and blank preset guidance in agent settings', () => {
+    const configState = buildSystemConfigState();
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      activeCategory: 'agent',
+      itemsByCategory: {
+        ...configState.itemsByCategory,
+        agent: [
+          {
+            key: 'AGENT_CONTEXT_COMPRESSION_PROFILE',
+            value: 'balanced',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'AGENT_CONTEXT_COMPRESSION_PROFILE',
+              category: 'agent',
+              dataType: 'string',
+              uiControl: 'select',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [
+                { label: '成本优先', value: 'cost' },
+                { label: '均衡推荐', value: 'balanced' },
+                { label: '长上下文原文优先', value: 'long_context_raw_first' },
+              ],
+              validation: {
+                enum: ['cost', 'balanced', 'long_context_raw_first'],
+              },
+              displayOrder: 72,
+            },
+          },
+          {
+            key: 'AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS',
+            value: '',
+            rawValueExists: false,
+            isMasked: false,
+            schema: {
+              key: 'AGENT_CONTEXT_COMPRESSION_TRIGGER_TOKENS',
+              category: 'agent',
+              dataType: 'integer',
+              uiControl: 'number',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: { min: 1000 },
+              displayOrder: 73,
+              description: '估算历史 token 超过该值时触发摘要；留空则跟随当前上下文压缩策略 profile 默认值。',
+            },
+          },
+          {
+            key: 'AGENT_CONTEXT_PROTECTED_TURNS',
+            value: '',
+            rawValueExists: false,
+            isMasked: false,
+            schema: {
+              key: 'AGENT_CONTEXT_PROTECTED_TURNS',
+              category: 'agent',
+              dataType: 'integer',
+              uiControl: 'number',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: { min: 1 },
+              displayOrder: 74,
+              description: '压缩时最近 N 个用户轮次及其后的回复保持原文；留空则跟随当前上下文压缩策略 profile 默认值。',
+            },
+          },
+        ],
+      },
+    }));
+
+    render(<SettingsPage />);
+
+    expect(screen.getByText('AGENT_CONTEXT_COMPRESSION_PROFILE')).toBeInTheDocument();
+    expect(screen.getByText('成本优先')).toBeInTheDocument();
+    expect(screen.getByText('均衡推荐')).toBeInTheDocument();
+    expect(screen.getByText('长上下文原文优先')).toBeInTheDocument();
+    expect(screen.getByText(/估算历史 token 超过该值时触发摘要/)).toHaveTextContent('留空则跟随当前上下文压缩策略 profile 默认值');
+    expect(screen.getByText(/压缩时最近 N 个用户轮次及其后的回复保持原文/)).toHaveTextContent('留空则跟随当前上下文压缩策略 profile 默认值');
+  });
+
   it('reset button semantic: discards local changes without network request', () => {
     // Simulate user has unsaved drafts
     const dirtyState = buildSystemConfigState({
@@ -644,6 +788,402 @@ describe('SettingsPage', () => {
 
     expect(refreshAfterExternalSave).toHaveBeenCalledWith(['LLM_CHANNELS']);
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('notifies alphasift status update and skips install after generic save when ALPHASIFT_ENABLED is set false', async () => {
+    save.mockResolvedValue({ success: true });
+    getChangedItems.mockReturnValue([{ key: 'ALPHASIFT_ENABLED', value: 'false' }]);
+
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      hasDirty: true,
+      dirtyCount: 1,
+      getChangedItems: () => [{ key: 'ALPHASIFT_ENABLED', value: 'false' }],
+    }));
+
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(notifyAlphaSiftConfigChanged).toHaveBeenCalledTimes(1);
+    expect(notifySystemConfigChanged).toHaveBeenCalledTimes(1);
+    expect(alphasiftEnable).not.toHaveBeenCalled();
+    expect(alphasiftInstall).not.toHaveBeenCalled();
+  });
+
+  it('runs the AlphaSift enable flow after generic save when ALPHASIFT_ENABLED is set true', async () => {
+    save.mockResolvedValue({ success: true });
+    getChangedItems.mockReturnValue([{ key: 'ALPHASIFT_ENABLED', value: 'true' }]);
+
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      hasDirty: true,
+      dirtyCount: 1,
+      getChangedItems: () => [{ key: 'ALPHASIFT_ENABLED', value: 'true' }],
+    }));
+
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(notifySystemConfigChanged).toHaveBeenCalledTimes(1);
+    expect(alphasiftEnable).toHaveBeenCalledTimes(1);
+    expect(alphasiftInstall).not.toHaveBeenCalled();
+    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['ALPHASIFT_ENABLED']);
+  });
+
+  it('does not notify alphasift status when generic save updates other fields', async () => {
+    save.mockResolvedValue({ success: true });
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      hasDirty: true,
+      dirtyCount: 1,
+      getChangedItems: () => [{ key: 'LLM_CHANNELS', value: 'primary,backup' }],
+    }));
+
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(notifySystemConfigChanged).toHaveBeenCalledTimes(1);
+    expect(notifyAlphaSiftConfigChanged).not.toHaveBeenCalled();
+  });
+
+  it('runs AlphaSift enable flow from the settings card', async () => {
+    const configState = buildSystemConfigState();
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      itemsByCategory: {
+        ...configState.itemsByCategory,
+        data_source: [
+          {
+            key: 'ALPHASIFT_ENABLED',
+            value: 'false',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'ALPHASIFT_ENABLED',
+              category: 'data_source',
+              dataType: 'boolean',
+              uiControl: 'switch',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 16,
+            },
+          },
+          {
+            key: 'ALPHASIFT_INSTALL_SPEC',
+            value: 'git+https://github.com/ZhuLinsen/alphasift.git@2c76b2b6074ae3bae01d52e5e830a4af3e3246b2',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'ALPHASIFT_INSTALL_SPEC',
+              category: 'data_source',
+              dataType: 'string',
+              uiControl: 'password',
+              isSensitive: true,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 17,
+            },
+          },
+        ],
+      },
+    }));
+
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '开启选股' }));
+
+    await waitFor(() => expect(alphasiftEnable).toHaveBeenCalledTimes(1));
+    expect(updateSystemConfig).not.toHaveBeenCalled();
+    expect(alphasiftInstall).not.toHaveBeenCalled();
+    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['ALPHASIFT_ENABLED']);
+  });
+
+  it('does not render raw AlphaSift install spec in the settings card', () => {
+    const privateInstallSpec = 'git+https://user:token@example.com/internal/alphasift.git';
+    const configState = buildSystemConfigState();
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      itemsByCategory: {
+        ...configState.itemsByCategory,
+        data_source: [
+          {
+            key: 'ALPHASIFT_ENABLED',
+            value: 'true',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'ALPHASIFT_ENABLED',
+              category: 'data_source',
+              dataType: 'boolean',
+              uiControl: 'switch',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 16,
+            },
+          },
+          {
+            key: 'ALPHASIFT_INSTALL_SPEC',
+            value: privateInstallSpec,
+            rawValueExists: true,
+            isMasked: true,
+            schema: {
+              key: 'ALPHASIFT_INSTALL_SPEC',
+              category: 'data_source',
+              dataType: 'string',
+              uiControl: 'password',
+              isSensitive: true,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 17,
+            },
+          },
+        ],
+      },
+    }));
+
+    render(<SettingsPage />);
+
+    expect(screen.getByText('启用第三方项目 AlphaSift 提供的选股能力。')).toBeInTheDocument();
+    expect(screen.queryByText(privateInstallSpec)).not.toBeInTheDocument();
+    expect(screen.queryByText(/安装来源/)).not.toBeInTheDocument();
+  });
+
+  it('maps ALPHASIFT_ENABLED to the AlphaSift card instead of a generic settings field', () => {
+    const configState = buildSystemConfigState();
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      activeCategory: 'data_source',
+      itemsByCategory: {
+        ...configState.itemsByCategory,
+        data_source: [
+          {
+            key: 'ALPHASIFT_ENABLED',
+            value: 'false',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'ALPHASIFT_ENABLED',
+              category: 'data_source',
+              dataType: 'boolean',
+              uiControl: 'switch',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 16,
+            },
+          },
+          {
+            key: 'ALPHASIFT_INSTALL_SPEC',
+            value: '******',
+            rawValueExists: true,
+            isMasked: true,
+            schema: {
+              key: 'ALPHASIFT_INSTALL_SPEC',
+              category: 'data_source',
+              dataType: 'string',
+              uiControl: 'password',
+              isSensitive: true,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 17,
+            },
+          },
+        ],
+      },
+    }));
+
+    render(<SettingsPage />);
+
+    expect(screen.getByRole('button', { name: '开启选股' })).toBeInTheDocument();
+    expect(screen.queryByTestId('settings-field-ALPHASIFT_ENABLED')).not.toBeInTheDocument();
+    expect(screen.getByTestId('settings-field-ALPHASIFT_INSTALL_SPEC')).toBeInTheDocument();
+  });
+
+  it('refreshes AlphaSift state when the enable flow fails', async () => {
+    const configState = buildSystemConfigState();
+    alphasiftEnable.mockRejectedValueOnce(new Error('config update failed'));
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      itemsByCategory: {
+        ...configState.itemsByCategory,
+        data_source: [
+          {
+            key: 'ALPHASIFT_ENABLED',
+            value: 'false',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'ALPHASIFT_ENABLED',
+              category: 'data_source',
+              dataType: 'boolean',
+              uiControl: 'switch',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 16,
+            },
+          },
+        ],
+      },
+    }));
+
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: '开启选股' }));
+
+    await waitFor(() => expect(alphasiftEnable).toHaveBeenCalledTimes(1));
+    expect(updateSystemConfig).not.toHaveBeenCalled();
+    expect(alphasiftInstall).not.toHaveBeenCalled();
+    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['ALPHASIFT_ENABLED']);
+  });
+
+  it('passes LLM channel support keys to the channel editor without rendering them as generic fields', async () => {
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      activeCategory: 'ai_model',
+      itemsByCategory: {
+        ...buildSystemConfigState().itemsByCategory,
+        ai_model: [
+          {
+            key: 'LLM_CHANNELS',
+            value: 'my_proxy',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'LLM_CHANNELS',
+              category: 'ai_model',
+              dataType: 'string',
+              uiControl: 'textarea',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 1,
+            },
+          },
+          {
+            key: 'LITELLM_MODEL',
+            value: 'gpt-5.0',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'LITELLM_MODEL',
+              category: 'ai_model',
+              dataType: 'string',
+              uiControl: 'text',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 2,
+            },
+          },
+          {
+            key: 'OPENAI_BASE_URL',
+            value: 'https://api.openai.com/v1',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'OPENAI_BASE_URL',
+              category: 'ai_model',
+              dataType: 'string',
+              uiControl: 'text',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 3,
+            },
+          },
+          {
+            key: 'OPENAI_MODEL',
+            value: 'gpt-5.0',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'OPENAI_MODEL',
+              category: 'ai_model',
+              isMasked: false,
+              dataType: 'string',
+              uiControl: 'text',
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 4,
+            },
+          },
+          {
+            key: 'LLM_MY_PROXY_API_KEY',
+            value: 'sk-test',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'LLM_MY_PROXY_API_KEY',
+              category: 'ai_model',
+              dataType: 'string',
+              uiControl: 'password',
+              isSensitive: true,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 9000,
+            },
+          },
+          {
+            key: 'LLM_MY_PROXY_MODELS',
+            value: 'gpt-5.5',
+            rawValueExists: true,
+            isMasked: false,
+            schema: {
+              key: 'LLM_MY_PROXY_MODELS',
+              category: 'ai_model',
+              dataType: 'string',
+              uiControl: 'text',
+              isSensitive: false,
+              isRequired: false,
+              isEditable: true,
+              options: [],
+              validation: {},
+              displayOrder: 9000,
+            },
+          },
+        ],
+      },
+    }));
+
+    render(<SettingsPage />);
+
+    const llmEditorItems = await screen.findByTestId('llm-channel-editor-items');
+    expect(llmEditorItems).toHaveTextContent('LLM_CHANNELS');
+    expect(llmEditorItems).toHaveTextContent('LITELLM_MODEL');
+    expect(llmEditorItems).toHaveTextContent('OPENAI_BASE_URL');
+    expect(llmEditorItems).toHaveTextContent('OPENAI_MODEL');
+    expect(llmEditorItems).toHaveTextContent('LLM_MY_PROXY_API_KEY');
+    expect(llmEditorItems).toHaveTextContent('LLM_MY_PROXY_MODELS');
+    expect(screen.queryByTestId('settings-field-LITELLM_MODEL')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-field-OPENAI_BASE_URL')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-field-OPENAI_MODEL')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-field-LLM_MY_PROXY_API_KEY')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-field-LLM_MY_PROXY_MODELS')).not.toBeInTheDocument();
   });
 
   it('renders notification test panel before notification fields', () => {

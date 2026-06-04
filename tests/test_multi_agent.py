@@ -35,7 +35,8 @@ from src.agent.protocols import (
     StageResult,
     StageStatus,
 )
-from src.config import AGENT_MAX_STEPS_DEFAULT
+from src.config import AGENT_MAX_STEPS_DEFAULT, Config
+from src.storage import DatabaseManager
 
 
 # ============================================================
@@ -544,6 +545,26 @@ class TestOrchestratorModes(unittest.TestCase):
         self.assertEqual(ctx.stock_name, "贵州茅台")
         self.assertEqual(ctx.meta["skills_requested"], ["bull_trend"])
 
+    def test_build_context_keeps_market_phase_context_in_meta_not_data(self):
+        orch = self._make_orchestrator()
+        phase_context = {"phase": "intraday", "is_partial_bar": True}
+        pack_summary = "\n## 分析上下文包摘要\n- 数据块状态：行情 available\n"
+
+        ctx = orch._build_context(
+            "Analyze 600519",
+            context={
+                "stock_code": "600519",
+                "stock_name": "贵州茅台",
+                "market_phase_context": phase_context,
+                "analysis_context_pack_summary": pack_summary,
+            },
+        )
+
+        self.assertEqual(ctx.meta["market_phase_context"], phase_context)
+        self.assertEqual(ctx.meta["analysis_context_pack_summary"], pack_summary)
+        self.assertNotIn("market_phase_context", ctx.data)
+        self.assertNotIn("analysis_context_pack_summary", ctx.data)
+
     def test_build_context_extracts_code_from_query(self):
         orch = self._make_orchestrator()
         ctx = orch._build_context("分析600519的走势")
@@ -875,12 +896,75 @@ class TestOrchestratorExecution(unittest.TestCase):
             return OrchestratorResult(success=True, content="assistant reply")
 
         with patch.object(orch, "_execute_pipeline", side_effect=fake_execute):
-            with patch("src.agent.conversation.conversation_manager.get_or_create") as get_or_create:
-                get_or_create.return_value.get_history.return_value = history
-                with patch("src.agent.conversation.conversation_manager.add_message"):
-                    orch.chat("hello", "session-1")
+            with patch("src.agent.orchestrator.build_visible_chat_history", return_value=history):
+                with patch("src.agent.conversation.conversation_manager.get_or_create"):
+                    with patch("src.agent.conversation.conversation_manager.add_message"):
+                        orch.chat("hello", "session-1")
 
         self.assertEqual(captured["history"], history)
+
+    def test_chat_uses_compressed_history_builder(self):
+        from src.agent.orchestrator import OrchestratorResult
+
+        orch = self._make_orchestrator()
+
+        with patch.object(orch, "_execute_pipeline", return_value=OrchestratorResult(success=True, content="ok")):
+            with patch("src.agent.orchestrator.build_visible_chat_history", return_value=[]) as build_history:
+                with patch("src.agent.conversation.conversation_manager.get_or_create"):
+                    with patch("src.agent.conversation.conversation_manager.add_message"):
+                        orch.chat("hello", "session-1")
+
+        build_history.assert_called_once()
+        self.assertEqual(build_history.call_args.args[0], "session-1")
+        self.assertIs(build_history.call_args.args[1], orch.llm_adapter)
+
+    def test_chat_does_not_read_or_write_provider_trace(self):
+        from src.agent.orchestrator import OrchestratorResult
+
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+        session_id = "multi-agent-trace-boundary"
+        user_id = db.save_conversation_message(session_id, "user", "previous question")
+        assistant_id = db.save_conversation_message(session_id, "assistant", "previous answer")
+        db.save_agent_provider_turn(
+            session_id=session_id,
+            run_id="run-existing",
+            provider="deepseek",
+            model="deepseek/deepseek-chat",
+            anchor_user_message_id=user_id,
+            anchor_assistant_message_id=assistant_id,
+            messages=[
+                {
+                    "role": "assistant",
+                    "reasoning_content": "reasoning",
+                    "tool_calls": [{"id": "call_1", "name": "echo", "arguments": {}}],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "tool-result"},
+            ],
+            contains_reasoning=True,
+            contains_tool_calls=True,
+            contains_thinking_blocks=False,
+            must_roundtrip=True,
+            estimated_tokens=10,
+        )
+
+        orch = self._make_orchestrator()
+        try:
+            with patch.object(orch, "_execute_pipeline", return_value=OrchestratorResult(success=True, content="ok")):
+                with patch("src.agent.orchestrator.build_visible_chat_history", return_value=[]) as build_history:
+                    with patch.object(db, "get_agent_provider_turns", wraps=db.get_agent_provider_turns) as get_turns:
+                        result = orch.chat("hello", session_id)
+
+            self.assertTrue(result.success)
+            build_history.assert_called_once()
+            get_turns.assert_not_called()
+            rows = db.get_agent_provider_turns(session_id)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["run_id"], "run-existing")
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
 
     def test_chat_persists_user_and_assistant_messages(self):
         from src.agent.orchestrator import OrchestratorResult
@@ -1020,6 +1104,17 @@ class TestDecisionAgentChatMode(unittest.TestCase):
         self.assertIsNone(ctx.get_data("final_dashboard"))
         self.assertEqual(opinion.signal, "buy")
 
+    def test_decision_agent_prompt_requires_phase_decision(self):
+        from src.agent.agents.decision_agent import DecisionAgent
+
+        agent = DecisionAgent(tool_registry=MagicMock(), llm_adapter=MagicMock())
+        prompt = agent.system_prompt(AgentContext(query="分析 600519", stock_code="600519"))
+
+        self.assertIn("phase_decision", prompt)
+        self.assertIn("watch_conditions", prompt)
+        self.assertIn("data_limitations", prompt)
+        self.assertIn("confidence_level", prompt)
+
 
 class TestTechnicalAgentSkillPolicy(unittest.TestCase):
     """TechnicalAgent should only receive the legacy trend baseline for implicit/default runs."""
@@ -1085,6 +1180,49 @@ class TestBaseAgentMessageAssembly(unittest.TestCase):
         self.assertEqual(messages[1], {"role": "user", "content": "old question"})
         self.assertEqual(messages[2], {"role": "assistant", "content": "old answer"})
         self.assertEqual(messages[-1], {"role": "user", "content": "current turn"})
+
+    def test_build_messages_injects_market_phase_before_cached_data(self):
+        agent = self._make_agent()
+        ctx = AgentContext(query="hello", stock_code="600519")
+        ctx.meta["market_phase_context"] = {
+            "market": "cn",
+            "phase": "intraday",
+            "market_local_time": "2026-03-27T10:00:00+08:00",
+            "effective_daily_bar_date": "2026-03-26",
+            "is_partial_bar": True,
+            "minutes_to_close": 300,
+        }
+        ctx.meta["analysis_context_pack_summary"] = "\n## 分析上下文包摘要\n- 数据块状态：行情 available\n"
+        ctx.set_data("realtime_quote", {"price": 1880.0})
+
+        messages = agent._build_messages(ctx)
+
+        phase_indexes = [
+            idx for idx, message in enumerate(messages)
+            if "市场阶段上下文" in message.get("content", "")
+        ]
+        cached_indexes = [
+            idx for idx, message in enumerate(messages)
+            if "[Pre-fetched: realtime_quote]" in message.get("content", "")
+        ]
+        pack_indexes = [
+            idx for idx, message in enumerate(messages)
+            if "分析上下文包摘要" in message.get("content", "")
+        ]
+        self.assertEqual(len(phase_indexes), 1)
+        self.assertEqual(len(pack_indexes), 1)
+        self.assertEqual(len(cached_indexes), 1)
+        self.assertLess(phase_indexes[0], pack_indexes[0])
+        self.assertLess(pack_indexes[0], cached_indexes[0])
+        phase_message = messages[phase_indexes[0]]
+        self.assertEqual(phase_message["role"], "user")
+        self.assertIn("盘中", phase_message["content"])
+        self.assertIn("不得当作完整日线复盘", phase_message["content"])
+        self.assertNotIn("market_phase_context", phase_message["content"])
+        self.assertNotIn("is_partial_bar", phase_message["content"])
+        pack_message = messages[pack_indexes[0]]
+        self.assertEqual(pack_message["role"], "user")
+        self.assertNotIn("analysis_context_pack_summary", pack_message["content"])
 
 
 # ============================================================
@@ -1495,6 +1633,23 @@ class TestBaseAgentMemoryIntegration(unittest.TestCase):
 
         self.assertIn("Memory: recent analysis history", injected)
         self.assertIn("signal=buy", injected)
+
+    def test_market_phase_meta_is_not_injected_as_prefetched_data(self):
+        memory = MagicMock(enabled=False)
+        agent = self._make_agent(memory)
+        ctx = AgentContext(query="test", stock_code="600519")
+        ctx.meta["market_phase_context"] = {"phase": "intraday"}
+        ctx.meta["analysis_context_pack_summary"] = "\n## 分析上下文包摘要\n- 数据块状态：行情 available\n"
+        ctx.set_data("realtime_quote", {"price": 1880.0})
+
+        injected = agent._inject_cached_data(ctx)
+
+        self.assertIn("[Pre-fetched: realtime_quote]", injected)
+        self.assertNotIn("market_phase_context", injected)
+        self.assertNotIn("[Pre-fetched: market_phase_context]", injected)
+        self.assertNotIn("analysis_context_pack_summary", injected)
+        self.assertNotIn("[Pre-fetched: analysis_context_pack_summary]", injected)
+        self.assertNotIn("分析上下文包摘要", injected)
 
     def test_memory_calibration_updates_confidence(self):
         memory = MagicMock(enabled=True)

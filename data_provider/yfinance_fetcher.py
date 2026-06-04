@@ -230,6 +230,8 @@ class YfinanceFetcher(BaseFetcher):
         # 列名映射（yfinance 使用首字母大写）
         column_mapping = {
             'Date': 'date',
+            'Datetime': 'date',
+            'datetime': 'date',
             'Open': 'open',
             'High': 'high',
             'Low': 'low',
@@ -238,6 +240,17 @@ class YfinanceFetcher(BaseFetcher):
         }
 
         df = df.rename(columns=column_mapping)
+        if 'date' not in df.columns:
+            index_col = df.columns[0] if len(df.columns) else None
+            if index_col is not None:
+                candidate = df[index_col]
+                if pd.api.types.is_datetime64_any_dtype(candidate):
+                    df = df.rename(columns={index_col: 'date'})
+                elif not pd.api.types.is_numeric_dtype(candidate):
+                    parsed_dates = pd.to_datetime(candidate, errors='coerce')
+                    if parsed_dates.notna().any():
+                        df = df.rename(columns={index_col: 'date'})
+                        df['date'] = parsed_dates
 
         # 计算涨跌幅（因为 yfinance 不直接提供）
         if 'close' in df.columns:
