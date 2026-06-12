@@ -31,12 +31,16 @@ from src.notification_noise import (
     parse_notification_quiet_hours,
     validate_notification_timezone,
 )
+from src.notification_contracts import (
+    is_feishu_app_bot_configured,
+    is_feishu_static_configured,
+)
 from src.llm import generation_params as llm_generation_params
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_ALPHASIFT_INSTALL_SPEC = (
-    "git+https://github.com/ZhuLinsen/alphasift.git@b2ca66dd47001b9a09890cfe21c2b18c7219ccf5"
+    "git+https://github.com/ZhuLinsen/alphasift.git@1a0ed8c99b3615c0cb1076e6029827ffc6de2344"
 )
 
 
@@ -747,6 +751,11 @@ class Config:
     feishu_webhook_url: Optional[str] = None
     feishu_webhook_secret: Optional[str] = None  # 自定义机器人签名密钥（可选）
     feishu_webhook_keyword: Optional[str] = None  # 自定义机器人关键词（可选）
+
+    # 飞书应用机器人（App Bot）通知
+    feishu_chat_id: Optional[str] = None  # 目标群会话 chat_id（群聊模式），或用户 open_id（P2P 模式）
+    feishu_receive_id_type: str = "chat_id"  # 接收者 ID 类型: "chat_id"(群聊) / "open_id"(私聊)
+    feishu_domain: str = "feishu"  # 飞书域名: "feishu"(feishu.cn) / "lark"(larksuite.com)
     
     # Telegram 配置（需要同时配置 Bot Token 和 Chat ID）
     telegram_bot_token: Optional[str] = None  # Bot Token（@BotFather 获取）
@@ -1551,6 +1560,10 @@ class Config:
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),
             feishu_webhook_keyword=os.getenv('FEISHU_WEBHOOK_KEYWORD'),
+
+            feishu_chat_id=os.getenv('FEISHU_CHAT_ID'),
+            feishu_receive_id_type=os.getenv('FEISHU_RECEIVE_ID_TYPE', 'chat_id'),
+            feishu_domain=os.getenv('FEISHU_DOMAIN', 'feishu'),
             telegram_bot_token=os.getenv('TELEGRAM_BOT_TOKEN'),
             telegram_chat_id=os.getenv('TELEGRAM_CHAT_ID'),
             telegram_message_thread_id=os.getenv('TELEGRAM_MESSAGE_THREAD_ID'),
@@ -1953,7 +1966,12 @@ class Config:
 
     @classmethod
     def _channels_to_model_list(cls, channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Convert parsed LLM channels to LiteLLM Router model_list format."""
+        """Convert parsed LLM channels to LiteLLM Router model_list format.
+
+        Mapping follows:
+        - LiteLLM providers: https://docs.litellm.ai/docs/providers
+        - LiteLLM model_list 语义: https://docs.litellm.ai/docs/proxy/configs#the-model_list-key
+        """
         model_list: List[Dict[str, Any]] = []
         for ch in channels:
             for model_name in ch['models']:
@@ -1993,6 +2011,11 @@ class Config:
         deployments, keyed by placeholder model_name tokens.  The analyzer
         resolves actual model_names at call time from LITELLM_MODEL /
         LITELLM_FALLBACK_MODELS.
+
+        Compatibility note:
+        - LiteLLM OpenAI-compatible 约定: https://docs.litellm.ai/docs/providers/openai_compatible
+        - OpenAI 请求与鉴权约定: https://platform.openai.com/docs/api-reference/making-requests
+          / https://platform.openai.com/docs/api-reference/authentication
         """
         model_list: List[Dict[str, Any]] = []
 
@@ -2596,6 +2619,11 @@ class Config:
         has_notification = bool(
             self.wechat_webhook_url
             or self.feishu_webhook_url
+            or (
+                (self.feishu_app_id or "")
+                and (self.feishu_app_secret or "")
+                and (self.feishu_chat_id or "")
+            )
             or (self.telegram_bot_token and self.telegram_chat_id)
             or (self.email_sender and self.email_password)
             or (self.pushover_user_key and self.pushover_api_token)
@@ -2732,27 +2760,35 @@ class Config:
 
         has_feishu_app_id = bool((self.feishu_app_id or "").strip())
         has_feishu_app_secret = bool((self.feishu_app_secret or "").strip())
+        has_feishu_app_credentials_complete = has_feishu_app_id and has_feishu_app_secret
         has_feishu_app_credentials = has_feishu_app_id or has_feishu_app_secret
         has_feishu_doc_token = bool((self.feishu_folder_token or "").strip())
         has_feishu_full_cloud_doc_credentials = (
-            has_feishu_app_id
-            and has_feishu_app_secret
+            has_feishu_app_credentials_complete
             and has_feishu_doc_token
         )
+        has_feishu_stream_route = bool(self.feishu_stream_enabled and has_feishu_app_credentials_complete)
+        has_feishu_app_notification_route = is_feishu_app_bot_configured(self)
         if (
             has_feishu_app_credentials
             and not has_feishu_full_cloud_doc_credentials
-            and not self.feishu_webhook_url
-            and not (self.feishu_stream_enabled and has_feishu_app_id and has_feishu_app_secret)
+            and not is_feishu_static_configured(self)
+            and not has_feishu_stream_route
+            and not has_feishu_app_notification_route
         ):
+            suggestions = []
+            if has_feishu_app_credentials_complete:
+                suggestions.append("配置 FEISHU_CHAT_ID 开启 App Bot 主动推送")
+                suggestions.append("开启 FEISHU_STREAM_ENABLED 使用应用机器人事件订阅")
+            else:
+                suggestions.append("补齐 FEISHU_APP_ID / FEISHU_APP_SECRET 后配置 FEISHU_CHAT_ID 开启 App Bot 主动推送")
+            suggestions.append("配置 FEISHU_WEBHOOK_URL 使用自定义机器人 Webhook 推送")
             issues.append(ConfigIssue(
                 severity="warning",
-                message=(
-                    "仅配置 FEISHU_APP_ID / FEISHU_APP_SECRET 不会开启飞书群 Webhook 推送；"
-                    "如需群消息通知，请配置 FEISHU_WEBHOOK_URL。若要使用应用机器人，请同时开启 "
-                    "FEISHU_STREAM_ENABLED 并完成应用发布与权限配置。"
-                ),
-                field="FEISHU_WEBHOOK_URL",
+                message="仅配置 FEISHU_APP_ID / FEISHU_APP_SECRET 不会开启飞书静态通知。"
+                        + " 请选择以下方式之一："
+                        + "；".join(suggestions) + "。",
+                field="FEISHU_CHAT_ID",
             ))
 
         # --- Deprecated field migration hints ---

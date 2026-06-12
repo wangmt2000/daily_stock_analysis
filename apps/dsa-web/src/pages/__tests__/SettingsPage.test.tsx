@@ -954,7 +954,7 @@ describe('SettingsPage', () => {
 
     render(<SettingsPage />);
 
-    expect(screen.getByText('启用第三方项目 AlphaSift 提供的选股能力。')).toBeInTheDocument();
+    expect(screen.getByText('启用内置 AlphaSift 实验性质选股能力。')).toBeInTheDocument();
     expect(screen.queryByText(privateInstallSpec)).not.toBeInTheDocument();
     expect(screen.queryByText(/安装来源/)).not.toBeInTheDocument();
   });
@@ -1222,6 +1222,7 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('heading', { name: '配置备份' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导出 .env' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导入 .env' })).toBeInTheDocument();
+    expect(screen.getByText(/Docker 部署中/)).toHaveTextContent('ENV_FILE');
   });
 
   it('disables env backup actions when web auth is not enabled', () => {

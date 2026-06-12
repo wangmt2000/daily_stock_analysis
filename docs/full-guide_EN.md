@@ -136,6 +136,9 @@ Go to your forked repo → `Settings` → `Secrets and variables` → `Actions` 
 
 > Compatibility note: `REPORT_SHOW_LLM_MODEL` keeps the previous default-visible behavior (`true`) and only changes report footer rendering. It does not alter provider/model/Base URL, LiteLLM routing, or runtime model persistence/migration/cleanup semantics. Rollback is to remove the variable or set it back to `true`.
 
+> `REPORT_LANGUAGE` only affects report text and report page fixed copy. Web UI chrome language (navigation, login, settings, shell labels, shared controls) is intentionally independent and stored in browser `localStorage` as `dsa.uiLanguage`.
+> UI language resolution is: explicit localStorage value (`zh` or `en`) -> browser language (`navigator.languages` / `navigator.language`) -> default `zh`.
+
 #### Other Configuration
 
 | Secret Name | Description | Required |
@@ -275,7 +278,9 @@ For the notification baseline, diagnostics, and deployment notes, see [Notificat
 > 3. Create a group and add the app bot
 > 4. Add the group as a collaborator to the cloud drive folder (with manage permissions)
 >
-> Note: `FEISHU_APP_ID` / `FEISHU_APP_SECRET` are for Feishu app mode, cloud documents, or Stream Bot mode. They do not enable group webhook notifications by themselves. For simple push notifications, use `FEISHU_WEBHOOK_URL` first.
+> Note: `FEISHU_APP_ID` / `FEISHU_APP_SECRET` are for Feishu app mode, cloud documents, or Stream Bot mode. They do not enable group webhook notifications by themselves. For simple group push notifications, use `FEISHU_WEBHOOK_URL` first.
+>
+> Supplement: When `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, and `FEISHU_CHAT_ID` are all configured, they enable the Feishu App Bot active notification channel without relying on group webhooks. `FEISHU_RECEIVE_ID_TYPE` defaults to `chat_id`; set it to `open_id` for P2P delivery. This uses the Feishu OpenAPI Bot session route, which is independent of the group webhook path.
 
 ### Search Service Configuration
 
@@ -474,7 +479,9 @@ For both `docker run` and Compose, keep startup environment injection separate f
   This passes key/value pairs from `.env` into the container process environment.
 - Runtime config writes: do not bind-mount the host `.env` as a single file over the container's `.env` path. Docker treats the target as a mount point, so the `os.replace()` atomic update used during config saves can fail with `Device or resource busy`; fallback in-place writes can also fail on permissions.
 
-The default Compose and `docker run` examples only use `env_file` / `--env-file` for startup config injection and no longer mount the host `.env` file into the container. Runtime config saved from the WebUI is written to the container-local config file by default and is not the same as writing back to the host `.env`; after deleting or recreating the container, startup still uses the injected `.env` file. If you need persistent runtime config, point `ENV_FILE` at a writable data volume file such as `/app/data/runtime.env` instead of using a single-file `.env` bind mount.
+The default Compose and `docker run` examples only use `env_file` / `--env-file` for startup config injection and no longer mount the host `.env` file into the container. When the active `.env` file does not contain a key, the WebUI Settings page falls back to showing the same key from startup-injected process environment variables, so Docker users can see injected config without importing it first. The raw `.env` export still contains only the active config file content.
+
+Runtime config saved from the WebUI is written to the container-local config file by default and is not the same as writing back to the host `.env`; after deleting or recreating the container, startup still uses the injected `.env` file. If you need persistent runtime config, point `ENV_FILE` at a writable data volume file such as `/app/data/runtime.env` instead of using a single-file `.env` bind mount. Note that same-name values still present in startup `env_file`, `--env-file`, `docker run -e`, or Compose `environment:` can override the runtime file on restart; update or remove those startup overrides if you want WebUI-saved values to take over.
 
 Recommended host mappings:
 
@@ -720,6 +727,31 @@ History lists, same-stock history, StockBar items, and details extract `market_p
 
 Notification summaries use one public formatting helper and only include the phase label, trigger source, partial-bar warning, data-quality level, and the first two limitations. They do not output raw context packs, prompts, news body text, or sensitive portfolio details. The Web Alerts, Portfolio, History, StockBar, and Backtest pages display the new phase badges, quality summary, phase filter, and breakdown.
 
+### Documentation, Configuration, And Migration Notes (Issue #1386 P7)
+
+P7 is a user-facing documentation closeout for pre-market / intraday / post-market analysis only. It does not add runtime behavior, configuration keys, API parameters, database migrations, a Web phase override selector, Bot phase parameters, or a GitHub Actions intraday workflow. The default daily post-market analysis, default GitHub Actions run, and existing schedule behavior stay unchanged.
+
+Recommended usage:
+
+| Scenario | Recommended Use | Notes |
+| --- | --- | --- |
+| Pre-market | Build an opening plan and watch conditions | Do not describe today's not-yet-traded price action as fact; focus on the last complete trading day, overnight information, and opening triggers. |
+| Intraday / lunch break / near close | Check live state, risk, and opportunity alerts | Focus on current price, realtime quote freshness, partial bars, data limitations, and next watch conditions. This does not replace the full post-market review. |
+| Post-market | Keep the full review and next-day plan | Uses complete trading-day semantics and is closest to the default daily-analysis scenario. |
+
+Entrypoints and visibility:
+
+| Entrypoint | Phase Behavior |
+| --- | --- |
+| `POST /api/v1/analysis/analyze` | Supports `analysis_phase=auto|premarket|intraday|postmarket`; omitted values default to `auto`. |
+| Web main analysis / re-analysis / portfolio manual analysis | There is currently no phase override selector. The frontend defaults to `auto`, the in-progress task panel shows the requested phase, and the final report page shows the final phase label. |
+| Bot / CLI / schedule / default GitHub Actions | Do not pass `analysis_phase`; they continue to use `auto` inference, and the default post-market behavior is unchanged. |
+| History / backtest / notifications / alerts | Only consume public `market_phase_summary` and low-sensitivity `analysis_context_pack_overview`; they do not expose the full pack, prompt summary, news body text, or sensitive portfolio details. |
+
+`analysis_phase` is the requested override value, while the final report phase remains `report.meta.market_phase_summary.phase`. Older callers that omit `analysis_phase` remain compatible. Older history rows without `market_phase_summary` or `analysis_context_pack_overview` return empty fields and still load normally. Backtest queries support `analysis_phase=premarket|intraday|postmarket|unknown` filtering, and P6 folds lunch-break and near-close phases into intraday.
+
+`SAVE_CONTEXT_SNAPSHOT=false` or CLI `--no-context-snapshot` only stops persisting the full `context_snapshot` for new history rows, so new history no longer exposes persisted phase summary / pack overview / diagnostics snapshot data. It does not disable current-run `AnalysisContextPack` construction, does not remove the low-sensitivity `analysis_context_pack_summary` from prompts, and does not change the report JSON schema. Callers that need output closer to the old post-market wording can temporarily pin `analysis_phase=postmarket`; fully removing the P0-P6 phase/pack runtime integration requires a release rollback or code rollback.
+
 ---
 
 ## Notification Channel Configuration
@@ -753,10 +785,12 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/your_hook_token
    - **Signature verification enabled**: copy the secret shown in Feishu into `FEISHU_WEBHOOK_SECRET`. **Both sides must be enabled or disabled together** — if Feishu has signing on but `FEISHU_WEBHOOK_SECRET` is missing (or vice versa), every request will be rejected.
    - **Keyword enabled**: copy the exact same keyword into `FEISHU_WEBHOOK_KEYWORD`. The app will prepend it to every message automatically; no need to change report templates.
    - **IP allowlist enabled**: make sure the outbound IP of your runtime (local / Docker / GitHub Actions each have different IPs) is on the allowlist.
-4. `FEISHU_APP_ID` / `FEISHU_APP_SECRET` are for Feishu app / Stream Bot / cloud document flows only — they do **not** trigger group webhook notifications and must not be used instead of `FEISHU_WEBHOOK_URL`.
+4. `FEISHU_APP_ID` / `FEISHU_APP_SECRET` are for Feishu app / Stream Bot / cloud document flows only. They do **not** trigger group webhook notifications and must not be used alone instead of `FEISHU_WEBHOOK_URL`.
+5. If `FEISHU_APP_ID` / `FEISHU_APP_SECRET` are configured together with `FEISHU_CHAT_ID`, the Feishu App Bot can push notifications directly to a specified chat or user, no group webhook required. `FEISHU_RECEIVE_ID_TYPE` defaults to `chat_id`; set it to `open_id` for P2P delivery. This uses the Feishu OpenAPI Bot session route, independent of the group webhook path.
+6. The App Bot send path reuses the existing `lark-oapi>=1.0.0` dependency already listed in `requirements.txt`; standard source installs, Docker, the GitHub Actions daily workflow, and desktop builds all install it through `pip install -r requirements.txt`. References: [Feishu message create OpenAPI](https://open.feishu.cn/document/server-docs/im-v1/message/create), [lark-oapi PyPI](https://pypi.org/project/lark-oapi/), [SDK repo](https://github.com/larksuite/oapi-sdk-python).
 
 **Common failure causes:**
-- Only `FEISHU_APP_ID` / `FEISHU_APP_SECRET` were set, but `FEISHU_WEBHOOK_URL` was not configured
+- Only `FEISHU_APP_ID` / `FEISHU_APP_SECRET` were set, with neither `FEISHU_WEBHOOK_URL` nor the App Bot active-delivery target `FEISHU_CHAT_ID` configured
 - The bot has Signature security enabled, but `FEISHU_WEBHOOK_SECRET` was not set locally (or was mistakenly set to `FEISHU_APP_SECRET`)
 - The bot has Keyword security enabled, but `FEISHU_WEBHOOK_KEYWORD` was not set locally
 - The bot was not added to the target group, or group permissions block it from posting
@@ -1075,6 +1109,49 @@ This post-processing update only adjusts advisory wording and stability logic an
 Compatibility check result: decision operability and runtime post-processing paths are changed, while model/provider/API configuration and persistence semantics remain unchanged; the compatibility boundary is now in analysis/pipeline/agent intent inference and stabilization mapping.
 Verification trail: the runtime behavior is implemented in `src/analyzer.py`, `src/core/pipeline.py`, `src/core/backtest_engine.py`, `src/report_language.py`, and `src/agent` decision-path modules (with corresponding tests in `tests/test_backtest_engine.py`, `tests/test_analyzer_news_prompt.py`, `tests/test_decision_stability.py`, and `tests/test_agent_pipeline.py`); it does not add/remove runtime config fields or config-cleanup logic in `src/config.py` or persistence code paths.
 
+### Decision Action Taxonomy (#1390 P0)
+
+Single-stock reports now keep the existing free-text `operation_advice` and add optional `action` / `action_label` fields for structured display in Web history, StockBar, same-stock history, and backtest result rows. `decision_type` remains the legacy `buy|hold|sell` statistics contract; an empty `action` does not rewrite the existing `decision_type` inference chain.
+
+| `action` | Common source text | `decision_type` bridge |
+| --- | --- | --- |
+| `buy` | `strong_buy`, `强烈买入`, `buy`, `买入`, `布局`, `建仓` | `buy` |
+| `add` | `add`, `加仓`, `增持`, `accumulate` | `buy` |
+| `hold` | `hold`, `持有`, `持有观察`, `洗盘观察` | `hold` |
+| `watch` | `watch`, `观望`, `等待`, `wait` | `hold` |
+| `reduce` | `reduce`, `减仓`, `trim` | `sell` |
+| `sell` | `sell`, `卖出`, `清仓`, `strong_sell`, `强烈卖出` | `sell` |
+| `avoid` | `avoid`, `回避`, `规避`, `不建议买入`, `避免买入`, `do not buy` | `hold` |
+| `alert` | `alert`, `风险预警`, `警惕`, `触发告警`, `risk alert` | `hold` |
+
+The `decision_type` bridge in the table only documents compatibility between the eight-state action taxonomy and the legacy three-state statistics contract. #1390 P0 does not automatically write `action` back into the existing `decision_type`. If upstream sends both an explicit `action` and a semantically different `decision_type`, legacy statistics, backtesting, and old report semantics still follow `decision_type` / the existing inference chain; `action/action_label` remains structured display metadata.
+
+Unknown or ambiguous advice is not coerced into `watch` or `hold`; it returns empty `action/action_label`. Web history cards, StockBar, same-stock history drawers, and backtest result rows use `operation_advice` as a display-only fallback when old records do not have `action/action_label`; that fallback affects only the UI label and is not a stable API action or future signal asset. When Web receives both `action` and `action_label`, it first renders the label from `action` in the current UI language; API `action_label` remains report-language display metadata for non-Web clients or compatibility display when `action` is absent. Market review and other non-stock reports do not emit trading `action` values and keep only the `operation_advice` text. `dashboard.phase_decision.immediate_action` belongs to the market-phase guardrail report block and is not used by the #1390 P0 eight-state action derivation. The final market phase still comes from `report.meta.market_phase_summary.phase`.
+
+#1390 P0 does not flatten future signal-asset fields into current report summaries, history lists, StockBar rows, or backtest responses. #1390 P1 now carries more granular plan fields such as `horizon`, `plan_quality`, and `status` through an independent `DecisionSignal` resource; it still does not change the existing report contract, backfill history, or add configuration.
+
+### Decision Signal Asset (#1390 P1)
+
+`DecisionSignal` is an independent backend resource for persisting AI recommendations as queryable, deduplicated, status-updatable signal assets. It does not replace `operation_advice`, does not expand the legacy `decision_type=buy|hold|sell` contract, and does not auto-extract from existing reports yet; before P2, signals are written only through explicit API or service calls.
+
+Core fields include `stock_code`, `stock_name`, `market`, `source_type`, `source_agent`, `source_report_id`, `trace_id`, `market_phase`, `trigger_source`, `action`, `action_label`, `confidence`, `score`, `horizon`, `entry_low`, `entry_high`, `stop_loss`, `target_price`, `invalidation`, `watch_conditions`, `reason`, `risk_summary`, `catalyst_summary`, `evidence`, `data_quality_summary`, `plan_quality`, `status`, `expires_at`, `created_at`, `updated_at`, and `metadata`. `action` reuses the eight-state action taxonomy; `market_phase` reuses the market phase enum; `source_type` supports `analysis|agent|alert|market_review|manual`; `status` supports `active|expired|invalidated|closed|archived`; `horizon` supports `intraday|1d|3d|5d|10d|swing|long`.
+
+`confidence` is `0.0-1.0`, and `score` is `0-100`, separate from historical `sentiment_score`. Price-plan fields `entry_low`, `entry_high`, `stop_loss`, and `target_price` must be finite positive numbers; when both `entry_low` and `entry_high` are present, `entry_low <= entry_high` is required. `plan_quality` supports `complete|partial|minimal|unknown`: a valid explicit value is saved as-is; otherwise the service computes it. The entry range (`entry_low` or `entry_high`) counts as one slot, and `stop_loss`, `target_price`, `invalidation`, and `watch_conditions` each count as one slot. Two slots produce `partial`, four or more produce `complete`, and action/reason without enough slots produces `minimal`.
+
+New API endpoints:
+
+- `POST /api/v1/decision-signals`: create or deduplicate a signal and return `{ item, created }` with HTTP 200. Deduplication uses `(source_report_id, source_type, market, stock_code, action, horizon, market_phase)` when `source_report_id` is present, or `(trace_id, source_type, market, stock_code, action, horizon, market_phase)` when only `trace_id` is present. Signals without either source identifier are not deduplicated. `source_type` is a source namespace, so manual/pre-report weak references do not deduplicate against real analysis-bound signals. `NULL` `horizon` and `NULL` `market_phase` deduplicate only against the same `NULL` dimensions; different source types, markets, horizons, or market phases may persist as separate signals. When the same source key matches an expired signal and the new request is active with a future `expires_at`, the existing row is refreshed in place and still returns `created=false`. P1 does not guarantee concurrent idempotency.
+- `GET /api/v1/decision-signals`: paginated query with `market`, `stock_code`, `action`, `market_phase`, `source_type`, `source_report_id`, `trace_id`, `trigger_source`, `status`, time ranges, `holding_only`, and `account_id`.
+- `GET /api/v1/decision-signals/{signal_id}`: fetch one signal; missing IDs return 404.
+- `PATCH /api/v1/decision-signals/{signal_id}/status`: update a valid status and optional `metadata`; when `metadata` is provided it replaces the whole stored metadata object, and no complex state machine is enforced.
+- `GET /api/v1/decision-signals/latest/{stock_code}`: return latest active signals for a stock, default `limit=1`.
+
+Read paths lazily expire active signals whose `expires_at` has passed before list, detail, and latest queries; creating an already expired active signal stores it as `expired`; the same-source expired signal can only be extended by re-posting active data with a future `expires_at`, and `PATCH /status` does not accept `expires_at`. `closed|invalidated|archived` signals are not reactivated by the create path. Time fields are normalized to UTC naive datetimes for storage and comparison; timezone-aware inputs are converted to UTC and stripped of `tzinfo`, naive inputs are treated as UTC, and API responses continue to return ISO strings without timezone suffixes. Stock codes are normalized deterministically by `market`: CN variants such as `600519`, `SH600519`, and `600519.SH` match the same stored code; HK variants such as `00700`, `HK00700`, and `00700.HK` match `HK00700`; US tickers are uppercased. `holding_only=true` reads only cached `portfolio_positions` rows with `quantity > 0` under active accounts and matches signals by the held `(market, stock_code)`, optionally scoped by an active `account_id`; it does not call portfolio snapshot replay. When no cache exists, it returns an empty result and callers should refresh the cache through the portfolio snapshot API first.
+
+`source_report_id` is nullable and is not required to reference an existing history row; deleting history records explicitly removes only history-bound signals with `source_type=analysis` whose `source_report_id` matches actually deleted IDs, so `manual/agent/alert/market_review` weak-reference signals are not deleted solely because of an ID collision. The list endpoint supports typed filters for `source_report_id` and `trace_id`. Follow-up association fields such as `task_id` and `alert_trigger_id` should be stored in `metadata` for P1; P1 does not add dedicated columns or typed filters for them, which are deferred to the later integration phase. JSON fields, long text fields, and public short text fields (`stock_name/source_agent/trigger_source/action_label`) are sanitized before persistence with a signal-specific sanitizer that redacts sensitive keys, Bearer values, Authorization/Cookie headers or assignments, token-like strings, other sensitive assignments, webhook URLs, URL userinfo, and URLs with sensitive query or fragment parameters. Ordinary evidence URLs are preserved for source traceability, and long text does not use the diagnostics 300-character truncation. `trace_id` is a same-source identity field; if it contains sensitive credentials that would be redacted, the API rejects the request instead of storing a lossy redacted value.
+
+These endpoints inherit the existing `/api/v1/*` admin authentication middleware: when `ADMIN_AUTH_ENABLED=true`, callers must send a valid admin session cookie. DecisionSignal does not add a separate auth scheme.
+
 ## Backtesting
 
 The backtesting module automatically validates historical AI analysis records against actual price movements, evaluating the accuracy of analysis recommendations.
@@ -1143,15 +1220,28 @@ FastAPI provides RESTful API service for configuration management and triggering
 ### Features
 
 - **Configuration Management** - View/modify watchlist
+- **UI Language Switch** - Toggle UI language (`zh`/`en`) on login page, shell/navigation, settings page, and shared controls; this switch is independent of `REPORT_LANGUAGE`.
 - **Quick Analysis** - Trigger stock analysis via API; the Home page also provides a Market Review button that starts a background market recap in Docker/server mode
 - **Strategy selection** - The Home page supports explicitly selecting analysis strategy skills; when `skills` is omitted, analysis uses the server default strategy so legacy clients keep existing behavior
 - **First-run Setup Hint** - The Home page reads the read-only setup status and points users to Settings when required items such as the primary LLM channel or watchlist are missing
 - **Real-time Progress** - Analysis task status updates in real-time, supports parallel tasks; the regular stock-analysis path now prefers LiteLLM streaming during the LLM stage and pushes finer-grained `message/progress` updates through task SSE
+- **Recoverable AlphaSift screening** - The Screening page submits AlphaSift work as a background task and polls status, so returning to the page restores the active task progress or final result instead of losing feedback when snapshots, quotes, or LLM calls are slow
 - **Market Review visibility** - After clicking Market Review, the API returns a `task_id` and the UI polls `GET /api/v1/analysis/status/{task_id}` to show progress; completed/failure states are rendered explicitly and failure messages are shown directly in the UI error area.
+- **Market review history dedicated entry** - Market review history is shown in a dedicated history entry and isolated from regular stock history; use `stock_code=MARKET` and `report_type=market_review` to view and replay only market-review records.
 - **Market review history replay** - Market review results are persisted with `report_type=market_review` and can be reopened from history list/detail or Markdown endpoints directly, without re-triggering a fresh analysis run.
 - **Input data-block visibility** - Regular analysis reports expose a low-sensitivity `AnalysisContextPack` overview through history details, sync responses, and completed task status; the Web report page shows the data-block summary collapsed after Strategy and News, with block status, source, missing reasons, and fallback summaries available on expansion.
+- **Ask-stock follow-up context** - When Ask Stock is opened from a historical report, follow-up messages keep sending the active `stock_code/stock_name`; reopening an existing chat can recover the base stock from loaded user messages, and comparison-style prompts do not overwrite the current stock context.
 - **Backtest Validation** - Evaluate historical analysis accuracy, query direction win rate and simulated returns
 - **API Documentation** - Visit `/docs` for Swagger UI
+
+### Product behavior notes
+
+For this feature, the product behavior is:
+
+- UI language is independent from report language: `dsa.uiLanguage` (browser persistence) controls shell/login/settings text, while `REPORT_LANGUAGE` controls report text and report-page fixed copy (`zh`/`en`).
+- `dsa.uiLanguage` follows local persistence -> browser language -> default `zh`.
+- This change only adds request-scope report language override parameters; it does not modify `provider`, `model`, `base_url`, or migration/cleanup behavior.
+- PR-level verification output, screenshots, and command logs are maintained in PR description, not in this usage guide.
 
 ### API Endpoints
 
@@ -1162,8 +1252,15 @@ FastAPI provides RESTful API service for configuration management and triggering
 | `/api/v1/analysis/tasks` | GET | Query task list |
 | `/api/v1/analysis/tasks/stream` | GET (SSE) | Subscribe to realtime task updates |
 | `/api/v1/analysis/status/{task_id}` | GET | Query task status |
+| `/api/v1/alphasift/screen/tasks` | POST | Submit an AlphaSift screening background task (`ALPHASIFT_ENABLED` must be enabled first) |
+| `/api/v1/alphasift/screen/tasks/{task_id}` | GET | Query AlphaSift screening task status and completed result |
 | `/api/v1/history` | GET | Query analysis history |
 | `/api/v1/history/{record_id}/diagnostics` | GET | Query a historical report run diagnostic summary and sanitized copy text |
+| `/api/v1/decision-signals` | POST | Explicitly create or deduplicate a decision signal and return `{ item, created }` |
+| `/api/v1/decision-signals` | GET | Paginated decision-signal query with stock, market, action, phase, source, status, time-range, and cache-only holdings filters |
+| `/api/v1/decision-signals/{signal_id}` | GET | Fetch one decision signal and apply lazy expiration before reading |
+| `/api/v1/decision-signals/{signal_id}/status` | PATCH | Update a decision signal status and optional metadata |
+| `/api/v1/decision-signals/latest/{stock_code}` | GET | Query the latest active decision signals for a stock |
 | `/api/v1/usage/summary?period=today|month|all` | GET | Query LLM call counts and token usage grouped by call type and model |
 | `/api/v1/backtest/run` | POST | Trigger backtest |
 | `/api/v1/backtest/results` | GET | Query backtest results (paginated) |
@@ -1175,17 +1272,22 @@ FastAPI provides RESTful API service for configuration management and triggering
 > Note: `POST /api/v1/analysis/analyze` supports only one stock when `async_mode=false`; batch `stock_codes` requires `async_mode=true`. The async `202` response returns a single `task_id` for one stock, or an `accepted` / `duplicates` summary for batch requests.
 > Note: `POST /api/v1/analysis/analyze` accepts `skills` as an array of strategy IDs; if omitted, server defaults are used. The legacy field `strategies` is still accepted for backward compatibility.
 > Note: `POST /api/v1/analysis/analyze` accepts `analysis_phase=auto|premarket|intraday|postmarket`, defaulting to `auto`. Non-`auto` only overrides the phase and derived phase flags for this run; it does not rewrite real trading-calendar timestamps. Accepted responses, in-memory task status, task lists, and SSE echo the requested phase, while the final report phase remains `report.meta.market_phase_summary.phase`.
+> Note: `POST /api/v1/analysis/analyze` accepts `report_language=zh|en` (legacy-compatible alias `reportLanguage`). When omitted, it falls back to global `REPORT_LANGUAGE`. This parameter is request-scoped only and influences report output language for this run, including `report.meta.report_language` in responses.
 > Note: The Web Home page exposes an explicit strategy selector. When users do not pick one, `skills` is not sent and legacy behavior is preserved; when selected, it is passed through to this endpoint and persisted in task status/history snapshots.
 > Note: `POST /api/v1/analysis/market-review` follows the same runtime configuration path as CLI/Bot market review (`GeminiAnalyzer(config=...)`, search setup, and prompt/rendering pipeline). The provider compatibility path prioritizes `litellm_model` and `llm_model_list`, then falls back to existing legacy keys (`GEMINI_*`, `OPENAI_*`, `ANTHROPIC_*`, `DEEPSEEK_*`) when those are not set; provider names, Base URL, and LiteLLM routing semantics are otherwise unchanged.
+> Note: `POST /api/v1/analysis/market-review` also accepts `report_language=zh|en` / `reportLanguage` to set report language for that request. If omitted, it falls back to global `REPORT_LANGUAGE`; Bot/CLI/manual `/market-review` calls keep using global config and do not carry request-level override.
+> Note: `POST /api/v1/analysis/market-review` is the explicit Web/desktop trigger and submits a market-review task directly. It does not short-circuit because `TRADING_DAY_CHECK_ENABLED=true` or the configured markets are closed that day; scheduled jobs, GitHub Actions manual runs, and CLI defaults still follow the trading-day gate unless `--force-run` or workflow `force_run` is used.
 > Audit note: priority and fallback are defined by `Config._load_from_env()` in `src/config.py` (`LITELLM_CONFIG` > `LLM_CHANNELS` > legacy). Regression coverage is in `tests/test_llm_channel_config.py` (configuration source parsing) and `tests/test_market_review_runtime.py` (shared runtime assembly). The endpoint lock is process/host-level only; multi-instance deployments still need external distributed idempotency controls.
 > Note: Once `/api/v1/analysis/market-review` completes, the report is persisted with `report_type=market_review`; open `/api/v1/history` and `/api/v1/history/{record_id}` (or Markdown history endpoints) to view it directly without re-running analysis.
 > Note: `/api/v1/analysis/market-review` responses and persisted history include a structured `market_review_payload` with fields like `market_scope`, `sections`, `sectors`, `news`, `market_light`, `indices`, etc. Web rendering and history detail use the same structure and fall back to raw `markdown_report` only if the structure is unavailable.
 > Note: `market_review_payload.breadth` is emitted only when breadth data is truly available. For markets/feeds without usable breadth, the field is omitted and UI should display `No data` (not a misleading zero value).
 > Note: when `/api/v1/analysis/market-review` returns a `task_id`, the WebUI polls `GET /api/v1/analysis/status/{task_id}`. The UI renders clear `pending/processing` progress, shows completion feedback when status becomes `completed`, and surfaces `error` content on `failed`.
+> Note: filter market-review-only history via `GET /api/v1/history` with `stock_code=MARKET&report_type=market_review` to avoid mixing with regular stock history.
 > Note: `GET /api/v1/history/{record_id}/diagnostics` accepts either the history primary key ID or `query_id`, and returns a `normal/degraded/failed/unknown` summary, key pipeline components, and sanitized `copy_text`. Older reports without `context_snapshot.diagnostics` return `unknown` without affecting normal report reads.
 > Note: `GET /api/v1/history` list summaries can be paginated by `stock_code` for same-stock history and now include optional trend, summary, model, and analysis-time price/change fields. Older rows without persisted snapshots return empty values. The Web report page's "History Trend" drawer reuses this endpoint.
 > Issue #1520 compatibility note: The `model`/`model_used` returned here is read-only historical snapshot metadata from each record, used only for trend drawer/history display. It does not alter runtime model/model-provider/base URL resolution, config migration, or cleanup semantics in the analysis path. Rollback is by reverting this commit; history query, API response shapes, and UI drawer consumption remain compatible.
 > Note: history detail, sync analysis responses, and completed task status responses expose a low-sensitivity input data-block overview at `report.details.analysis_context_pack_overview`; sync analysis responses depend on the just-persisted `analysis_history.context_snapshot`, so new records do not guarantee the overview when `SAVE_CONTEXT_SNAPSHOT=false`. `details.context_snapshot` strips that top-level field and does not return the full `AnalysisContextPack` or prompt summary.
+> Note: `POST /api/v1/agent/chat` and `POST /api/v1/agent/chat/stream` use the frontend-provided `context.stock_code` as the active Ask Stock baseline only after server-side stock-scope resolution. Each turn is classified as `maintain`, `switch`, or `compare`: unchanged follow-ups can call stock-scoped tools only for the current stock; explicit switches clear stale stock summaries and prefetched context; comparison prompts such as compare/vs/difference allow the explicitly mentioned codes for that turn without rewriting the current stock. If a model attempts to call a stock tool with financial abbreviations such as TTM, PE, MACD, KDJ, contextual indicator tokens such as `MA` in moving-average prompts, or exchange fragments such as SH/SZ/BJ/HK/SS, the backend returns a non-retriable `stock_scope_violation` tool result instead of executing that stock tool. Tool names are resolved only by exact registry name; provider namespaces or suffixes are not routed to existing tools.
 
 > Compatibility audit evidence:
 > - Official references: LiteLLM OpenAI-compatible provider documentation <https://docs.litellm.ai/docs/providers/openai_compatible>, OpenAI Chat API <https://platform.openai.com/docs/api-reference/chat/create>, and DeepSeek API docs <https://api-docs.deepseek.com/>.
@@ -1283,6 +1385,12 @@ A: Check if Actions is enabled, and if cron expression is correct (note it's UTC
 ---
 
 ## Portfolio Web Notes
+
+### Portfolio account archive on `/portfolio`
+
+- The `/portfolio` account toolbar can delete a selected single account through the existing `DELETE /api/v1/portfolio/accounts/{account_id}` endpoint.
+- Account deletion uses soft-delete/archive semantics. Archived accounts are hidden from default account lists, portfolio snapshots, risk summaries, entry forms, and event lists.
+- Historical trade, cash-ledger, corporate-action, and daily snapshot rows are not physically removed. To correct a specific ledger row from the Web UI, delete that row before archiving its account.
 
 ### Manual FX refresh on `/portfolio`
 

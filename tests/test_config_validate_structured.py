@@ -524,6 +524,19 @@ class TestValidateStructuredNotification:
         warn = [i for i in issues if i.severity == "warning"]
         assert not any("FEISHU_APP_ID / FEISHU_APP_SECRET" in i.message for i in warn)
 
+    def test_feishu_app_bot_triad_without_webhook_no_mode_warning(self):
+        cfg = _make_config(
+            wechat_webhook_url=None,
+            feishu_app_id="cli_xxx",
+            feishu_app_secret="secret_xxx",
+            feishu_chat_id="oc_xxx",
+            feishu_webhook_url=None,
+            feishu_stream_enabled=False,
+        )
+        issues = cfg.validate_structured()
+        warn = [i for i in issues if i.severity == "warning"]
+        assert not any("FEISHU_APP_ID / FEISHU_APP_SECRET" in i.message for i in warn)
+
     def test_invalid_notification_noise_config_reports_errors(self):
         cfg = _make_config(
             notification_quiet_hours="9:00-18:00",

@@ -482,6 +482,15 @@ _SUMMARY_STATUS_LABELS = {
     "failed": "失败",
     "unknown": "未知",
 }
+_ANALYSIS_INPUT_STATUS_MESSAGES = {
+    "missing": "未进入本次分析输入",
+    "partial": "本次分析输入仅部分可用",
+    "fallback": "本次分析输入使用降级数据",
+    "stale": "本次分析输入使用过期数据",
+    "estimated": "本次分析输入使用估算数据",
+    "fetch_failed": "输入块显示抓取失败",
+    "not_supported": "输入块标记为不支持",
+}
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -510,6 +519,79 @@ def _component(
         status=status,
         message=message,
         details=clean_details,
+    )
+
+
+def _analysis_context_overview(context_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    overview = context_snapshot.get("analysis_context_pack_overview")
+    if not isinstance(overview, dict):
+        overview = context_snapshot.get("analysisContextPackOverview")
+    return overview if isinstance(overview, dict) else {}
+
+
+def _analysis_input_block(
+    context_snapshot: Dict[str, Any],
+    block_key: str,
+) -> Dict[str, Any]:
+    blocks = _analysis_context_overview(context_snapshot).get("blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if isinstance(block, dict) and block.get("key") == block_key:
+                return block
+    if isinstance(blocks, dict):
+        block = blocks.get(block_key)
+        if isinstance(block, dict):
+            return block
+    return {}
+
+
+def _analysis_input_status_message(block: Dict[str, Any]) -> Optional[str]:
+    status = str(block.get("status") or "").strip()
+    if status == "available" or not status:
+        return None
+    return _ANALYSIS_INPUT_STATUS_MESSAGES.get(status, f"输入块状态为 {status}")
+
+
+def _list_text(value: Any, *, limit: int = 5) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    result: List[str] = []
+    for item in value:
+        text = str(item).strip() if item is not None else ""
+        if text and text not in result:
+            result.append(text)
+    return result[:limit]
+
+
+def _reconcile_daily_provider_with_analysis_input(
+    component: RunDiagnosticComponent,
+    context_snapshot: Dict[str, Any],
+) -> RunDiagnosticComponent:
+    input_block = _analysis_input_block(context_snapshot, "daily_bars")
+    input_message = _analysis_input_status_message(input_block)
+    if not input_message or component.status not in {"ok", "degraded"}:
+        return component
+
+    details = dict(component.details or {})
+    details.update(
+        {
+            "provider_run_status": component.status,
+            "analysis_input_block": "daily_bars",
+            "analysis_input_status": input_block.get("status"),
+            "analysis_input_source": input_block.get("source"),
+            "analysis_input_missing_reasons": _list_text(
+                input_block.get("missing_reasons")
+            ),
+            "evidence_scope": "provider_run_vs_analysis_input",
+        }
+    )
+    provider = details.get("provider") or "unknown"
+    return _component(
+        component.key,
+        component.label,
+        "degraded",
+        f"{component.label}{provider} 成功，但{input_message}",
+        details,
     )
 
 
@@ -580,11 +662,29 @@ def _provider_component(
 
 def _news_component(context_snapshot: Dict[str, Any], raw_result: Dict[str, Any]) -> RunDiagnosticComponent:
     label = "新闻搜索"
+    input_block = _analysis_input_block(context_snapshot, "news")
+    input_message = _analysis_input_status_message(input_block)
     has_retrieval_news = "news_retrieval_content" in context_snapshot
     has_snapshot_news = has_retrieval_news or "news_content" in context_snapshot
     news_result_count = context_snapshot.get("news_result_count")
     if isinstance(news_result_count, int):
         if news_result_count > 0:
+            if input_message:
+                return _component(
+                    "news",
+                    label,
+                    "degraded",
+                    f"新闻检索返回 {news_result_count} 条结果，但新闻{input_message}；报告页相关资讯可能来自后续检索或历史持久化",
+                    {
+                        "record_count": news_result_count,
+                        "analysis_input_block": "news",
+                        "analysis_input_status": input_block.get("status"),
+                        "analysis_input_missing_reasons": _list_text(
+                            input_block.get("missing_reasons")
+                        ),
+                        "evidence_scope": "retrieval_vs_analysis_input",
+                    },
+                )
             return _component(
                 "news",
                 label,
@@ -593,6 +693,21 @@ def _news_component(context_snapshot: Dict[str, Any], raw_result: Dict[str, Any]
                 {"record_count": news_result_count},
             )
         return _component("news", label, "degraded", "新闻搜索无结果", {"record_count": 0})
+    if input_message:
+        return _component(
+            "news",
+            label,
+            "unknown",
+            f"新闻{input_message}；报告页相关资讯可能来自后续检索或历史持久化",
+            {
+                "analysis_input_block": "news",
+                "analysis_input_status": input_block.get("status"),
+                "analysis_input_missing_reasons": _list_text(
+                    input_block.get("missing_reasons")
+                ),
+                "evidence_scope": "analysis_input_only",
+            },
+        )
     if has_snapshot_news and not has_retrieval_news:
         return _component("news", label, "unknown", "新闻检索未记录原始证据，可能未尝试或未启用")
     return _component("news", label, "unknown", "新闻搜索未记录诊断信息")
@@ -752,6 +867,12 @@ def build_run_diagnostic_summary(
         if isinstance(run, dict)
     ]
 
+    daily_data_component = _provider_component(
+        key="daily_data",
+        label="日线数据",
+        data_type="daily_data",
+        provider_runs=provider_runs,
+    )
     components = {
         "realtime_quote": _provider_component(
             key="realtime_quote",
@@ -759,11 +880,9 @@ def build_run_diagnostic_summary(
             data_type="realtime_quote",
             provider_runs=provider_runs,
         ),
-        "daily_data": _provider_component(
-            key="daily_data",
-            label="日线数据",
-            data_type="daily_data",
-            provider_runs=provider_runs,
+        "daily_data": _reconcile_daily_provider_with_analysis_input(
+            daily_data_component,
+            snapshot,
         ),
         "news": _news_component(snapshot, raw),
         "llm": _llm_component(diagnostics, raw),

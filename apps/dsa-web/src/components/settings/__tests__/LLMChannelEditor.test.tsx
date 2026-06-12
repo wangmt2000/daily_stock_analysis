@@ -361,6 +361,218 @@ describe('LLMChannelEditor', () => {
     );
   });
 
+  it('only persists edited values for runtime-only channel keys', async () => {
+    update.mockResolvedValue({
+      success: true,
+      configVersion: 'v2',
+      appliedCount: 1,
+      skippedMaskedCount: 0,
+      reloadTriggered: true,
+      updatedKeys: ['LLM_CHANNELS', 'LLM_MY_PROXY_MODELS'],
+      warnings: [],
+    });
+
+    render(
+      <LLMChannelEditor
+        items={[
+          { key: 'LLM_CHANNELS', value: 'my_proxy', rawValueExists: false },
+          { key: 'LITELLM_MODEL', value: 'openai/gpt-4o', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_PROTOCOL', value: 'openai', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_BASE_URL', value: 'https://proxy.example.com/v1', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_ENABLED', value: 'true', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_API_KEYS', value: 'sk-runtime-only', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_MODELS', value: 'gpt-4o-mini', rawValueExists: false },
+        ]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /my_proxy/i }));
+    fireEvent.change(screen.getByLabelText('模型（逗号分隔）'), { target: { value: 'gpt-4o-mini,gpt-4o' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存 AI 配置' }));
+
+    await waitFor(() => {
+      expect(update).toHaveBeenCalled();
+    });
+
+    const updatePayload = update.mock.calls[0][0];
+    const updateItemMap = new Map(updatePayload.items.map((item: { key: string; value: string }) => [item.key, item.value]));
+
+    expect(updateItemMap.get('LLM_MY_PROXY_MODELS')).toBe('gpt-4o-mini,gpt-4o');
+    expect(updateItemMap.has('LITELLM_MODEL')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_PROTOCOL')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_BASE_URL')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_API_KEY')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_API_KEYS')).toBe(false);
+  });
+
+  it('renames a mixed raw/runtime channel and clears persisted API key field', async () => {
+    update.mockResolvedValue({
+      success: true,
+      configVersion: 'v2',
+      appliedCount: 1,
+      skippedMaskedCount: 0,
+      reloadTriggered: true,
+      updatedKeys: ['LLM_MY_PROXY_API_KEY', 'LLM_MY_PROXY2_API_KEY', 'LLM_MY_PROXY2_BASE_URL', 'LLM_MY_PROXY2_MODELS'],
+      warnings: [],
+    });
+
+    render(
+      <LLMChannelEditor
+        items={[
+          { key: 'LLM_CHANNELS', value: 'my_proxy' },
+          { key: 'LLM_MY_PROXY_PROTOCOL', value: 'openai', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_BASE_URL', value: 'https://proxy.example.com/v1', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_ENABLED', value: 'true', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_API_KEY', value: 'sk-saved' },
+          { key: 'LLM_MY_PROXY_MODELS', value: 'gpt-4o-mini', rawValueExists: false },
+        ]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /my_proxy/i }));
+    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'my_proxy2' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存 AI 配置' }));
+
+    await waitFor(() => {
+      expect(update).toHaveBeenCalled();
+    });
+
+    const updatePayload = update.mock.calls[0][0];
+    const updateItemMap = new Map(updatePayload.items.map((item: { key: string; value: string }) => [item.key, item.value]));
+
+    expect(updateItemMap.get('LLM_MY_PROXY_API_KEY')).toBe('');
+    expect(updateItemMap.has('LLM_MY_PROXY_API_KEYS')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_PROTOCOL')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_BASE_URL')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_MODELS')).toBe(false);
+    expect(updateItemMap.get('LLM_MY_PROXY2_API_KEY')).toBe('sk-saved');
+    expect(updateItemMap.get('LLM_MY_PROXY2_BASE_URL')).toBe('https://proxy.example.com/v1');
+    expect(updateItemMap.get('LLM_MY_PROXY2_MODELS')).toBe('gpt-4o-mini');
+  });
+
+  it('uses runtime API_KEYS when both API_KEY and API_KEYS coexist', async () => {
+    render(
+      <LLMChannelEditor
+        items={[
+          { key: 'LLM_CHANNELS', value: 'my_proxy', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_PROTOCOL', value: 'openai', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_BASE_URL', value: 'https://proxy.example.com/v1', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_ENABLED', value: 'true', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_API_KEY', value: 'sk-saved' },
+          { key: 'LLM_MY_PROXY_API_KEYS', value: 'sk-runtime-only', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_MODELS', value: 'gpt-4o-mini', rawValueExists: false },
+        ]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /my_proxy/i }));
+    expect(screen.getByLabelText('API Key')).toHaveValue('sk-runtime-only');
+  });
+
+  it('does not migrate conflicted API key data as API_KEY when renaming a channel', async () => {
+    update.mockResolvedValue({
+      success: true,
+      configVersion: 'v2',
+      appliedCount: 1,
+      skippedMaskedCount: 0,
+      reloadTriggered: true,
+      updatedKeys: ['LLM_CHANNELS', 'LLM_MY_PROXY_API_KEY', 'LLM_MY_PROXY2_PROTOCOL', 'LLM_MY_PROXY2_BASE_URL', 'LLM_MY_PROXY2_MODELS'],
+      warnings: [],
+    });
+
+    render(
+      <LLMChannelEditor
+        items={[
+          { key: 'LLM_CHANNELS', value: 'my_proxy', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_PROTOCOL', value: 'openai', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_BASE_URL', value: 'https://proxy.example.com/v1', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_ENABLED', value: 'true', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_API_KEY', value: 'sk-saved' },
+          { key: 'LLM_MY_PROXY_API_KEYS', value: 'sk-runtime-only', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_MODELS', value: 'gpt-4o-mini', rawValueExists: false },
+        ]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /my_proxy/i }));
+    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'my_proxy2' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存 AI 配置' }));
+
+    await waitFor(() => {
+      expect(update).toHaveBeenCalled();
+    });
+
+    const updatePayload = update.mock.calls[0][0];
+    const updateItemMap = new Map(updatePayload.items.map((item: { key: string; value: string }) => [item.key, item.value]));
+
+    expect(updateItemMap.get('LLM_CHANNELS')).toBe('my_proxy2');
+    expect(updateItemMap.has('LLM_MY_PROXY2_API_KEY')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY2_API_KEYS')).toBe(false);
+    expect([...updateItemMap.values()]).not.toContain('sk-runtime-only');
+    expect([...updateItemMap.values()]).not.toContain('sk-saved');
+    expect(updateItemMap.get('LLM_MY_PROXY_API_KEY')).toBe('');
+    expect(updateItemMap.get('LLM_MY_PROXY2_BASE_URL')).toBe('https://proxy.example.com/v1');
+    expect(updateItemMap.get('LLM_MY_PROXY2_MODELS')).toBe('gpt-4o-mini');
+  });
+
+  it('does not migrate runtime-only API keys when renaming a startup-env channel', async () => {
+    update.mockResolvedValue({
+      success: true,
+      configVersion: 'v2',
+      appliedCount: 1,
+      skippedMaskedCount: 0,
+      reloadTriggered: true,
+      updatedKeys: ['LLM_CHANNELS', 'LLM_MY_PROXY2_BASE_URL', 'LLM_MY_PROXY2_MODELS'],
+      warnings: [],
+    });
+
+    render(
+      <LLMChannelEditor
+        items={[
+          { key: 'LLM_CHANNELS', value: 'my_proxy', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_PROTOCOL', value: 'openai', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_BASE_URL', value: 'https://proxy.example.com/v1', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_ENABLED', value: 'true', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_API_KEYS', value: 'sk-runtime-only', rawValueExists: false },
+          { key: 'LLM_MY_PROXY_MODELS', value: 'gpt-4o-mini', rawValueExists: false },
+        ]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /my_proxy/i }));
+    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'my_proxy2' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存 AI 配置' }));
+
+    await waitFor(() => {
+      expect(update).toHaveBeenCalled();
+    });
+
+    const updatePayload = update.mock.calls[0][0];
+    const updateItemMap = new Map(updatePayload.items.map((item: { key: string; value: string }) => [item.key, item.value]));
+
+    expect(updateItemMap.get('LLM_CHANNELS')).toBe('my_proxy2');
+    expect(updateItemMap.has('LLM_MY_PROXY_API_KEY')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY_API_KEYS')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY2_API_KEY')).toBe(false);
+    expect(updateItemMap.has('LLM_MY_PROXY2_API_KEYS')).toBe(false);
+    expect([...updateItemMap.values()]).not.toContain('sk-runtime-only');
+  });
+
   it('sanitizes stale runtime models before saving DeepSeek V4 channel changes', async () => {
     update.mockResolvedValue({
       success: true,

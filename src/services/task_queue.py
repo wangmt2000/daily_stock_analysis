@@ -80,6 +80,7 @@ class TaskInfo:
     query_source: str = "api"
     portfolio_context: Optional[Dict[str, Any]] = None
     skills: Optional[List[str]] = None
+    report_language: Optional[str] = None
     trace_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
@@ -124,6 +125,7 @@ class TaskInfo:
             query_source=self.query_source,
             portfolio_context=dict(self.portfolio_context) if isinstance(self.portfolio_context, dict) else None,
             skills=list(self.skills) if self.skills is not None else None,
+            report_language=self.report_language,
             trace_id=self.trace_id or self.task_id,
         )
 
@@ -322,6 +324,7 @@ class AnalysisTaskQueue:
         analysis_phase: str = "auto",
         force_refresh: bool = False,
         skills: Optional[List[str]] = None,
+        report_language: Optional[str] = None,
     ) -> TaskInfo:
         """
         Submit a single analysis task.
@@ -356,6 +359,7 @@ class AnalysisTaskQueue:
             analysis_phase=analysis_phase,
             force_refresh=force_refresh,
             skills=skills,
+            report_language=report_language,
         )
         if duplicates:
             raise duplicates[0]
@@ -374,6 +378,7 @@ class AnalysisTaskQueue:
         force_refresh: bool = False,
         notify: bool = True,
         skills: Optional[List[str]] = None,
+        report_language: Optional[str] = None,
     ) -> Tuple[List[TaskInfo], List[DuplicateTaskError]]:
         """
         Submit analysis tasks in batch.
@@ -416,6 +421,7 @@ class AnalysisTaskQueue:
                     query_source=query_source or "api",
                     portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
                     skills=task_skills,
+                    report_language=report_language,
                 )
                 self._tasks[task_id] = task_info
                 self._analyzing_stocks[dedupe_key] = task_id
@@ -429,6 +435,7 @@ class AnalysisTaskQueue:
                         force_refresh,
                         notify,
                         task_skills,
+                        report_language,
                     )
                 except Exception:
                     # Roll back the current batch to avoid partial submission.
@@ -614,6 +621,7 @@ class AnalysisTaskQueue:
         force_refresh: bool,
         notify: bool = True,
         skills: Optional[List[str]] = None,
+        report_language: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         执行分析任务（在线程池中运行）
@@ -674,6 +682,7 @@ class AnalysisTaskQueue:
                 analysis_phase=analysis_phase,
                 query_source=query_source,
                 portfolio_context=portfolio_context,
+                report_language=report_language,
             )
             reset_run_diagnostic_context(diag_token)
             diag_token = None

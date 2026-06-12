@@ -41,6 +41,7 @@ from src.agent.protocols import (
     normalize_decision_signal,
 )
 from src.agent.runner import parse_dashboard_json
+from src.agent.stock_scope import resolve_stock_scope
 from src.agent.tools.registry import ToolRegistry
 from src.agent.chat_context import build_visible_chat_history
 from src.config import AGENT_MAX_STEPS_DEFAULT, get_config
@@ -312,9 +313,12 @@ class AgentOrchestrator:
         from src.agent.executor import AgentResult
         from src.agent.conversation import conversation_manager
 
-        ctx = self._build_context(message, context)
+        scope_resolution = resolve_stock_scope(message, context)
+        ctx = self._build_context(message, scope_resolution.effective_context)
         ctx.session_id = session_id
         ctx.meta["response_mode"] = "chat"
+        if scope_resolution.stock_scope is not None:
+            ctx.meta["stock_scope"] = scope_resolution.stock_scope
 
         conversation_manager.get_or_create(session_id)
         config = self.config or getattr(self.llm_adapter, "_config", None) or get_config()
@@ -1368,6 +1372,9 @@ class AgentOrchestrator:
 # be kept at module level to avoid re-creating it on every call.
 _COMMON_WORDS: set[str] = {
     # Pronouns / articles / prepositions / conjunctions
+    "AM", "AS", "AT", "BE", "BY", "DO", "GO", "HE", "IF", "IN",
+    "IS", "IT", "ME", "MY", "NO", "OF", "ON", "OR", "SO", "TO",
+    "UP", "US", "WE",
     "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL",
     "CAN", "HAD", "HER", "WAS", "ONE", "OUR", "OUT", "HAS",
     "HIS", "HOW", "ITS", "LET", "MAY", "NEW", "NOW", "OLD",
@@ -1386,7 +1393,10 @@ _COMMON_WORDS: set[str] = {
     "STOCK", "TRADE", "PRICE", "INDEX", "FUND",
     "HIGH", "LOW", "OPEN", "CLOSE", "STOP", "LOSS",
     "TREND", "BULL", "BEAR", "RISK", "CASH", "BOND",
-    "MACD", "VWAP", "BOLL",
+    "MACD", "VWAP", "BOLL", "KDJ",
+    "TTM", "LTM", "NTM", "FWD", "YOY", "QOQ", "YTD",
+    "EBIT", "EBITDA", "DCF", "CAGR", "FCF", "NAV", "AUM",
+    "PE", "PB",
     # Greetings / filler words that often appear in chat messages
     "HELLO", "PLEASE", "THANKS", "CHECK", "LOOK", "THINK",
     "MAYBE", "GUESS", "TELL", "SHOW", "WHAT", "WHATS",
@@ -1396,6 +1406,11 @@ _COMMON_WORDS: set[str] = {
 _LOWERCASE_TICKER_HINTS = re.compile(
     r"分析|看看|查一?下|研究|诊断|走势|趋势|股价|股票|个股",
 )
+
+
+def _is_denied_ticker_candidate(candidate: str) -> bool:
+    """Return whether a text token should not be auto-treated as a ticker."""
+    return (candidate or "").strip().upper() in _COMMON_WORDS
 
 
 def _extract_stock_code(text: str) -> str:
@@ -1410,17 +1425,16 @@ def _extract_stock_code(text: str) -> str:
     if m:
         return m.group(1).upper()
     # US ticker — require 2+ uppercase letters bounded by non-alpha chars.
-    m = re.search(r'(?<![a-zA-Z])([A-Z]{2,5}(?:\.[A-Z]{1,2})?)(?![a-zA-Z])', text)
-    if m:
-        candidate = m.group(1)
-        if candidate not in _COMMON_WORDS:
+    for match in re.finditer(r'(?<![a-zA-Z])([A-Z]{2,5}(?:\.[A-Z]{1,2})?)(?![a-zA-Z])', text):
+        candidate = match.group(1)
+        if not _is_denied_ticker_candidate(candidate):
             return candidate
 
     stripped = (text or "").strip()
     bare_match = re.fullmatch(r'([A-Za-z]{2,5}(?:\.[A-Za-z]{1,2})?)', stripped)
     if bare_match:
         candidate = bare_match.group(1).upper()
-        if candidate not in _COMMON_WORDS:
+        if not _is_denied_ticker_candidate(candidate):
             return candidate
 
     if not _LOWERCASE_TICKER_HINTS.search(stripped):
@@ -1429,7 +1443,7 @@ def _extract_stock_code(text: str) -> str:
     for match in re.finditer(r'(?<![a-zA-Z])([A-Za-z]{2,5}(?:\.[A-Za-z]{1,2})?)(?![a-zA-Z])', text):
         raw_candidate = match.group(1)
         candidate = raw_candidate.upper()
-        if candidate in _COMMON_WORDS:
+        if _is_denied_ticker_candidate(candidate):
             continue
         return candidate
     return ""

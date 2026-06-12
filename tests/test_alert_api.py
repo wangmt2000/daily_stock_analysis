@@ -26,6 +26,7 @@ import src.auth as auth
 from api.app import create_app
 from src.config import Config
 from src.repositories.alert_repo import AlertRepository
+from src.services.alert_service import AlertService
 from src.services.portfolio_service import PortfolioService
 from src.storage import AlertCooldownRecord, AlertNotificationRecord, AlertTriggerRecord, Base, DatabaseManager
 
@@ -555,9 +556,12 @@ class AlertApiTestCase(unittest.TestCase):
             "data_quality": "ok",
         }
 
+        async def _run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
         with patch("src.services.market_light_alerts.get_open_markets_today", return_value={"cn"}), patch(
             "src.services.market_light_alerts.build_current_snapshot", return_value=snapshot
-        ) as build_snapshot:
+        ) as build_snapshot, patch("src.services.alert_service.asyncio.to_thread", new=_run_inline):
             resp = self.client.post(f"/api/v1/alerts/rules/{rule['id']}/test")
 
         self.assertEqual(resp.status_code, 200, resp.text)

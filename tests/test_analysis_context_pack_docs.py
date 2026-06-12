@@ -429,12 +429,14 @@ def test_analysis_context_pack_doc_updates_indexes_and_changelog() -> None:
 
     assert "[分析上下文包契约、运行态消费与可见性](analysis-context-pack.md)" in index
     assert "P1/P2 内部契约、P3 Prompt 摘要消费、P4 历史/API/Web 低敏可见性、P5 数据质量评分、P6 迁移回滚" in index
+    assert "#1386 阶段感知分析、迁移与回滚入口" in index
     assert (
         "[Analysis Context Pack Contract, Runtime Consumption, And Visibility](analysis-context-pack.md) "
         "<sub><sub>![P6 Badge](https://img.shields.io/badge/P6-orange?style=flat)</sub></sub> "
         "(Chinese-only)"
     ) in index_en
     assert "P1/P2 internal contracts, P3 prompt-summary consumption, P4 history/API/Web low-sensitivity visibility, P5 data-quality scoring, and P6 migration/rollback notes" in index_en
+    assert "#1386 market-phase analysis, migration, and rollback entry points" in index_en
     assert "新增 AnalysisContextPack P0 上下文盘点" in changelog
     assert "新增 AnalysisContextPack P1 内部契约与脱敏序列化测试" in changelog
     assert "新增 AnalysisContextPack P2 builder" in changelog
@@ -442,8 +444,64 @@ def test_analysis_context_pack_doc_updates_indexes_and_changelog() -> None:
     assert "AnalysisContextPack P4 低敏 overview 接入历史详情" in changelog
     assert "AnalysisContextPack P5 增加数据质量评分" in changelog
     assert "明确 AnalysisContextPack P6 文档、迁移与回滚边界" in changelog
+    assert "#1386 P7 盘前/盘中/盘后分析的入口、迁移、回滚和用户可见说明" in changelog
     assert "#1386 P5 为个股分析报告新增 `dashboard.phase_decision`" in changelog
     assert "优化 Web 报告详情页信息层级" in changelog
+
+
+def test_full_guides_cover_issue_1386_p7_user_migration_closeout() -> None:
+    guide = (PROJECT_ROOT / "docs" / "full-guide.md").read_text(encoding="utf-8")
+    guide_en = (PROJECT_ROOT / "docs" / "full-guide_EN.md").read_text(encoding="utf-8")
+
+    for token in (
+        "文档、配置与迁移说明（Issue #1386 P7）",
+        "盘前 / 盘中 / 盘后分析",
+        "生成开盘计划和观察条件",
+        "盘中 / 午间 / 临近收盘",
+        "做实时状态判断、风险和机会提醒",
+        "`analysis_phase=auto|premarket|intraday|postmarket`",
+        "最终报告阶段仍以 `report.meta.market_phase_summary.phase` 为准",
+        "Web 主分析 / 重新分析 / 持仓手动分析",
+        "当前没有阶段覆盖 selector",
+        "进行中任务面板展示请求阶段",
+        "最终报告页展示最终阶段标签",
+        "Bot / CLI / schedule / 默认 GitHub Actions",
+        "只消费公开 `market_phase_summary` 和低敏 `analysis_context_pack_overview`",
+        "不公开完整 pack、Prompt summary、新闻正文或持仓敏感明细",
+        "旧调用不传 `analysis_phase` 时保持兼容",
+        "回测查询支持 `analysis_phase=premarket|intraday|postmarket|unknown`",
+        "`SAVE_CONTEXT_SNAPSHOT=false`",
+        "不关闭当次 `AnalysisContextPack` 构建",
+        "低敏 `analysis_context_pack_summary`",
+        "`analysis_phase=postmarket`",
+        "需要发布回滚或代码回滚",
+    ):
+        assert token in guide
+
+    for token in (
+        "Documentation, Configuration, And Migration Notes (Issue #1386 P7)",
+        "pre-market / intraday / post-market analysis",
+        "opening plan and watch conditions",
+        "Intraday / lunch break / near close",
+        "live state, risk, and opportunity alerts",
+        "`analysis_phase=auto|premarket|intraday|postmarket`",
+        "final report phase remains `report.meta.market_phase_summary.phase`",
+        "Web main analysis / re-analysis / portfolio manual analysis",
+        "no phase override selector",
+        "the in-progress task panel shows the requested phase",
+        "the final report page shows the final phase label",
+        "Bot / CLI / schedule / default GitHub Actions",
+        "Only consume public `market_phase_summary` and low-sensitivity `analysis_context_pack_overview`",
+        "do not expose the full pack, prompt summary, news body text, or sensitive portfolio details",
+        "Older callers that omit `analysis_phase` remain compatible",
+        "Backtest queries support `analysis_phase=premarket|intraday|postmarket|unknown`",
+        "`SAVE_CONTEXT_SNAPSHOT=false`",
+        "does not disable current-run `AnalysisContextPack` construction",
+        "low-sensitivity `analysis_context_pack_summary`",
+        "`analysis_phase=postmarket`",
+        "requires a release rollback or code rollback",
+    ):
+        assert token in guide_en
 
 
 def test_full_guides_clarify_pack_summary_does_not_replace_legacy_payload_channels() -> None:

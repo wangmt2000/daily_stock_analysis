@@ -96,6 +96,22 @@ class MainScheduleModeTestCase(unittest.TestCase):
         defaults.update(overrides)
         return _DummyConfig(**defaults)
 
+    def test_public_webui_bind_warns_when_auth_is_disabled(self) -> None:
+        with patch("src.auth.is_auth_enabled", return_value=False), \
+             patch("main.logger.warning") as warning_log:
+            main._warn_if_public_webui_without_auth("0.0.0.0")
+
+        warning_log.assert_called_once()
+        self.assertIn("WEBUI_HOST=%s", warning_log.call_args.args[0])
+        self.assertEqual(warning_log.call_args.args[1], "0.0.0.0")
+
+    def test_loopback_webui_bind_does_not_warn_when_auth_is_disabled(self) -> None:
+        with patch("src.auth.is_auth_enabled", return_value=False), \
+             patch("main.logger.warning") as warning_log:
+            main._warn_if_public_webui_without_auth("127.0.0.1")
+
+        warning_log.assert_not_called()
+
     def test_schedule_mode_ignores_cli_stock_snapshot(self) -> None:
         args = self._make_args(schedule=True, stocks="600519,000001")
         config = self._make_config(schedule_enabled=False)
@@ -506,6 +522,34 @@ class MainScheduleModeTestCase(unittest.TestCase):
         pipeline.run.assert_called_once()
         run_market_review.assert_not_called()
 
+    def test_config_enabled_schedule_marks_market_review_source_as_schedule(self) -> None:
+        args = self._make_args(schedule=False)
+        config = self._make_config(
+            schedule_enabled=True,
+            trading_day_check_enabled=False,
+            market_review_enabled=True,
+            no_market_review=False,
+            single_stock_notify=False,
+            merge_email_notification=False,
+            analysis_delay=0,
+            database_path=str(Path(self.temp_dir.name) / "stock_analysis.db"),
+        )
+        pipeline = MagicMock()
+        pipeline.run.return_value = []
+
+        with patch.object(main, "_refresh_stock_index_cache_for_analysis"), \
+             patch.object(main, "_compute_trading_day_filter", return_value=(["600519"], "cn", False)), \
+             patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline), \
+             patch("main._run_market_review_with_shared_lock", return_value="market report") as run_with_lock, \
+             patch("src.core.market_review.run_market_review") as run_market_review:
+            main.run_full_analysis(config, args, ["600519"])
+
+        pipeline.run.assert_called_once()
+        run_with_lock.assert_called_once()
+        call_args = run_with_lock.call_args
+        self.assertIs(call_args.args[1], run_market_review)
+        self.assertEqual(call_args.kwargs["trigger_source"], "schedule")
+
     def test_market_review_mode_uses_shared_runtime_assembly(self) -> None:
         args = self._make_args(market_review=True)
         config = self._make_config(
@@ -547,6 +591,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertTrue(call_args.kwargs["send_notification"])
         self.assertNotIn("merge_notification", call_args.kwargs)
         self.assertEqual(call_args.kwargs["override_region"], "cn,us")
+        self.assertEqual(call_args.kwargs["trigger_source"], "cli")
 
     def test_bootstrap_logging_persists_when_config_load_fails(self) -> None:
         """Config load failure must be logged to stderr and return exit code 1.

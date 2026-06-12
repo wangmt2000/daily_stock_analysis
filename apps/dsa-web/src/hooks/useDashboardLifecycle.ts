@@ -8,6 +8,8 @@ type UseDashboardLifecycleOptions = {
   refreshActiveTasks: () => Promise<void>;
   loadStockBar: () => Promise<void>;
   refreshStockBar: () => Promise<void>;
+  loadMarketReviewHistory?: () => Promise<void>;
+  refreshMarketReviewHistory?: (silent?: boolean) => Promise<void>;
   syncTaskCreated: (task: TaskInfo) => void;
   syncTaskUpdated: (task: TaskInfo) => void;
   syncTaskFailed: (task: TaskInfo) => void;
@@ -21,6 +23,8 @@ export function useDashboardLifecycle({
   refreshActiveTasks,
   loadStockBar,
   refreshStockBar,
+  loadMarketReviewHistory,
+  refreshMarketReviewHistory,
   syncTaskCreated,
   syncTaskUpdated,
   syncTaskFailed,
@@ -36,8 +40,9 @@ export function useDashboardLifecycle({
 
     void loadInitialHistory();
     void loadStockBar();
+    void loadMarketReviewHistory?.();
     void refreshActiveTasks();
-  }, [enabled, loadInitialHistory, loadStockBar, refreshActiveTasks]);
+  }, [enabled, loadInitialHistory, loadMarketReviewHistory, loadStockBar, refreshActiveTasks]);
 
   useEffect(() => {
     if (!enabled) {
@@ -47,11 +52,12 @@ export function useDashboardLifecycle({
     const intervalId = window.setInterval(() => {
       void refreshHistory(true);
       void refreshStockBar();
+      void refreshMarketReviewHistory?.(true);
       void refreshActiveTasks();
     }, 30_000);
 
     return () => window.clearInterval(intervalId);
-  }, [enabled, refreshHistory, refreshStockBar, refreshActiveTasks]);
+  }, [enabled, refreshHistory, refreshMarketReviewHistory, refreshStockBar, refreshActiveTasks]);
 
   useEffect(() => {
     if (!enabled) {
@@ -62,13 +68,14 @@ export function useDashboardLifecycle({
       if (document.visibilityState === 'visible') {
         void refreshHistory(true);
         void refreshStockBar();
+        void refreshMarketReviewHistory?.(true);
         void refreshActiveTasks();
       }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [enabled, refreshHistory, refreshStockBar, refreshActiveTasks]);
+  }, [enabled, refreshHistory, refreshMarketReviewHistory, refreshStockBar, refreshActiveTasks]);
 
   useEffect(() => {
     return () => {
@@ -97,6 +104,7 @@ export function useDashboardLifecycle({
       syncTaskUpdated(task);
       void refreshHistory(true);
       void refreshStockBar();
+      void refreshMarketReviewHistory?.(true);
       scheduleTaskRemoval(task.taskId, 2_000);
     },
     onTaskFailed: (task) => {

@@ -102,6 +102,38 @@ class MarketReviewLocalizationTestCase(unittest.TestCase):
         persist_history.assert_called_once()
         self.assertEqual(persist_history.call_args.kwargs["query_id"], None)
 
+    def test_run_market_review_passes_request_config_to_generation(self) -> None:
+        notifier = self._make_notifier()
+        request_config = SimpleNamespace(report_language="en", market_review_region="cn")
+        global_config = SimpleNamespace(report_language="zh", market_review_region="cn")
+        market_analyzer = MagicMock()
+        market_analyzer.run_daily_review_with_snapshot.return_value = SimpleNamespace(
+            report="English market review body",
+            market_light_snapshot={"region": "cn", "trade_date": "2026-04-10", "score": 60},
+        )
+
+        with patch.object(
+            market_review_module,
+            "get_config",
+            return_value=global_config,
+        ), patch.object(
+            market_review_module,
+            "MarketAnalyzer",
+            return_value=market_analyzer,
+        ) as analyzer_cls, patch.object(market_review_module, "_persist_market_review_history") as persist_history:
+            result = run_market_review(
+                notifier,
+                config=request_config,
+                send_notification=False,
+                return_structured=True,
+            )
+
+        self.assertEqual(analyzer_cls.call_args.kwargs["config"], request_config)
+        self.assertEqual(persist_history.call_args.kwargs["config"], request_config)
+        self.assertTrue(notifier.save_report_to_file.call_args.args[0].startswith("# 🎯 Market Review\n\n"))
+        self.assertEqual(result.market_review_payload["language"], "en")
+        self.assertEqual(result.report, "English market review body")
+
     def test_run_market_review_merges_both_regions_with_english_wrappers(self) -> None:
         notifier = self._make_notifier()
         cn_analyzer = MagicMock()

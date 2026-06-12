@@ -32,6 +32,7 @@ from src.analyzer import (
     AnalysisResult,
     fill_price_position_if_needed,
     normalize_chip_structure_availability,
+    populate_decision_action_fields,
     stabilize_decision_with_structure,
 )
 from src.notification import NotificationService, NotificationChannel
@@ -619,6 +620,7 @@ class StockAnalysisPipeline:
             # Step 7.7: price_position fallback
             if result:
                 fill_price_position_if_needed(result, trend_result, realtime_quote)
+                action_source_advice = getattr(result, "operation_advice", None)
                 stabilize_decision_with_structure(result, trend_result, fundamental_context)
                 adjustments = apply_phase_decision_guardrails(
                     result,
@@ -633,6 +635,11 @@ class StockAnalysisPipeline:
                     result.fundamental_context = fundamental_context
                 result.market_phase_summary = market_phase_summary
                 result.analysis_context_pack_overview = analysis_context_pack_overview
+                self._refresh_decision_action_for_final_result(
+                    result,
+                    report_type=report_type.value,
+                    previous_operation_advice=action_source_advice,
+                )
 
             # Step 8: 保存分析历史记录
             if result and result.success:
@@ -1131,6 +1138,7 @@ class StockAnalysisPipeline:
                 if isinstance(realtime_data, dict):
                     result.current_price = realtime_data.get("price")
                     result.change_pct = realtime_data.get("change_pct")
+                action_source_advice = getattr(result, "operation_advice", None)
                 stabilize_decision_with_structure(result, trend_result, fundamental_context)
                 adjustments = apply_phase_decision_guardrails(
                     result,
@@ -1145,6 +1153,11 @@ class StockAnalysisPipeline:
                     result.fundamental_context = fundamental_context
                 result.market_phase_summary = market_phase_summary
                 result.analysis_context_pack_overview = analysis_context_pack_overview
+                self._refresh_decision_action_for_final_result(
+                    result,
+                    report_type=report_type.value,
+                    previous_operation_advice=action_source_advice,
+                )
 
             resolved_stock_name = result.name if result and result.name else stock_name
 
@@ -1258,6 +1271,7 @@ class StockAnalysisPipeline:
         将 AgentResult 转换为 AnalysisResult。
         """
         report_language = normalize_report_language(getattr(self.config, "report_language", "zh"))
+        dash = None
         result = AnalysisResult(
             code=code,
             name=stock_name,
@@ -1421,7 +1435,25 @@ class StockAnalysisPipeline:
             if not result.error_message:
                 result.error_message = "Agent failed to generate a valid decision dashboard" if report_language == "en" else "Agent 未能生成有效的决策仪表盘"
 
-        return result
+        explicit_action = dash.get("action") if isinstance(dash, dict) else None
+        if explicit_action is None and isinstance(getattr(result, "dashboard", None), dict):
+            explicit_action = result.dashboard.get("action")
+        return populate_decision_action_fields(result, explicit_action=explicit_action)
+
+    @staticmethod
+    def _refresh_decision_action_for_final_result(
+        result: AnalysisResult,
+        *,
+        report_type: Any,
+        previous_operation_advice: Any,
+    ) -> AnalysisResult:
+        previous_advice = str(previous_operation_advice or "").strip()
+        current_advice = str(getattr(result, "operation_advice", None) or "").strip()
+        return populate_decision_action_fields(
+            result,
+            report_type=report_type,
+            use_existing_action=(previous_advice == current_advice),
+        )
 
     @staticmethod
     def _agent_dashboard_value(

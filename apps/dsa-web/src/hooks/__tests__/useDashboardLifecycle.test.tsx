@@ -20,6 +20,8 @@ const createTask = () => ({
 const defaultMocks = {
   loadStockBar: vi.fn().mockResolvedValue(undefined),
   refreshStockBar: vi.fn().mockResolvedValue(undefined),
+  loadMarketReviewHistory: vi.fn().mockResolvedValue(undefined),
+  refreshMarketReviewHistory: vi.fn().mockResolvedValue(undefined),
 };
 
 describe('useDashboardLifecycle', () => {
@@ -51,12 +53,14 @@ describe('useDashboardLifecycle', () => {
     );
 
     expect(loadInitialHistory).toHaveBeenCalledTimes(1);
+    expect(defaultMocks.loadMarketReviewHistory).toHaveBeenCalledTimes(1);
     expect(refreshActiveTasks).toHaveBeenCalledTimes(1);
 
     act(() => {
       vi.advanceTimersByTime(30_000);
     });
     expect(refreshHistory).toHaveBeenCalledWith(true);
+    expect(defaultMocks.refreshMarketReviewHistory).toHaveBeenCalledWith(true);
     expect(refreshActiveTasks).toHaveBeenCalledTimes(2);
 
     act(() => {
@@ -68,6 +72,7 @@ describe('useDashboardLifecycle', () => {
     });
 
     expect(refreshHistory).toHaveBeenCalledTimes(2);
+    expect(defaultMocks.refreshMarketReviewHistory).toHaveBeenCalledTimes(2);
     expect(refreshActiveTasks).toHaveBeenCalledTimes(3);
   });
 
@@ -130,6 +135,7 @@ describe('useDashboardLifecycle', () => {
 
     expect(syncTaskUpdated).toHaveBeenCalledWith(completedTask);
     expect(refreshHistory).toHaveBeenCalledWith(true);
+    expect(defaultMocks.refreshMarketReviewHistory).toHaveBeenCalledWith(true);
 
     act(() => {
       vi.advanceTimersByTime(2_000);

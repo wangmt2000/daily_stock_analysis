@@ -19,7 +19,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple, Callable, TypeVar, Union
 
 import pandas as pd
@@ -36,7 +36,6 @@ from sqlalchemy import (
     Index,
     UniqueConstraint,
     Text,
-    case,
     select,
     and_,
     or_,
@@ -58,6 +57,7 @@ from src.config import get_config
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+CURRENT_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
 
 # SQLAlchemy ORM 基类
 Base = declarative_base()
@@ -66,7 +66,29 @@ if TYPE_CHECKING:
     from src.search_service import SearchResponse
 
 
+def utc_naive_now() -> datetime:
+    """Return current UTC time without tzinfo for SQLite DateTime columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def to_utc_naive_datetime(value: datetime) -> datetime:
+    """Normalize aware datetimes to UTC-naive; treat naive values as UTC-naive."""
+    if value.tzinfo is not None and value.utcoffset() is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 # === 数据模型定义 ===
+
+class DatabaseSchemaMigration(Base):
+    """Applied database schema version marker."""
+
+    __tablename__ = 'schema_migrations'
+
+    version = Column(String(64), primary_key=True)
+    description = Column(String(255), nullable=False)
+    applied_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+
 
 class StockDaily(Base):
     """
@@ -764,6 +786,70 @@ class AlertCooldownRecord(Base):
     )
 
 
+class DecisionSignalRecord(Base):
+    """Persisted AI decision signal asset for Issue #1390 P1."""
+
+    __tablename__ = 'decision_signals'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False, index=True)
+    stock_name = Column(String(64))
+    market = Column(String(8), nullable=False, index=True)
+    source_type = Column(String(32), nullable=False, index=True)
+    source_agent = Column(String(64))
+    source_report_id = Column(Integer, index=True)
+    trace_id = Column(String(64), index=True)
+    market_phase = Column(String(24), index=True)
+    trigger_source = Column(String(64), nullable=False, index=True)
+    action = Column(String(16), nullable=False, index=True)
+    action_label = Column(String(32))
+    confidence = Column(Float)
+    score = Column(Integer)
+    horizon = Column(String(16), index=True)
+    entry_low = Column(Float)
+    entry_high = Column(Float)
+    stop_loss = Column(Float)
+    target_price = Column(Float)
+    invalidation = Column(Text)
+    watch_conditions = Column(Text)
+    reason = Column(Text)
+    risk_summary = Column(Text)
+    catalyst_summary = Column(Text)
+    evidence_json = Column(Text)
+    data_quality_summary_json = Column(Text)
+    plan_quality = Column(String(16), nullable=False, default='unknown', index=True)
+    status = Column(String(16), nullable=False, default='active', index=True)
+    expires_at = Column(DateTime, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+    metadata_json = Column(Text)
+
+    __table_args__ = (
+        Index('ix_decision_signal_stock_status_time', 'stock_code', 'status', 'created_at'),
+        Index('ix_decision_signal_market_status_time', 'market', 'status', 'created_at'),
+        Index(
+            'ix_decision_signal_report_type_market_stock_action_horizon_phase',
+            'source_report_id',
+            'source_type',
+            'market',
+            'stock_code',
+            'action',
+            'horizon',
+            'market_phase',
+        ),
+        Index(
+            'ix_decision_signal_trace_type_market_stock_action_horizon_phase',
+            'trace_id',
+            'source_type',
+            'market',
+            'stock_code',
+            'action',
+            'horizon',
+            'market_phase',
+        ),
+    )
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 
@@ -844,6 +930,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
             # 创建所有表
             Base.metadata.create_all(self._engine)
+            self._ensure_schema_migration_record()
 
             self._initialized = True
             logger.info(f"数据库初始化完成: {db_url}")
@@ -861,6 +948,32 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._SessionLocal = None
             self.__class__._instance = None
             raise
+
+    def _ensure_schema_migration_record(self) -> None:
+        session = self._SessionLocal()
+        values = {
+            "version": CURRENT_SCHEMA_VERSION,
+            "description": "Baseline schema created through SQLAlchemy metadata.create_all",
+        }
+        try:
+            if self._is_sqlite_engine:
+                statement = sqlite_insert(DatabaseSchemaMigration).values(**values)
+                statement = statement.on_conflict_do_nothing(index_elements=["version"])
+                session.execute(statement)
+            else:
+                session.execute(DatabaseSchemaMigration.__table__.insert().values(**values))
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            with self._SessionLocal() as verify_session:
+                existing = verify_session.get(DatabaseSchemaMigration, CURRENT_SCHEMA_VERSION)
+            if existing is None:
+                raise
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     @classmethod
     def get_instance(cls) -> 'DatabaseManager':
@@ -1513,6 +1626,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
     def get_analysis_history_paginated(
         self,
         code: Optional[Union[str, List[str]]] = None,
+        report_type: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         offset: int = 0,
@@ -1523,6 +1637,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         
         Args:
             code: 股票代码筛选
+            report_type: 报告类型筛选
             start_date: 开始日期（含）
             end_date: 结束日期（含）
             offset: 偏移量（跳过前 N 条）
@@ -1543,6 +1658,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         conditions.append(AnalysisHistory.code.in_(codes))
                 else:
                     conditions.append(AnalysisHistory.code == code)
+            if report_type:
+                conditions.append(AnalysisHistory.report_type == report_type)
             if start_date:
                 # created_at >= start_date 00:00:00
                 conditions.append(AnalysisHistory.created_at >= datetime.combine(start_date, datetime.min.time()))
@@ -1592,7 +1709,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         """
         删除指定的分析历史记录。
 
-        同时清理依赖这些历史记录的回测结果，避免外键约束失败。
+        同时清理依赖这些历史记录的回测结果和分析来源决策信号，避免
+        依赖历史记录的派生数据残留。DecisionSignal 的 source_report_id
+        允许弱引用，因此这里只清理 source_type=analysis 的真实历史绑定信号。
 
         Args:
             record_ids: 要删除的历史记录主键 ID 列表
@@ -1605,11 +1724,27 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             return 0
 
         with self.session_scope() as session:
+            existing_ids = sorted(
+                session.execute(
+                    select(AnalysisHistory.id).where(AnalysisHistory.id.in_(ids))
+                ).scalars().all()
+            )
+            if not existing_ids:
+                return 0
+
             session.execute(
-                delete(BacktestResult).where(BacktestResult.analysis_history_id.in_(ids))
+                delete(DecisionSignalRecord).where(
+                    and_(
+                        DecisionSignalRecord.source_type == "analysis",
+                        DecisionSignalRecord.source_report_id.in_(existing_ids),
+                    )
+                )
+            )
+            session.execute(
+                delete(BacktestResult).where(BacktestResult.analysis_history_id.in_(existing_ids))
             )
             result = session.execute(
-                delete(AnalysisHistory).where(AnalysisHistory.id.in_(ids))
+                delete(AnalysisHistory).where(AnalysisHistory.id.in_(existing_ids))
             )
             return result.rowcount or 0
 
@@ -1618,17 +1753,19 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         limit: int = 200,
+        include_market_review: bool = False,
     ) -> List[AnalysisHistory]:
         """
         获取历史记录中的不重复股票列表，每只股票取最新一条记录。
 
         使用子查询按 code 分组取 MAX(id)，再 JOIN 回查完整记录。
-        大盘复盘（code="MARKET"）始终排在最前。
+        默认排除大盘复盘，避免混入普通个股栏。
 
         Args:
             start_date: 开始日期
             end_date: 结束日期
             limit: 最大返回数量
+            include_market_review: 是否包含大盘复盘记录
 
         Returns:
             每条股票最新一条 AnalysisHistory 记录列表
@@ -1648,6 +1785,16 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 subq = subq.where(
                     AnalysisHistory.created_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time())
                 )
+            if not include_market_review:
+                subq = subq.where(
+                    and_(
+                        AnalysisHistory.code != "MARKET",
+                        or_(
+                            AnalysisHistory.report_type.is_(None),
+                            AnalysisHistory.report_type != "market_review",
+                        ),
+                    )
+                )
             subq = subq.group_by(AnalysisHistory.code).subquery()
 
             results = (
@@ -1655,10 +1802,6 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                     select(AnalysisHistory)
                     .join(subq, AnalysisHistory.id == subq.c.max_id)
                     .order_by(
-                        case(
-                            (AnalysisHistory.code == "MARKET", 0),
-                            else_=1,
-                        ),
                         desc(AnalysisHistory.created_at),
                     )
                     .limit(limit)

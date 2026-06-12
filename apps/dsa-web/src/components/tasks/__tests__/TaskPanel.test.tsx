@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { TaskPanel } from '../TaskPanel';
 import type { TaskInfo } from '../../../types/analysis';
 
@@ -70,6 +70,20 @@ describe('TaskPanel', () => {
     expect(screen.queryByText(/请求阶段:/)).not.toBeInTheDocument();
     expect(container.querySelector('.home-panel-card')).toBeTruthy();
     expect(container.querySelector('.home-subpanel')).toBeTruthy();
+  });
+
+  it('opens the run-flow view from an active task icon button', () => {
+    const onOpenRunFlow = vi.fn();
+    render(
+      <TaskPanel
+        tasks={[baseTask]}
+        onOpenRunFlow={onOpenRunFlow}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '查看 贵州茅台 运行流' }));
+
+    expect(onOpenRunFlow).toHaveBeenCalledWith(baseTask);
   });
 
   it('does not render when there are no active tasks', () => {

@@ -16,6 +16,35 @@ GET /api/v1/history/{record_id}/diagnostics
 - 诊断面板支持复制后端生成的脱敏 `copy_text`，用于 issue 或部署排障。
 - 分析链路在保存历史后会补齐任务/Provider/LLM/通知诊断到 `context_snapshot.diagnostics`，历史诊断接口统一聚合为用户可读摘要。
 
+## 运行流视图
+
+运行流视图是在运行诊断摘要之上的可视化排障入口，用于串联一次分析从触发、数据获取、ContextPack 组装、LLM 生成到保存/通知的大致链路。它不替代诊断摘要的 `copy_text`，而是把同一批脱敏诊断证据组织为节点、连线、事件和摘要指标，方便从 Web 首页快速定位异常或降级环节。
+
+后端提供两个只读快照接口：
+
+```http
+GET /api/v1/analysis/tasks/{task_id}/flow
+GET /api/v1/history/{record_id}/flow
+```
+
+- `tasks/{task_id}/flow` 面向活跃任务。任务仍在内存队列中时优先返回当前任务快照；任务已完成时可按同一 `task_id/query_id` 尝试读取历史诊断。缺少诊断时返回 skeleton flow，不伪造 provider、LLM 或通知事件。
+- `history/{record_id}/flow` 面向历史报告，支持历史记录主键 ID 或可解析的 `query_id`。普通个股分析与 `MARKET/market_review` 大盘复盘复用同一 `RunFlowSnapshot` 契约。
+- 快照顶层包含 `summary`、`lanes`、`nodes`、`edges`、`events` 和 `generated_at`。节点状态使用 `pending/running/success/failed/degraded/fallback/timeout/cancel_requested/cancelled/skipped/unknown`，其中用户取消类状态不会被映射成 `failed`。
+- 旧历史、缺失 `context_snapshot.diagnostics` 或证据不足时，后端返回 `unknown` 或 skeleton 节点；Web 端按空/未知状态展示，不影响报告详情读取。
+
+Web 入口：
+
+- 首页活跃任务卡片提供运行流入口，打开抽屉后按 `task_id` 拉取任务快照。
+- 历史报告摘要和运行诊断区域提供运行流入口，打开抽屉后按历史记录 ID 拉取历史快照。
+- 面板展示摘要、基础拓扑、事件流和节点详情；复杂拓扑聚合、实时增量事件和布局 polish 会在后续阶段继续收敛。
+
+脱敏与兼容边界：
+
+- 运行流只读取既有任务信息、历史结果和 `context_snapshot.diagnostics` 中的低敏诊断字段，不新增配置项、不改数据库结构、不迁移旧历史。
+- `model`、`provider`、`fallback_model` 仅用于展示实际诊断到的调用信息；不参与模型选择、请求路由、Base URL 解析或配置保存。
+- `metadata`、错误信息和本地路径会经过后端裁剪与脱敏，避免暴露 API key、token、cookie、webhook、prompt/raw response、代理头和本地绝对路径。
+- 回滚时可移除 Web 入口和查询路径；后端新增只读快照接口不改变原有分析、历史、通知或诊断摘要接口的成功/失败语义。
+
 ## 状态文案
 
 总体状态：

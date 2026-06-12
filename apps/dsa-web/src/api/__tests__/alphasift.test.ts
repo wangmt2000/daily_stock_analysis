@@ -72,46 +72,7 @@ describe('alphasiftApi', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  it('installs AlphaSift when the adapter is unavailable after enabling', async () => {
-    getConfig.mockResolvedValueOnce({ configVersion: 'v1', maskToken: '******' });
-    updateConfig.mockResolvedValueOnce({ success: true });
-    get
-      .mockResolvedValueOnce({
-        data: {
-          enabled: true,
-          available: false,
-          install_spec_is_default: true,
-        },
-      })
-      .mockResolvedValueOnce({
-        data: {
-          enabled: true,
-          available: true,
-          install_spec_is_default: true,
-        },
-      });
-    post.mockResolvedValueOnce({
-      data: {
-        installed: true,
-        already_installed: false,
-        install_spec_is_default: true,
-      },
-    });
-
-    await alphasiftApi.enable();
-
-    expect(updateConfig).toHaveBeenCalledWith({
-      configVersion: 'v1',
-      maskToken: '******',
-      reloadNow: true,
-      items: [{ key: 'ALPHASIFT_ENABLED', value: 'true' }],
-    });
-    expect(post).toHaveBeenCalledWith('/api/v1/alphasift/install', {}, { timeout: 300000 });
-    expect(get).toHaveBeenCalledTimes(2);
-    expect(updateConfig).toHaveBeenCalledTimes(1);
-  });
-
-  it('rolls back ALPHASIFT_ENABLED when AlphaSift auto-install fails', async () => {
+  it('rolls back ALPHASIFT_ENABLED when bundled AlphaSift is unavailable', async () => {
     getConfig
       .mockResolvedValueOnce({ configVersion: 'v1', maskToken: '******' })
       .mockResolvedValueOnce({ configVersion: 'v2', maskToken: '******' });
@@ -121,11 +82,11 @@ describe('alphasiftApi', () => {
         enabled: true,
         available: false,
         install_spec_is_default: true,
+        diagnostics: { reason: 'missing_module' },
       },
     });
-    post.mockRejectedValueOnce(new Error('pip install failed'));
 
-    await expect(alphasiftApi.enable()).rejects.toThrow('pip install failed');
+    await expect(alphasiftApi.enable()).rejects.toThrow('pip install -r requirements.txt');
 
     expect(updateConfig).toHaveBeenNthCalledWith(1, {
       configVersion: 'v1',
@@ -139,46 +100,7 @@ describe('alphasiftApi', () => {
       reloadNow: true,
       items: [{ key: 'ALPHASIFT_ENABLED', value: 'false' }],
     });
-    expect(post).toHaveBeenCalledWith('/api/v1/alphasift/install', {}, { timeout: 300000 });
-  });
-
-  it('rolls back ALPHASIFT_ENABLED when the adapter is still unavailable after auto-install', async () => {
-    getConfig
-      .mockResolvedValueOnce({ configVersion: 'v1', maskToken: '******' })
-      .mockResolvedValueOnce({ configVersion: 'v2', maskToken: '******' });
-    updateConfig.mockResolvedValue({ success: true });
-    get
-      .mockResolvedValueOnce({
-        data: {
-          enabled: true,
-          available: false,
-          install_spec_is_default: true,
-        },
-      })
-      .mockResolvedValueOnce({
-        data: {
-          enabled: true,
-          available: false,
-          install_spec_is_default: true,
-        },
-      });
-    post.mockResolvedValueOnce({
-      data: {
-        installed: true,
-        already_installed: false,
-        install_spec_is_default: true,
-      },
-    });
-
-    await expect(alphasiftApi.enable()).rejects.toThrow('自动安装完成');
-
-    expect(post).toHaveBeenCalledWith('/api/v1/alphasift/install', {}, { timeout: 300000 });
-    expect(updateConfig).toHaveBeenNthCalledWith(2, {
-      configVersion: 'v2',
-      maskToken: '******',
-      reloadNow: true,
-      items: [{ key: 'ALPHASIFT_ENABLED', value: 'false' }],
-    });
+    expect(post).not.toHaveBeenCalled();
   });
 
   it('loads strategies from the AlphaSift API', async () => {
@@ -224,5 +146,51 @@ describe('alphasiftApi', () => {
       { market: 'cn', strategy: 'dual_low', max_results: 3 },
       { timeout: 180000 }
     );
+  });
+
+  it('starts an async screening task', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        task_id: 'screen-task-1',
+        trace_id: 'screen-task-1',
+        status: 'pending',
+        message: 'AlphaSift 选股任务已提交',
+        strategy: 'dual_low',
+        market: 'cn',
+        max_results: 3,
+      },
+    });
+
+    const result = await alphasiftApi.startScreen({ market: 'cn', strategy: 'dual_low', maxResults: 3 });
+
+    expect(post).toHaveBeenCalledWith(
+      '/api/v1/alphasift/screen/tasks',
+      { market: 'cn', strategy: 'dual_low', max_results: 3 }
+    );
+    expect(result.taskId).toBe('screen-task-1');
+    expect(result.maxResults).toBe(3);
+  });
+
+  it('loads async screening task status', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        task_id: 'screen-task-1',
+        trace_id: 'screen-task-1',
+        status: 'completed',
+        progress: 100,
+        message: '任务执行完成',
+        result: {
+          enabled: true,
+          candidates: [],
+          candidate_count: 0,
+        },
+      },
+    });
+
+    const result = await alphasiftApi.getScreenTask('screen-task-1');
+
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/screen/tasks/screen-task-1');
+    expect(result.taskId).toBe('screen-task-1');
+    expect(result.result?.candidateCount).toBe(0);
   });
 });

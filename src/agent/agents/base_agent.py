@@ -119,6 +119,7 @@ class BaseAgent(ABC):
                 max_steps=self.max_steps,
                 progress_callback=progress_callback,
                 max_wall_clock_seconds=timeout_seconds,
+                stock_scope=ctx.meta.get("stock_scope"),
             )
 
             result.tokens_used = loop_result.total_tokens

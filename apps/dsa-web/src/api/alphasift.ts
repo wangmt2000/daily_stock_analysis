@@ -14,6 +14,7 @@ export type AlphaSiftStatus = {
   contractVersion?: string | null;
   version?: string | null;
   strategyCount?: number | null;
+  diagnostics?: Record<string, string>;
 };
 
 export type AlphaSiftInstallResponse = {
@@ -49,6 +50,27 @@ export type AlphaSiftCandidate = {
   factorScores?: Record<string, number>;
   postAnalysisSummaries?: Record<string, string>;
   postAnalysisTags?: string[];
+  dsaContext?: {
+    enriched?: boolean;
+    quote?: Record<string, unknown>;
+    fundamentals?: Record<string, unknown>;
+    news?: {
+      success?: boolean;
+      query?: string;
+      provider?: string;
+      results?: Array<Record<string, unknown>>;
+      error?: string | null;
+    };
+    warnings?: string[];
+  };
+  dsaNews?: Array<{
+    title?: string;
+    snippet?: string;
+    url?: string;
+    source?: string;
+    publishedDate?: string | null;
+  }>;
+  dsaAnalysisSummary?: string;
   raw: Record<string, unknown>;
 };
 
@@ -88,6 +110,33 @@ export type AlphaSiftScreenResponse = {
   llmParseErrors?: string[];
   warnings?: string[];
   sourceErrors?: string[];
+  dsaEnrichment?: {
+    enabled?: boolean;
+    maxCandidates?: number;
+    requestedCount?: number;
+    enrichedCount?: number;
+    warnings?: string[];
+  };
+};
+
+export type AlphaSiftScreenAccepted = {
+  taskId: string;
+  traceId?: string | null;
+  status: 'pending' | 'processing' | 'completed' | 'failed' | string;
+  message: string;
+  strategy: string;
+  market: string;
+  maxResults: number;
+};
+
+export type AlphaSiftScreenTaskStatus = {
+  taskId: string;
+  traceId?: string | null;
+  status: 'pending' | 'processing' | 'completed' | 'failed' | string;
+  progress?: number | null;
+  message?: string | null;
+  error?: string | null;
+  result?: AlphaSiftScreenResponse | null;
 };
 
 export function notifyAlphaSiftConfigChanged(): void {
@@ -125,6 +174,20 @@ export const alphasiftApi = {
     return toCamelCase<AlphaSiftScreenResponse>(response.data);
   },
 
+  async startScreen(payload: { market: string; strategy: string; maxResults: number }): Promise<AlphaSiftScreenAccepted> {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/alphasift/screen/tasks', {
+      market: payload.market,
+      strategy: payload.strategy,
+      max_results: payload.maxResults,
+    });
+    return toCamelCase<AlphaSiftScreenAccepted>(response.data);
+  },
+
+  async getScreenTask(taskId: string): Promise<AlphaSiftScreenTaskStatus> {
+    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/alphasift/screen/tasks/${encodeURIComponent(taskId)}`);
+    return toCamelCase<AlphaSiftScreenTaskStatus>(response.data);
+  },
+
   async getStrategies(): Promise<AlphaSiftStrategiesResponse> {
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/strategies', { timeout: ALPHASIFT_INSTALL_TIMEOUT_MS });
     return toCamelCase<AlphaSiftStrategiesResponse>(response.data);
@@ -140,11 +203,8 @@ export const alphasiftApi = {
     try {
       const status = await alphasiftApi.getStatus();
       if (!status.available) {
-        await alphasiftApi.install();
-        const installedStatus = await alphasiftApi.getStatus();
-        if (!installedStatus.available) {
-          throw new Error('AlphaSift 自动安装完成，但适配层仍不可用。请检查后端 Python 环境和 AlphaSift 安装状态后重试。');
-        }
+        const reason = status.diagnostics?.reason ? `（${status.diagnostics.reason}）` : '';
+        throw new Error(`AlphaSift 适配层不可用${reason}。请确认后端已安装项目依赖，必要时执行 pip install -r requirements.txt 或重建 Docker/桌面后端。`);
       }
     } catch (error) {
       try {

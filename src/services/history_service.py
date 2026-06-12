@@ -32,6 +32,7 @@ from src.report_language import (
 from src.storage import DatabaseManager
 from src.services.run_diagnostics import build_run_diagnostic_summary
 from src.market_phase_summary import extract_market_phase_summary
+from src.schemas.decision_action import build_action_fields
 from src.utils.data_processing import (
     extract_realtime_detail_fields,
     normalize_model_used,
@@ -135,6 +136,7 @@ class HistoryService:
     def get_history_list(
         self,
         stock_code: Optional[str] = None,
+        report_type: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         page: int = 1,
@@ -145,6 +147,7 @@ class HistoryService:
         
         Args:
             stock_code: Stock code filter
+            report_type: Report type filter
             start_date: Start date (YYYY-MM-DD)
             end_date: End date (YYYY-MM-DD)
             page: Page number
@@ -179,6 +182,7 @@ class HistoryService:
             # Use new paginated query method
             records, total = self.db.get_analysis_history_paginated(
                 code=stock_code,
+                report_type=report_type,
                 start_date=start_dt,
                 end_date=end_dt,
                 offset=offset,
@@ -260,6 +264,7 @@ class HistoryService:
             getattr(record, "context_snapshot", None)
         )
         market_phase_summary = extract_market_phase_summary(getattr(record, "context_snapshot", None))
+        action_fields = self._decision_action_fields_for_record(record, raw_result)
 
         return {
             "id": record.id,
@@ -271,6 +276,8 @@ class HistoryService:
             "analysis_summary": record.analysis_summary,
             "sentiment_score": record.sentiment_score,
             "operation_advice": record.operation_advice,
+            "action": action_fields["action"],
+            "action_label": action_fields["action_label"],
             "model_used": normalize_model_used(model_used),
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "market_phase_summary": market_phase_summary,
@@ -364,6 +371,31 @@ class HistoryService:
             report_saved=True,
             query_id=getattr(record, "query_id", None),
             stock_code=getattr(record, "code", None),
+        )
+
+    def resolve_and_get_run_flow(self, record_id: str):
+        """
+        Resolve record_id and return a sanitized run-flow snapshot.
+
+        Uses the same strict JSON parsing behavior as diagnostics so malformed
+        persisted payloads surface as backend errors instead of partial graphs.
+        """
+        record = self._resolve_record(record_id)
+        if not record:
+            return None
+
+        from src.services.run_flow import build_history_run_flow_snapshot
+
+        return build_history_run_flow_snapshot(
+            record,
+            context_snapshot=self._parse_diagnostic_json_field(
+                getattr(record, "context_snapshot", None),
+                "context_snapshot",
+            ),
+            raw_result=self._parse_diagnostic_json_field(
+                getattr(record, "raw_result", None),
+                "raw_result",
+            ),
         )
 
     @staticmethod
@@ -468,6 +500,7 @@ class HistoryService:
         if getattr(record, "report_type", None) == "market_review":
             market_review_content = self._extract_market_review_content(record, raw_result)
 
+        action_fields = self._decision_action_fields_for_record(record, raw_result)
         return {
             "id": record.id,
             "query_id": record.query_id,
@@ -478,6 +511,8 @@ class HistoryService:
             "model_used": model_used,
             "analysis_summary": market_review_content or record.analysis_summary,
             "operation_advice": record.operation_advice,
+            "action": action_fields["action"],
+            "action_label": action_fields["action_label"],
             "trend_prediction": record.trend_prediction,
             "sentiment_score": record.sentiment_score,
             "sentiment_label": self._get_sentiment_label(record.sentiment_score or 50),
@@ -489,6 +524,15 @@ class HistoryService:
             "raw_result": raw_result,
             "context_snapshot": context_snapshot,
         }
+
+    def _decision_action_fields_for_record(self, record, raw_result: Any) -> Dict[str, Any]:
+        raw = raw_result if isinstance(raw_result, dict) else {}
+        return build_action_fields(
+            operation_advice=raw.get("operation_advice") or getattr(record, "operation_advice", None),
+            explicit_action=raw.get("action"),
+            report_type=getattr(record, "report_type", None),
+            report_language=normalize_report_language(raw.get("report_language")),
+        )
 
     def delete_history_records(self, record_ids: List[int]) -> int:
         """
@@ -737,6 +781,8 @@ class HistoryService:
                 decision_type=raw_result.get("decision_type", "hold"),
                 confidence_level=raw_result.get("confidence_level", "中"),
                 report_language=normalize_report_language(raw_result.get("report_language")),
+                action=raw_result.get("action"),
+                action_label=raw_result.get("action_label"),
                 dashboard=dashboard,
                 trend_analysis=raw_result.get("trend_analysis", ""),
                 short_term_outlook=raw_result.get("short_term_outlook", ""),

@@ -44,6 +44,19 @@ if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").low
     os.environ["http_proxy"] = proxy_url
     os.environ["https_proxy"] = proxy_url
 
+if os.getenv("DSA_PACKAGED_ALPHASIFT_IMPORT_PROBE") == "1":
+    import importlib
+    import sys
+
+    try:
+        importlib.import_module("alphasift.dsa_adapter")
+    except Exception as exc:
+        print(f"ERROR: packaged AlphaSift adapter import failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print("OK: packaged AlphaSift adapter import succeeded")
+    sys.exit(0)
+
 import argparse
 import logging
 import sys
@@ -59,6 +72,7 @@ from src.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 _RUNTIME_ENV_FILE_KEYS = set()
+_PUBLIC_BIND_HOSTS = frozenset({"0.0.0.0", "::", "[::]", "*"})
 
 
 def _get_active_env_path() -> Path:
@@ -66,6 +80,26 @@ def _get_active_env_path() -> Path:
     if env_file:
         return Path(env_file)
     return Path(__file__).resolve().parent / ".env"
+
+
+def _is_public_bind_host(host: str) -> bool:
+    return (host or "").strip().lower() in _PUBLIC_BIND_HOSTS
+
+
+def _warn_if_public_webui_without_auth(host: str) -> None:
+    if not _is_public_bind_host(host):
+        return
+
+    from src.auth import is_auth_enabled
+
+    if is_auth_enabled():
+        return
+    logger.warning(
+        "WEBUI_HOST=%s binds the Web UI to a public interface while "
+        "ADMIN_AUTH_ENABLED=false. Keep this service behind a trusted network "
+        "boundary or enable admin authentication before exposing it.",
+        host,
+    )
 
 
 def _read_active_env_values() -> Optional[Dict[str, str]]:
@@ -553,6 +587,11 @@ def run_full_analysis(
             and not args.no_market_review
             and effective_region != ''
         ):
+            schedule_mode = bool(
+                getattr(args, 'schedule', False)
+                or getattr(config, 'schedule_enabled', False)
+            )
+            review_trigger_source = "schedule" if schedule_mode else "cli"
             review_result = _run_market_review_with_shared_lock(
                 config,
                 run_market_review,
@@ -562,6 +601,7 @@ def run_full_analysis(
                 send_notification=not args.no_notify,
                 merge_notification=merge_notification,
                 override_region=effective_region,
+                trigger_source=review_trigger_source,
             )
             # 如果有结果，赋值给 market_report 用于后续飞书文档生成
             if review_result:
@@ -853,6 +893,7 @@ def main() -> int:
             args.host = os.getenv('WEBUI_HOST')
         if args.port == 8000 and os.getenv('WEBUI_PORT'):
             args.port = int(os.getenv('WEBUI_PORT'))
+        _warn_if_public_webui_without_auth(args.host)
 
     bot_clients_started = False
     if start_serve:
@@ -930,6 +971,7 @@ def main() -> int:
                 search_service=search_service,
                 send_notification=not args.no_notify,
                 override_region=effective_region,
+                trigger_source="cli",
             )
             return 0
 

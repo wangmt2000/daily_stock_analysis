@@ -2125,6 +2125,8 @@ class SearchService:
     NEWS_OVERSAMPLE_FACTOR = 2
     NEWS_OVERSAMPLE_MAX = 10
     FUTURE_TOLERANCE_DAYS = 1
+    ANALYTICAL_INTEL_LOOKBACK_DAYS = 180
+    ANALYTICAL_INTEL_DIMENSIONS = {"market_analysis", "earnings"}
     _CHINESE_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
     _US_STOCK_RE = re.compile(r"^[A-Za-z]{1,5}(\.[A-Za-z])?$")
     _DIRECT_NEWS_CATEGORY = "direct_company_news"
@@ -3022,6 +3024,7 @@ class SearchService:
         search_days: int,
         max_results: int,
         log_scope: str,
+        keep_unknown: bool = False,
     ) -> SearchResponse:
         """Hard-filter results by published_date recency and normalize date strings."""
         if not response.success or not response.results:
@@ -3039,6 +3042,22 @@ class SearchService:
         for item in response.results:
             published = self._normalize_news_publish_date(item.published_date)
             if published is None:
+                if keep_unknown:
+                    filtered.append(
+                        SearchResult(
+                            title=item.title,
+                            snippet=item.snippet,
+                            url=item.url,
+                            source=item.source,
+                            published_date=item.published_date,
+                            relevance_score=item.relevance_score,
+                            relevance_category=item.relevance_category,
+                            relevance_reasons=item.relevance_reasons,
+                        )
+                    )
+                    if len(filtered) >= max_results:
+                        break
+                    continue
                 dropped_unknown += 1
                 continue
             if published < earliest:
@@ -3579,26 +3598,45 @@ class SearchService:
             provider = available_providers[provider_index % len(available_providers)]
             provider_index += 1
             
-            logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
+            request_days = (
+                self.ANALYTICAL_INTEL_LOOKBACK_DAYS
+                if dim['name'] in self.ANALYTICAL_INTEL_DIMENSIONS
+                else search_days
+            )
+
+            logger.info(
+                "[情报搜索] %s: 使用 %s，请求窗口: 近%s天",
+                dim['desc'],
+                provider.name,
+                request_days,
+            )
 
             if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
                 response = provider.search(
                     dim['query'],
                     max_results=provider_max_results,
-                    days=search_days,
+                    days=request_days,
                     topic=dim['tavily_topic'],
                 )
             else:
                 response = provider.search(
                     dim['query'],
                     max_results=provider_max_results,
-                    days=search_days,
+                    days=request_days,
                 )
             if dim['strict_freshness']:
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
                     max_results=provider_max_results,
+                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                )
+            elif dim['name'] in self.ANALYTICAL_INTEL_DIMENSIONS:
+                filtered_response = self._filter_news_response(
+                    response,
+                    search_days=self.ANALYTICAL_INTEL_LOOKBACK_DAYS,
+                    max_results=provider_max_results,
+                    keep_unknown=True,
                     log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
                 )
             else:
