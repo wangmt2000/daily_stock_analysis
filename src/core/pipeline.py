@@ -18,6 +18,7 @@ import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional, Tuple, Callable
 
 import pandas as pd
@@ -25,7 +26,7 @@ import pandas as pd
 from src.config import FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT, get_config, Config
 from src.storage import get_db
 from data_provider import DataFetcherManager
-from data_provider.base import normalize_stock_code
+from data_provider.base import is_bse_code, normalize_stock_code
 from data_provider.realtime_types import ChipDistribution
 from src.analyzer import (
     GeminiAnalyzer,
@@ -37,6 +38,8 @@ from src.analyzer import (
 )
 from src.notification import NotificationService, NotificationChannel
 from src.report_language import (
+    get_placeholder_text,
+    get_unknown_text,
     infer_decision_type_from_advice,
     localize_confidence_level,
     localize_operation_advice,
@@ -47,8 +50,15 @@ from src.search_service import SearchService
 from src.analysis_context_pack_prompt import format_analysis_context_pack_prompt_section
 from src.analysis_context_pack_overview import render_analysis_context_pack_overview
 from src.market_phase_summary import MARKET_PHASE_SUMMARY_KEY, render_market_phase_summary
+from src.daily_market_context_guardrail import apply_daily_market_context_guardrail
 from src.phase_decision_guardrail import apply_phase_decision_guardrails
+from src.services.daily_market_context import (
+    DailyMarketContext,
+    DailyMarketContextService,
+    format_daily_market_context_prompt_section,
+)
 from src.services.social_sentiment_service import SocialSentimentService
+from src.services.intelligence_service import IntelligenceService
 from src.services.analysis_context_builder import (
     AnalysisContextBuilder,
     PipelineAnalysisArtifacts,
@@ -59,10 +69,13 @@ from src.services.run_diagnostics import (
     get_current_diagnostic_context,
     record_history_run,
     record_llm_run,
+    record_llm_run_started,
     record_notification_run,
     reset_run_diagnostic_context,
     sanitize_diagnostic_text,
 )
+from src.services.decision_signal_extractor import extract_and_persist_from_analysis_result
+from src.services.decision_signal_summary import summarize_decision_signal
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.core.trading_calendar import (
@@ -81,6 +94,72 @@ logger = logging.getLogger(__name__)
 # 防御性 guard：当实例绕过 __init__（如测试中 __new__）构造时，
 # double-check 初始化 _single_stock_notify_lock 仍然线程安全。
 _SINGLE_STOCK_NOTIFY_LOCK_INIT_GUARD = threading.Lock()
+_DAILY_MARKET_CONTEXT_SERVICE_LOCK_INIT_GUARD = threading.Lock()
+
+
+def _symbol_scope_lookup_values(code: str, market: str) -> List[str]:
+    """Return accepted persisted-intelligence symbol spellings for lookup."""
+    raw = str(code or "").strip()
+    normalized = normalize_stock_code(raw) if raw else ""
+    values: List[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            values.append(text)
+
+    def add_case_variants(value: str) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        add(text)
+        add(text.upper())
+        add(text.lower())
+
+    add_case_variants(normalized)
+    add_case_variants(raw)
+
+    normalized_upper = normalized.upper()
+    if normalized_upper.startswith("HK") and normalized_upper[2:].isdigit():
+        digits = normalized_upper[2:]
+        trimmed_digits = digits.lstrip("0") or digits
+        add_case_variants(normalized_upper)
+        add_case_variants(digits)
+        add_case_variants(trimmed_digits)
+        add_case_variants(f"HK{trimmed_digits}")
+        add_case_variants(f"{trimmed_digits}.HK")
+        add_case_variants(f"{digits}.HK")
+        return values
+
+    if (market or "").strip().lower() != "cn":
+        return values
+    if not (normalized.isdigit() and len(normalized) == 6):
+        return values
+
+    raw_upper = raw.upper()
+    exchange = ""
+    if raw_upper.startswith(("SH", "SS")) or raw_upper.endswith((".SH", ".SS")):
+        exchange = "SH"
+    elif raw_upper.startswith("SZ") or raw_upper.endswith(".SZ"):
+        exchange = "SZ"
+    elif raw_upper.startswith("BJ") or raw_upper.endswith(".BJ"):
+        exchange = "BJ"
+    elif is_bse_code(normalized):
+        exchange = "BJ"
+    elif normalized.startswith(("5", "6", "9")):
+        exchange = "SH"
+    else:
+        exchange = "SZ"
+
+    add_case_variants(f"{exchange}{normalized}")
+    add_case_variants(f"{exchange}.{normalized}")
+    add_case_variants(f"{normalized}.{exchange}")
+    if exchange == "SH":
+        add_case_variants(f"SS.{normalized}")
+        add_case_variants(f"{normalized}.SS")
+    return values
 
 
 class StockAnalysisPipeline:
@@ -106,6 +185,8 @@ class StockAnalysisPipeline:
         analysis_skills: Optional[List[str]] = None,
         analysis_phase: str = "auto",
         portfolio_context: Optional[Dict[str, Any]] = None,
+        daily_market_context_enabled: Optional[bool] = None,
+        daily_market_context_allow_generate: bool = True,
     ):
         """
         初始化调度器
@@ -127,6 +208,12 @@ class StockAnalysisPipeline:
         self.analysis_skills = list(analysis_skills) if analysis_skills is not None else None
         self.analysis_phase = analysis_phase or "auto"
         self.portfolio_context = dict(portfolio_context) if isinstance(portfolio_context, dict) else None
+        self.daily_market_context_enabled = (
+            bool(getattr(self.config, "daily_market_context_enabled", True))
+            if daily_market_context_enabled is None
+            else bool(daily_market_context_enabled)
+        )
+        self.daily_market_context_allow_generate = daily_market_context_allow_generate
         
         # 初始化各模块
         self.db = get_db()
@@ -136,6 +223,9 @@ class StockAnalysisPipeline:
         self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
         self.notifier = NotificationService(source_message=source_message)
         self._single_stock_notify_lock = threading.Lock()
+        self._daily_market_context_service_lock = threading.Lock()
+        self._concept_rankings_cache_lock = threading.Lock()
+        self._concept_rankings_cache: Dict[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
         
         # 初始化搜索服务（可选，初始化失败不应阻断主分析流程）
         try:
@@ -308,6 +398,20 @@ class StockAnalysisPipeline:
             )
             market_phase_context_dict = market_phase_context.to_dict()
             market_phase_summary = render_market_phase_summary(market_phase_context_dict)
+            report_language = normalize_report_language(getattr(self.config, "report_language", "zh"))
+            daily_market_target_date = self._coerce_daily_market_context_date(
+                getattr(market_phase_context, "effective_daily_bar_date", None)
+                or market_phase_context_dict.get("effective_daily_bar_date")
+            )
+            if daily_market_target_date is None:
+                daily_market_target_date = get_effective_trading_date(
+                    market,
+                    current_time=current_time,
+                )
+            daily_market_context = self._load_daily_market_context(
+                market,
+                target_date=daily_market_target_date,
+            )
 
             self._emit_progress(18, f"{code}：正在获取行情与筹码数据")
             # 获取股票名称（先走轻量名称路径，后续若 realtime_quote 有 name 再覆盖）
@@ -438,11 +542,17 @@ class StockAnalysisPipeline:
                     trend_result,
                     market_phase_context=market_phase_context_dict,
                     market_phase_summary=market_phase_summary,
+                    daily_market_context=daily_market_context,
                     portfolio_context=portfolio_context,
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
             news_context = None
+            persisted_intelligence_context = self._load_persisted_intelligence_context(
+                code=code,
+                stock_name=stock_name,
+                market=market or "cn",
+            )
             news_result_count: Optional[int] = None
             self._emit_progress(46, f"{stock_name}：正在检索新闻与舆情")
             if self.search_service is not None and self.search_service.is_available:
@@ -496,9 +606,16 @@ class StockAnalysisPipeline:
                 except Exception as e:
                     logger.warning(f"{stock_name}({code}) Social sentiment fetch failed: {e}")
 
+            if persisted_intelligence_context:
+                news_context = (
+                    f"{news_context}\n\n{persisted_intelligence_context}"
+                    if news_context
+                    else persisted_intelligence_context
+                )
+
             # Step 5: 获取分析上下文（技术面数据）
             self._emit_progress(58, f"{stock_name}：正在整理分析上下文")
-            context = self.db.get_analysis_context(code)
+            context = self._get_analysis_context_with_market_fallback(code)
 
             if context is None:
                 logger.warning(f"{stock_name}({code}) 无法获取历史行情数据，将仅基于新闻和实时行情分析")
@@ -526,11 +643,15 @@ class StockAnalysisPipeline:
                 portfolio_context=portfolio_context,
             )
             enhanced_context["market_phase_context"] = market_phase_context_dict
+            self._attach_daily_market_context(
+                enhanced_context,
+                daily_market_context,
+                report_language=report_language,
+            )
             if portfolio_context is not None:
                 enhanced_context["portfolio_context"] = dict(portfolio_context)
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
-            report_language = normalize_report_language(getattr(self.config, "report_language", "zh"))
             (
                 analysis_context_pack_summary,
                 analysis_context_pack_overview,
@@ -570,6 +691,10 @@ class StockAnalysisPipeline:
             self._emit_progress(64, f"{stock_name}：正在请求 LLM 生成报告")
             llm_started_at = time.monotonic()
             try:
+                record_llm_run_started(
+                    model=getattr(self.config, "litellm_model", None),
+                    call_type="analysis",
+                )
                 result = self.analyzer.analyze(
                     enhanced_context,
                     news_context=news_context,
@@ -631,6 +756,18 @@ class StockAnalysisPipeline:
                 )
                 if adjustments:
                     logger.info("[phase_decision_guardrail] Applied adjustments for %s: %s", code, adjustments)
+                market_context_adjustments = apply_daily_market_context_guardrail(
+                    result,
+                    daily_market_context=enhanced_context.get("daily_market_context"),
+                    report_language=getattr(result, "report_language", None)
+                    or getattr(self.config, "report_language", "zh"),
+                )
+                if market_context_adjustments:
+                    logger.info(
+                        "[daily_market_context_guardrail] Applied adjustments for %s: %s",
+                        code,
+                        market_context_adjustments,
+                    )
                 if isinstance(fundamental_context, dict):
                     result.fundamental_context = fundamental_context
                 result.market_phase_summary = market_phase_summary
@@ -655,7 +792,7 @@ class StockAnalysisPipeline:
                         market_phase_summary=market_phase_summary,
                     )
                     result.diagnostic_context_snapshot = context_snapshot
-                    saved_count = self.db.save_analysis_history(
+                    saved_history_id = self.db.save_analysis_history(
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
@@ -663,10 +800,27 @@ class StockAnalysisPipeline:
                         context_snapshot=context_snapshot,
                         save_snapshot=self.save_context_snapshot
                     )
-                    record_history_run(
-                        report_saved=bool(saved_count),
-                        metadata_saved=bool(saved_count),
+                    valid_saved_history_id = (
+                        isinstance(saved_history_id, int)
+                        and not isinstance(saved_history_id, bool)
+                        and saved_history_id > 0
                     )
+                    record_history_run(
+                        report_saved=bool(saved_history_id),
+                        metadata_saved=bool(saved_history_id),
+                        analysis_history_id=(
+                            saved_history_id if valid_saved_history_id else None
+                        ),
+                    )
+                    if valid_saved_history_id:
+                        self._extract_decision_signal_after_history_save(
+                            result=result,
+                            query_id=query_id,
+                            source_report_id=saved_history_id,
+                            report_type=report_type.value,
+                            context_snapshot=context_snapshot,
+                            portfolio_context=portfolio_context,
+                        )
                 except Exception as e:
                     record_history_run(
                         report_saved=False,
@@ -916,29 +1070,32 @@ class StockAnalysisPipeline:
                 "invalid fundamental context",
             )
 
+        market = enriched_context.get("market")
+        if not isinstance(market, str) or not market.strip():
+            market = get_market_for_stock(normalize_stock_code(code))
+
         existing_boards = enriched_context.get("belong_boards")
-        if isinstance(existing_boards, list):
-            enriched_context["belong_boards"] = list(existing_boards)
+        existing_board_list = list(existing_boards) if isinstance(existing_boards, list) else None
+        if existing_board_list:
+            enriched_context["belong_boards"] = existing_board_list
+            self._attach_concept_rankings_to_fundamental_context(code, enriched_context, market)
             return enriched_context
 
         boards_block = enriched_context.get("boards")
         boards_status = boards_block.get("status") if isinstance(boards_block, dict) else None
         coverage = enriched_context.get("coverage")
         boards_coverage = coverage.get("boards") if isinstance(coverage, dict) else None
-        market = enriched_context.get("market")
-        if not isinstance(market, str) or not market.strip():
-            market = get_market_for_stock(normalize_stock_code(code))
 
         # For HK/US: the offshore adapter already populates belong_boards from
         # yfinance sector/industry. Don't overwrite it (and we have no AkShare
         # 板块 endpoint for those markets anyway). Default to [] when callers
         # pass a minimal context without the key.
         if market != "cn":
-            enriched_context.setdefault("belong_boards", [])
+            enriched_context["belong_boards"] = existing_board_list or []
             return enriched_context
 
         if boards_status == "not_supported" or boards_coverage == "not_supported":
-            enriched_context["belong_boards"] = []
+            enriched_context["belong_boards"] = existing_board_list or []
             return enriched_context
 
         boards: List[Dict[str, Any]] = []
@@ -949,8 +1106,71 @@ class StockAnalysisPipeline:
         except Exception as e:
             logger.debug("%s attach belong_boards failed (fail-open): %s", code, e)
 
-        enriched_context["belong_boards"] = boards
+        enriched_context["belong_boards"] = boards or existing_board_list or []
+        self._attach_concept_rankings_to_fundamental_context(code, enriched_context, market)
         return enriched_context
+
+    def _attach_concept_rankings_to_fundamental_context(
+        self,
+        code: str,
+        enriched_context: Dict[str, Any],
+        market: str,
+    ) -> None:
+        """Attach concept/theme rankings for A-share related-board signals."""
+        if market != "cn" or isinstance(enriched_context.get("concept_boards"), dict):
+            return
+
+        top_concepts, bottom_concepts = self._get_concept_rankings_for_market(market)
+
+        if top_concepts or bottom_concepts:
+            enriched_context["concept_boards"] = {
+                "status": "ok" if top_concepts and bottom_concepts else "partial",
+                "data": {
+                    "top": top_concepts,
+                    "bottom": bottom_concepts,
+                },
+            }
+
+    def _get_concept_rankings_for_market(
+        self,
+        market: str,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Fetch market-wide concept rankings once per pipeline run."""
+        if market != "cn":
+            return [], []
+
+        cache = getattr(self, "_concept_rankings_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._concept_rankings_cache = cache
+
+        lock = getattr(self, "_concept_rankings_cache_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._concept_rankings_cache_lock = lock
+
+        with lock:
+            if market in cache:
+                top_concepts, bottom_concepts = cache[market]
+                return list(top_concepts), list(bottom_concepts)
+
+            top_concepts: List[Dict[str, Any]] = []
+            bottom_concepts: List[Dict[str, Any]] = []
+            try:
+                fetch_rankings = getattr(self.fetcher_manager, "get_concept_rankings", None)
+                if callable(fetch_rankings):
+                    rankings = fetch_rankings(5)
+                    if isinstance(rankings, tuple) and len(rankings) == 2:
+                        raw_top, raw_bottom = rankings
+                        if isinstance(raw_top, list):
+                            top_concepts = list(raw_top)
+                        if isinstance(raw_bottom, list):
+                            bottom_concepts = list(raw_bottom)
+            except Exception as e:
+                logger.debug("attach concept_rankings failed (fail-open): %s", e)
+
+            cache[market] = (top_concepts, bottom_concepts)
+            return list(top_concepts), list(bottom_concepts)
 
     def _ensure_agent_history(self, code: str, min_days: int = 240) -> None:
         """Ensure at least *min_days* of K-line history is in DB for agent tools."""
@@ -985,6 +1205,7 @@ class StockAnalysisPipeline:
         *,
         market_phase_context: Optional[Dict[str, Any]] = None,
         market_phase_summary: Optional[Dict[str, Any]] = None,
+        daily_market_context: Optional[DailyMarketContext] = None,
         portfolio_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[AnalysisResult]:
         """
@@ -1016,6 +1237,11 @@ class StockAnalysisPipeline:
                 initial_context["skills"] = self.analysis_skills
             if market_phase_context is not None:
                 initial_context["market_phase_context"] = market_phase_context
+            self._attach_daily_market_context(
+                initial_context,
+                daily_market_context,
+                report_language=report_language,
+            )
             
             if realtime_quote:
                 initial_context["realtime_quote"] = self._safe_to_dict(realtime_quote)
@@ -1039,6 +1265,20 @@ class StockAnalysisPipeline:
                         logger.info(f"[{code}] Agent mode: social sentiment data injected into news_context")
                 except Exception as e:
                     logger.warning(f"[{code}] Agent mode: social sentiment fetch failed: {e}")
+
+            persisted_intelligence_context = self._load_persisted_intelligence_context(
+                code=code,
+                stock_name=stock_name,
+                market=get_market_for_stock(normalize_stock_code(code)) or "cn",
+            )
+            if persisted_intelligence_context:
+                existing = initial_context.get("news_context")
+                initial_context["news_context"] = (
+                    f"{existing}\n\n{persisted_intelligence_context}"
+                    if existing
+                    else persisted_intelligence_context
+                )
+                logger.info(f"[{code}] Agent mode: local intelligence evidence injected into news_context")
 
             # Issue #1066: ensure deep history is in DB before agent tools run
             self._ensure_agent_history(code)
@@ -1068,12 +1308,16 @@ class StockAnalysisPipeline:
                 initial_context["analysis_context_pack_summary"] = analysis_context_pack_summary
 
             # 运行 Agent
-            if report_language == "en":
-                message = f"Analyze stock {code} ({stock_name}) and return the full decision dashboard JSON in English."
+            if report_language in ("en", "ko"):
+                message = f"Analyze stock {code} ({stock_name}) and return the full decision dashboard JSON."
             else:
                 message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
             llm_started_at = time.monotonic()
             try:
+                record_llm_run_started(
+                    model=getattr(self.config, "agent_litellm_model", None),
+                    call_type="agent_analysis",
+                )
                 agent_result = executor.run(message, context=initial_context)
             except Exception as exc:
                 record_llm_run(
@@ -1149,6 +1393,18 @@ class StockAnalysisPipeline:
                 )
                 if adjustments:
                     logger.info("[phase_decision_guardrail] Applied agent adjustments for %s: %s", code, adjustments)
+                market_context_adjustments = apply_daily_market_context_guardrail(
+                    result,
+                    daily_market_context=initial_context.get("daily_market_context"),
+                    report_language=getattr(result, "report_language", None)
+                    or getattr(self.config, "report_language", "zh"),
+                )
+                if market_context_adjustments:
+                    logger.info(
+                        "[daily_market_context_guardrail] Applied agent adjustments for %s: %s",
+                        code,
+                        market_context_adjustments,
+                    )
                 if isinstance(fundamental_context, dict):
                     result.fundamental_context = fundamental_context
                 result.market_phase_summary = market_phase_summary
@@ -1200,7 +1456,7 @@ class StockAnalysisPipeline:
                     )
                     result.diagnostic_context_snapshot = agent_context_snapshot
                     agent_context_snapshot["stock_name"] = resolved_stock_name
-                    saved_count = self.db.save_analysis_history(
+                    saved_history_id = self.db.save_analysis_history(
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
@@ -1208,10 +1464,27 @@ class StockAnalysisPipeline:
                         context_snapshot=agent_context_snapshot,
                         save_snapshot=self.save_context_snapshot,
                     )
-                    record_history_run(
-                        report_saved=bool(saved_count),
-                        metadata_saved=bool(saved_count),
+                    valid_saved_history_id = (
+                        isinstance(saved_history_id, int)
+                        and not isinstance(saved_history_id, bool)
+                        and saved_history_id > 0
                     )
+                    record_history_run(
+                        report_saved=bool(saved_history_id),
+                        metadata_saved=bool(saved_history_id),
+                        analysis_history_id=(
+                            saved_history_id if valid_saved_history_id else None
+                        ),
+                    )
+                    if valid_saved_history_id:
+                        self._extract_decision_signal_after_history_save(
+                            result=result,
+                            query_id=query_id,
+                            source_report_id=saved_history_id,
+                            report_type=report_type.value,
+                            context_snapshot=agent_context_snapshot,
+                            portfolio_context=portfolio_context,
+                        )
                     latest_diagnostic_snapshot = current_diagnostic_snapshot()
                     if latest_diagnostic_snapshot is not None:
                         agent_context_snapshot["diagnostics"] = latest_diagnostic_snapshot
@@ -1234,7 +1507,7 @@ class StockAnalysisPipeline:
     def _load_agent_analysis_context(self, code: str, stock_name: str) -> Dict[str, Any]:
         """Load daily-bar context for Agent pack summaries without blocking analysis."""
         try:
-            context = self.db.get_analysis_context(code)
+            context = self._get_analysis_context_with_market_fallback(code)
         except Exception as exc:
             logger.warning(
                 "[%s] Agent analysis context load failed; daily_bars will be marked missing: %s",
@@ -1258,6 +1531,169 @@ class StockAnalysisPipeline:
             "yesterday": {},
         }
 
+    def _get_analysis_context_with_market_fallback(self, code: str) -> Optional[Dict[str, Any]]:
+        """Load analysis context, fetching JP/KR/TW daily bars when DB has no context."""
+        context = self.db.get_analysis_context(code)
+        if isinstance(context, dict) and context:
+            return context
+
+        market = get_market_for_stock(normalize_stock_code(code))
+        if market not in {"jp", "kr", "tw"}:
+            return context
+
+        try:
+            df, source_name = self.fetcher_manager.get_daily_data(code, days=60)
+        except Exception as exc:
+            logger.warning("[%s] JP/KR daily fallback fetch failed: %s", code, exc)
+            return context
+
+        if df is None or df.empty:
+            logger.warning("[%s] JP/KR daily fallback returned empty data", code)
+            return context
+
+        try:
+            self.db.save_daily_data(df, code, source_name)
+            refreshed = self.db.get_analysis_context(code)
+            if isinstance(refreshed, dict) and refreshed:
+                return refreshed
+        except Exception as exc:
+            logger.warning("[%s] JP/KR daily fallback persistence failed: %s", code, exc)
+
+        return self._build_analysis_context_from_daily_df(code, df)
+
+    def _build_analysis_context_from_daily_df(self, code: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        if df is None or df.empty:
+            return None
+
+        frame = df.copy()
+        frame.columns = [str(column).lower() for column in frame.columns]
+        if "date" in frame.columns:
+            frame = frame.sort_values("date")
+        frame = frame.tail(2)
+        rows = frame.to_dict(orient="records")
+        if not rows:
+            return None
+
+        def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+            normalized: Dict[str, Any] = {"code": row.get("code") or code}
+            for key in ("open", "high", "low", "close", "volume", "amount", "pct_chg", "ma5", "ma10", "ma20", "volume_ratio"):
+                value = row.get(key)
+                if pd.notna(value):
+                    normalized[key] = float(value)
+            row_date = row.get("date")
+            if hasattr(row_date, "date"):
+                row_date = row_date.date()
+            normalized["date"] = row_date.isoformat() if hasattr(row_date, "isoformat") else str(row_date)
+            return normalized
+
+        today = normalize_row(rows[-1])
+        context: Dict[str, Any] = {
+            "code": code,
+            "date": today.get("date"),
+            "today": today,
+        }
+        if len(rows) > 1:
+            yesterday = normalize_row(rows[-2])
+            context["yesterday"] = yesterday
+            yesterday_volume = yesterday.get("volume")
+            if yesterday_volume:
+                context["volume_change_ratio"] = round(float(today.get("volume", 0)) / float(yesterday_volume), 2)
+            yesterday_close = yesterday.get("close")
+            if yesterday_close:
+                context["price_change_ratio"] = round(
+                    (float(today.get("close", 0)) - float(yesterday_close)) / float(yesterday_close) * 100,
+                    2,
+                )
+            context["ma_status"] = self.db._analyze_ma_status(SimpleNamespace(**today))
+
+        return context
+
+    def _load_daily_market_context(
+        self,
+        market: str,
+        *,
+        force_refresh: bool = False,
+        target_date: Optional[date] = None,
+    ) -> Optional[DailyMarketContext]:
+        """Load/generate today's market context when market review is explicitly enabled."""
+        if getattr(self, "daily_market_context_enabled", True) is not True:
+            return None
+        if getattr(self.config, "daily_market_context_enabled", True) is not True:
+            return None
+        if getattr(self.config, "market_review_enabled", None) is not True:
+            return None
+
+        try:
+            service = getattr(self, "_daily_market_context_service", None)
+            if service is None:
+                service_lock = self._get_daily_market_context_service_lock()
+                with service_lock:
+                    service = getattr(self, "_daily_market_context_service", None)
+                    if service is None:
+                        service = DailyMarketContextService(db_manager=self.db)
+                        self._daily_market_context_service = service
+            get_context_kwargs = {
+                "region": market,
+                "config": self.config,
+                "notifier": self.notifier,
+                "analyzer": self.analyzer,
+                "search_service": self.search_service,
+                "force_refresh": force_refresh,
+                "allow_generate": getattr(self, "daily_market_context_allow_generate", True),
+                "target_date": target_date,
+            }
+            current_query_id = getattr(self, "query_id", None)
+            if isinstance(current_query_id, str) and current_query_id.strip():
+                get_context_kwargs["current_query_id"] = current_query_id
+            return service.get_context(**get_context_kwargs)
+        except Exception as exc:
+            logger.warning("加载大盘环境上下文失败，个股分析继续: %s", exc, exc_info=True)
+            return None
+
+    def _get_daily_market_context_service_lock(self) -> threading.Lock:
+        service_lock = getattr(self, "_daily_market_context_service_lock", None)
+        if service_lock is not None:
+            return service_lock
+        with _DAILY_MARKET_CONTEXT_SERVICE_LOCK_INIT_GUARD:
+            service_lock = getattr(self, "_daily_market_context_service_lock", None)
+            if service_lock is None:
+                service_lock = threading.Lock()
+                self._daily_market_context_service_lock = service_lock
+            return service_lock
+
+    @staticmethod
+    def _coerce_daily_market_context_date(value: Any) -> Optional[date]:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _attach_daily_market_context(
+        target_context: Dict[str, Any],
+        daily_market_context: Optional[DailyMarketContext],
+        *,
+        report_language: str,
+    ) -> None:
+        """Attach only the safe daily market summary to runtime analysis context."""
+        if daily_market_context is None:
+            return
+        safe_context = daily_market_context.to_safe_dict()
+        prompt_section = format_daily_market_context_prompt_section(
+            safe_context,
+            report_language=report_language,
+        )
+        if not prompt_section:
+            return
+        target_context["daily_market_context"] = safe_context
+        target_context["daily_market_context_summary"] = prompt_section
+
     def _agent_result_to_analysis_result(
         self,
         agent_result,
@@ -1276,8 +1712,8 @@ class StockAnalysisPipeline:
             code=code,
             name=stock_name,
             sentiment_score=50,
-            trend_prediction="Unknown" if report_language == "en" else "未知",
-            operation_advice="Watch" if report_language == "en" else "观望",
+            trend_prediction=get_unknown_text(report_language),
+            operation_advice=localize_operation_advice("观望", report_language),
             confidence_level=localize_confidence_level("medium", report_language),
             report_language=report_language,
             success=agent_result.success,
@@ -1357,7 +1793,7 @@ class StockAnalysisPipeline:
                 allow_dict=True,
                 expect_text=True,
             ):
-                result.operation_advice = str(raw_advice) if raw_advice else ("Watch" if report_language == "en" else "观望")
+                result.operation_advice = str(raw_advice) if raw_advice else (localize_operation_advice("观望", report_language))
             else:
                 signal_label = self._trend_signal_fallback(trend_result, report_language)
                 if signal_label:
@@ -1433,7 +1869,11 @@ class StockAnalysisPipeline:
                 )
                 self._backfill_agent_dashboard_fields(result, trend_result, report_language)
             if not result.error_message:
-                result.error_message = "Agent failed to generate a valid decision dashboard" if report_language == "en" else "Agent 未能生成有效的决策仪表盘"
+                result.error_message = (
+                    "Agent failed to generate a valid decision dashboard" if report_language == "en"
+                    else "에이전트가 유효한 결정 대시보드를 생성하지 못했습니다" if report_language == "ko"
+                    else "Agent 未能生成有效的决策仪表盘"
+                )
 
         explicit_action = dash.get("action") if isinstance(dash, dict) else None
         if explicit_action is None and isinstance(getattr(result, "dashboard", None), dict):
@@ -1603,6 +2043,8 @@ class StockAnalysisPipeline:
         if trend and advice:
             if report_language == "en":
                 return f"Trend view: {trend}; action advice: {advice}."
+            if report_language == "ko":
+                return f"추세 결론: {trend}; 대응 전략: {advice}."
             return f"趋势结论：{trend}；操作建议：{advice}。"
         return ""
 
@@ -1639,7 +2081,11 @@ class StockAnalysisPipeline:
             core["one_sentence"] = result.analysis_summary or self._summary_fallback_from_result(
                 result,
                 report_language,
-            ) or ("Analysis pending" if report_language == "en" else "分析待补充")
+            ) or (
+                "Analysis pending" if report_language == "en"
+                else "분석 보완 예정" if report_language == "ko"
+                else "分析待补充"
+            )
 
         intelligence = dashboard.get("intelligence")
         if not isinstance(intelligence, dict):
@@ -1677,7 +2123,7 @@ class StockAnalysisPipeline:
         levels = getattr(trend_result, "support_levels", None) if trend_result else None
         if levels:
             return levels[0]
-        return "To be completed" if report_language == "en" else "待补充"
+        return get_placeholder_text(report_language)
 
     @staticmethod
     def _apply_trend_fallback(
@@ -1687,7 +2133,7 @@ class StockAnalysisPipeline:
     ) -> None:
         if trend_result is None:
             result.sentiment_score = 50
-            result.operation_advice = "Watch" if report_language == "en" else "观望"
+            result.operation_advice = localize_operation_advice("观望", report_language)
             return
 
         score = getattr(trend_result, "signal_score", None)
@@ -1709,7 +2155,7 @@ class StockAnalysisPipeline:
         if signal_label:
             result.operation_advice = signal_label
         else:
-            result.operation_advice = "Watch" if report_language == "en" else "观望"
+            result.operation_advice = localize_operation_advice("观望", report_language)
 
         from src.agent.protocols import normalize_decision_signal
 
@@ -1907,6 +2353,54 @@ class StockAnalysisPipeline:
             snapshot["skills"] = list(self.analysis_skills)
         return snapshot
 
+    def _extract_decision_signal_after_history_save(
+        self,
+        *,
+        result: AnalysisResult,
+        query_id: str,
+        source_report_id: int,
+        report_type: str,
+        context_snapshot: Dict[str, Any],
+        portfolio_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Best-effort DecisionSignal extraction after analysis history is saved."""
+
+        assert (
+            isinstance(source_report_id, int)
+            and not isinstance(source_report_id, bool)
+            and source_report_id > 0
+        )
+
+        try:
+            diagnostic_context = get_current_diagnostic_context()
+            trace_id = (
+                getattr(diagnostic_context, "trace_id", None)
+                or getattr(self, "trace_id", None)
+                or query_id
+            )
+            signal_result = extract_and_persist_from_analysis_result(
+                result,
+                context_snapshot=context_snapshot,
+                source_report_id=source_report_id,
+                trace_id=str(trace_id),
+                query_source=getattr(self, "query_source", None) or "system",
+                report_type=report_type,
+                portfolio_context=portfolio_context,
+                profile_source="auto_default",
+            )
+            if isinstance(signal_result, dict):
+                summary = summarize_decision_signal(signal_result.get("item"))
+                if summary:
+                    setattr(result, "decision_signal_summary", summary)
+        except Exception as exc:
+            logger.warning(
+                "Decision signal extraction skipped after history save: query_id=%s stock_code=%s error=%s",
+                query_id,
+                getattr(result, "code", None),
+                exc,
+                exc_info=True,
+            )
+
     @staticmethod
     def _build_notification_run_snapshot(
         *,
@@ -1982,6 +2476,58 @@ class StockAnalysisPipeline:
                 )
             except Exception as exc:
                 logger.warning("回写通知诊断快照失败（fail-open）: %s", exc)
+
+    def _load_persisted_intelligence_context(
+        self,
+        *,
+        code: str,
+        stock_name: str,
+        market: str,
+        limit: int = 6,
+    ) -> Optional[str]:
+        """Load locally persisted intelligence as fail-open evidence context."""
+        try:
+            service = IntelligenceService()
+            days = max(1, int(self.config.get_effective_news_window_days() or 1))
+            collected: list[Dict[str, Any]] = []
+            seen_urls: set[str] = set()
+            symbol_filters = [
+                {"scope_type": "symbol", "scope_value": scope_value, "market": market}
+                for scope_value in _symbol_scope_lookup_values(code, market)
+            ]
+            for filters in symbol_filters + [{"scope_type": "market", "market": market}]:
+                payload = service.list_items(published_days=days, page=1, page_size=limit, **filters)
+                for item in payload.get("items", []):
+                    if not isinstance(item, dict):
+                        continue
+                    url = str(item.get("url") or "")
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    collected.append(item)
+                    if len(collected) >= limit:
+                        break
+                if len(collected) >= limit:
+                    break
+            if not collected:
+                return None
+            lines = [f"## 本地资讯证据池（{stock_name}/{code}）"]
+            for idx, item in enumerate(collected[:limit], 1):
+                title = str(item.get("title") or "未命名资讯").strip()
+                summary = str(item.get("summary") or "").strip()
+                source = str(item.get("source") or item.get("source_name") or "local-intel").strip()
+                published = str(item.get("published_at") or "").strip()
+                url = str(item.get("url") or "").strip()
+                meta = " / ".join(part for part in (source, published) if part)
+                lines.append(f"{idx}. {title}" + (f"（{meta}）" if meta else ""))
+                if summary:
+                    lines.append(f"   摘要：{summary[:220]}")
+                if url and not url.startswith("no-url:intel:"):
+                    lines.append(f"   来源：{url}")
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.debug("读取本地资讯证据失败（fail-open）: %s", exc)
+            return None
 
     def _build_legacy_analysis_artifacts(
         self,
@@ -2112,6 +2658,12 @@ class StockAnalysisPipeline:
         sanitized.pop("portfolio_context", None)
         sanitized.pop("analysis_context_pack", None)
         sanitized.pop("analysis_context_pack_summary", None)
+        sanitized.pop("daily_market_context_summary", None)
+        enhanced_context = sanitized.get("enhanced_context")
+        if isinstance(enhanced_context, dict):
+            enhanced_context = dict(enhanced_context)
+            enhanced_context.pop("daily_market_context_summary", None)
+            sanitized["enhanced_context"] = enhanced_context
         return sanitized
 
     _without_market_phase_context = _without_runtime_prompt_context
@@ -2294,7 +2846,8 @@ class StockAnalysisPipeline:
         stock_codes: Optional[List[str]] = None,
         dry_run: bool = False,
         send_notification: bool = True,
-        merge_notification: bool = False
+        merge_notification: bool = False,
+        current_time: Optional[datetime] = None,
     ) -> List[AnalysisResult]:
         """
         运行完整的分析流程
@@ -2310,6 +2863,7 @@ class StockAnalysisPipeline:
             dry_run: 是否仅获取数据不分析
             send_notification: 是否发送推送通知
             merge_notification: 是否合并推送（跳过本次推送，由 main 层合并个股+大盘后统一发送，Issue #190）
+            current_time: 本轮运行冻结的参考时间；为空时在 run 内生成
 
         Returns:
             分析结果列表
@@ -2330,11 +2884,20 @@ class StockAnalysisPipeline:
         logger.info(f"并发数: {self.max_workers}, 模式: {'仅获取数据' if dry_run else '完整分析'}")
 
         # 冻结本轮运行的统一参考时间，避免跨市场收盘边界时同批股票使用不同目标交易日。
-        resume_reference_time = datetime.now(timezone.utc)
+        resume_reference_time = current_time or datetime.now(timezone.utc)
         
         # === 批量预取实时行情（优化：避免每只股票都触发全量拉取）===
         # 只有股票数量 >= 5 时才进行预取，少量股票直接逐个查询更高效
         if len(stock_codes) >= 5:
+            daily_prefetch_count = self.fetcher_manager.prefetch_daily_klines(stock_codes, days=30)
+            if daily_prefetch_count > 0:
+                logger.info(
+                    "[prefetch] component=daily_kline_prefetch action=complete "
+                    "provider=TickFlowFetcher cached=%d stock_count=%d",
+                    daily_prefetch_count,
+                    len(stock_codes),
+                )
+
             prefetch_count = self.fetcher_manager.prefetch_realtime_quotes(stock_codes)
             if prefetch_count > 0:
                 logger.info(f"已启用批量预取架构：一次拉取全市场数据，{len(stock_codes)} 只股票共享缓存")

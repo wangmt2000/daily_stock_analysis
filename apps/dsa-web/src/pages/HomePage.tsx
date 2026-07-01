@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart3, Check, SlidersHorizontal } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { BarChart3, Check, SlidersHorizontal, X } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { getParsedApiError, type ParsedApiError } from '../api/error';
 import { analysisApi } from '../api/analysis';
 import { historyApi } from '../api/history';
@@ -34,8 +34,18 @@ type RunFlowDrawerState =
   | { open: false }
   | { open: true; source: RunFlowSnapshotSource; title: string };
 
+type StockAnalysisNavigationState = {
+  stockCode?: string;
+  stockName?: string;
+  autoAnalyze?: boolean;
+  selectionSource?: string;
+};
+
+const DUPLICATE_BANNER_AUTO_DISMISS_MS = 5000;
+
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { language: uiLanguage, t } = useUiLanguage();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSubmittingMarketReview, setIsSubmittingMarketReview] = useState(false);
@@ -47,6 +57,8 @@ const HomePage: React.FC = () => {
   const [selectedStrategyId, setSelectedStrategyId] = useState('');
   const [strategyMenuOpen, setStrategyMenuOpen] = useState(false);
   const [runFlowDrawer, setRunFlowDrawer] = useState<RunFlowDrawerState>({ open: false });
+  const [duplicateBannerVisible, setDuplicateBannerVisible] = useState(false);
+  const duplicateBannerTimer = useRef<number | null>(null);
   const marketReviewPollTimer = useRef<number | null>(null);
   const dashboardScrollRef = useRef<HTMLElement | null>(null);
   const strategyMenuRef = useRef<HTMLDivElement | null>(null);
@@ -101,6 +113,7 @@ const HomePage: React.FC = () => {
     clearError,
     loadInitialHistory,
     refreshHistory,
+    refreshHistoryForCompletedTask,
     loadMarketReviewHistory,
     refreshMarketReviewHistory,
     selectHistoryItem,
@@ -123,6 +136,35 @@ const HomePage: React.FC = () => {
     loadStockBar,
     refreshStockBar,
   } = useHomeDashboardState();
+
+  const clearDuplicateBannerTimer = useCallback(() => {
+    if (duplicateBannerTimer.current !== null) {
+      window.clearTimeout(duplicateBannerTimer.current);
+      duplicateBannerTimer.current = null;
+    }
+  }, []);
+
+  const dismissDuplicateBanner = useCallback(() => {
+    clearDuplicateBannerTimer();
+    setDuplicateBannerVisible(false);
+  }, [clearDuplicateBannerTimer]);
+
+  useEffect(() => {
+    if (!duplicateError) {
+      clearDuplicateBannerTimer();
+      setDuplicateBannerVisible(false);
+      return undefined;
+    }
+
+    setDuplicateBannerVisible(true);
+    clearDuplicateBannerTimer();
+    duplicateBannerTimer.current = window.setTimeout(() => {
+      duplicateBannerTimer.current = null;
+      setDuplicateBannerVisible(false);
+    }, DUPLICATE_BANNER_AUTO_DISMISS_MS);
+
+    return clearDuplicateBannerTimer;
+  }, [clearDuplicateBannerTimer, duplicateError]);
 
   useEffect(() => {
     document.title = t('home.pageTitle');
@@ -318,6 +360,7 @@ const HomePage: React.FC = () => {
   useDashboardLifecycle({
     loadInitialHistory,
     refreshHistory,
+    refreshHistoryForCompletedTask,
     loadMarketReviewHistory,
     refreshMarketReviewHistory,
     loadStockBar,
@@ -379,6 +422,20 @@ const HomePage: React.FC = () => {
     },
     [query, selectedAnalysisSkills, submitAnalysis],
   );
+
+  useEffect(() => {
+    const state = location.state as StockAnalysisNavigationState | null;
+    const stockCode = typeof state?.stockCode === 'string' ? state.stockCode.trim() : '';
+    if (!stockCode) {
+      return;
+    }
+    const stockName = typeof state?.stockName === 'string' ? state.stockName.trim() : '';
+    setQuery(stockCode);
+    navigate(location.pathname, { replace: true, state: null });
+    if (state?.autoAnalyze) {
+      handleSubmitAnalysis(stockCode, stockName || undefined, 'import');
+    }
+  }, [handleSubmitAnalysis, location.pathname, location.state, navigate, setQuery]);
 
   const handleAskFollowUp = useCallback(() => {
     if (selectedReport?.meta.id === undefined || selectedReport.meta.reportType === 'market_review') {
@@ -758,7 +815,7 @@ const HomePage: React.FC = () => {
           </div>
         </header>
 
-        {inputError || duplicateError ? (
+        {inputError || (duplicateError && duplicateBannerVisible) ? (
           <div className="px-3 pb-2 md:px-4">
             {inputError ? (
               <InlineAlert
@@ -768,11 +825,21 @@ const HomePage: React.FC = () => {
                 className="rounded-xl px-3 py-2 text-xs shadow-none"
               />
             ) : null}
-            {!inputError && duplicateError ? (
+            {!inputError && duplicateError && duplicateBannerVisible ? (
               <InlineAlert
                 variant="warning"
                 title={t('home.duplicateTask')}
                 message={duplicateError}
+                action={(
+                  <button
+                    type="button"
+                    onClick={dismissDuplicateBanner}
+                    aria-label={t('common.close')}
+                    className="-my-1 -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg opacity-70 transition-colors hover:bg-warning/15 hover:opacity-100"
+                  >
+                    <X className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                )}
                 className="rounded-xl px-3 py-2 text-xs shadow-none"
               />
             ) : null}

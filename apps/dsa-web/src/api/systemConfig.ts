@@ -6,6 +6,8 @@ import type {
   DiscoverLLMChannelModelsResponse,
   ExportSystemConfigResponse,
   ImportSystemConfigRequest,
+  SchedulerRunNowResponse,
+  SchedulerStatusResponse,
   SetupStatusResponse,
   SystemConfigConflictResponse,
   SystemConfigResponse,
@@ -95,6 +97,7 @@ function toSnakeTestChannelPayload(payload: TestLLMChannelRequest): Record<strin
     models: payload.models,
     enabled: payload.enabled ?? true,
     timeout_seconds: payload.timeoutSeconds ?? 20,
+    use_saved_secret: payload.useSavedSecret ?? false,
   };
   if (payload.capabilityChecks && payload.capabilityChecks.length > 0) {
     request.capability_checks = payload.capabilityChecks;
@@ -124,6 +127,7 @@ function toSnakeDiscoverModelsPayload(payload: DiscoverLLMChannelModelsRequest):
     api_key: payload.apiKey ?? '',
     models: payload.models,
     timeout_seconds: payload.timeoutSeconds ?? 20,
+    use_saved_secret: payload.useSavedSecret ?? false,
   };
 }
 
@@ -152,6 +156,16 @@ export const systemConfigApi = {
   async getSetupStatus(): Promise<SetupStatusResponse> {
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/system/config/setup/status');
     return toCamelCase<SetupStatusResponse>(response.data);
+  },
+
+  async getSchedulerStatus(): Promise<SchedulerStatusResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/system/scheduler/status');
+    return toCamelCase<SchedulerStatusResponse>(response.data);
+  },
+
+  async runSchedulerNow(): Promise<SchedulerRunNowResponse> {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/system/scheduler/run-now');
+    return toCamelCase<SchedulerRunNowResponse>(response.data);
   },
 
   async validate(payload: ValidateSystemConfigRequest): Promise<ValidateSystemConfigResponse> {

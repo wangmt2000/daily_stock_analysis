@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import defaultdict
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from api.v1.schemas.run_flow import RunFlowSnapshot
 from src.analysis_context_pack_overview import extract_analysis_context_pack_overview
-from src.services.run_diagnostics import sanitize_diagnostic_text
+from src.services.run_diagnostics import (
+    safe_diagnostic_key,
+    sanitize_diagnostic_metadata,
+    sanitize_diagnostic_text,
+)
 from src.utils.data_processing import normalize_model_used, parse_json_field
 
 
@@ -43,6 +46,7 @@ _DATA_TYPE_LABELS = {
     "news_search": "新闻舆情",
     "fundamental": "基本面",
     "fundamentals": "基本面",
+    "belong_boards": "所属板块",
     "chip": "筹码结构",
 }
 
@@ -55,6 +59,7 @@ _DATA_TYPE_TO_BLOCK_KEY = {
     "news_search": "news",
     "fundamental": "fundamentals",
     "fundamentals": "fundamentals",
+    "belong_boards": "fundamentals",
     "chip": "chip",
 }
 
@@ -68,20 +73,6 @@ _CONTEXT_STATUS_TO_FLOW = {
     "not_supported": "skipped",
     "fetch_failed": "failed",
 }
-
-_SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(authorization|api[_-]?key|access[_-]?token|(?:^|[_-])(?:auth|refresh|session|bearer)?[_-]?token$|secret|password|passwd|cookie|"
-    r"webhook|sendkey|prompt|raw[_-]?prompt|raw[_-]?response|headers?|proxy)"
-)
-_WEBHOOK_URL_RE = re.compile(r"https?://[^\s]+?(?:webhook|token|key|secret|sendkey)[^\s]*", re.IGNORECASE)
-_LOCAL_ABSOLUTE_PATH_RE = re.compile(
-    r"(?<![\w:/.-])(?:/(?:home|Users|root|var|tmp|opt|etc)/[^\s,;]+|[A-Za-z]:\\[^\s,;]+)"
-)
-_SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password|passwd|cookie|webhook|sendkey|"
-    r"prompt|raw[_-]?prompt|raw[_-]?response)\s*[:=]\s*([^\s,&;]+)"
-)
-
 
 def build_task_run_flow_snapshot(
     task: Any,
@@ -157,6 +148,14 @@ def build_task_run_flow_snapshot(
         _put_skeleton_tail(nodes, edges, anchor_node_id="task_queue", status=flow_status)
 
     _append_task_events(events, task, flow_status)
+    _append_active_flow_events(
+        nodes,
+        edges,
+        events,
+        _as_list(getattr(task, "flow_events", None)),
+        flow_status=flow_status,
+    )
+    _prune_active_skeleton_tail(nodes, edges)
 
     summary = _build_summary(
         nodes,
@@ -192,6 +191,7 @@ def build_history_run_flow_snapshot(
     snapshot = _as_mapping(context_snapshot if context_snapshot is not None else getattr(record, "context_snapshot", None))
     raw = _as_mapping(raw_result if raw_result is not None else getattr(record, "raw_result", None))
     diagnostics = _as_mapping(snapshot.get("diagnostics")) if snapshot else {}
+    diagnostics = _normalize_history_diagnostics_for_record(record, snapshot, diagnostics)
     overview = extract_analysis_context_pack_overview(snapshot) if snapshot else None
     overview_metadata = overview.get("metadata") if isinstance((overview or {}).get("metadata"), Mapping) else {}
 
@@ -397,6 +397,7 @@ def _append_provider_runs(
         status = _provider_run_status(run, had_previous_failure=had_previous_failure)
         duration_ms = _safe_int(run.get("latency_ms"))
         timestamp = _datetime_to_iso(run.get("created_at"))
+        started_at = _started_at_from_end_and_duration(timestamp, duration_ms)
         message = _provider_run_message(label, provider, run, success=success)
         block_key = _DATA_TYPE_TO_BLOCK_KEY.get(data_type, data_type)
 
@@ -408,6 +409,7 @@ def _append_provider_runs(
             label=f"{label} · {provider}",
             status=status,
             provider=provider,
+            started_at=started_at,
             ended_at=timestamp,
             duration_ms=duration_ms,
             attempts=1,
@@ -479,6 +481,7 @@ def _append_context_blocks(
     if not overview:
         return
     metadata = overview.get("metadata") if isinstance(overview.get("metadata"), Mapping) else {}
+    overview_timestamp = overview.get("created_at")
     for block in _as_list(overview.get("blocks")):
         block_map = _as_mapping(block)
         key = _safe_key(block_map.get("key"))
@@ -495,6 +498,8 @@ def _append_context_blocks(
             label=_safe_text(block_map.get("label"), max_length=80) or key,
             status=status,
             provider=block_map.get("source"),
+            started_at=overview_timestamp,
+            ended_at=overview_timestamp,
             record_count=_safe_int(record_count),
             message=_context_block_message(block_map),
             metadata={
@@ -551,6 +556,7 @@ def _append_llm_runs(
             status = "fallback"
         timestamp = _datetime_to_iso(run.get("created_at"))
         duration_ms = _safe_int(run.get("duration_ms"))
+        started_at = _started_at_from_end_and_duration(timestamp, duration_ms)
         message = _llm_run_message(model, run, success=success)
         edge_kind = "data"
         if index > 1:
@@ -563,6 +569,7 @@ def _append_llm_runs(
             label="LLM 生成",
             status=status,
             provider=model or provider,
+            started_at=started_at,
             ended_at=timestamp,
             duration_ms=duration_ms,
             attempts=1,
@@ -691,7 +698,7 @@ def _append_notification_runs(
             status=status,
             provider=channel,
             ended_at=timestamp,
-            attempts=_safe_int(run.get("attempts")) or 1,
+            attempts=_safe_int(run.get("attempts")) if _safe_int(run.get("attempts")) is not None else 1,
             message=message,
             metadata={
                 "channel": channel,
@@ -716,6 +723,91 @@ def _append_notification_runs(
             },
         )
     return count
+
+
+_STOCK_CONTEXT_PROVIDER_DATA_TYPES = {
+    "realtime_quote",
+    "daily_data",
+    "daily_bars",
+    "technical",
+    "fundamental",
+    "fundamentals",
+    "belong_boards",
+    "chip",
+}
+
+
+def _normalize_history_diagnostics_for_record(
+    record: Any,
+    snapshot: Dict[str, Any],
+    diagnostics: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not diagnostics:
+        return diagnostics
+
+    normalized = dict(diagnostics)
+    report_type = _safe_key(getattr(record, "report_type", None))
+    code = _safe_text(getattr(record, "code", None), max_length=32)
+    report_kind = _safe_key(snapshot.get("report_kind")) if snapshot else ""
+
+    if report_type == "market_review" or report_kind == "market_review" or (code or "").upper() == "MARKET":
+        normalized["stock_code"] = "MARKET"
+        normalized.setdefault("scope", "market_review")
+        normalized["provider_runs"] = [
+            run
+            for run in _as_list(normalized.get("provider_runs"))
+            if _safe_key(_as_mapping(run).get("data_type")) not in _STOCK_CONTEXT_PROVIDER_DATA_TYPES
+        ]
+        return normalized
+
+    first_llm_at = _first_timestamp(_as_list(normalized.get("llm_runs")))
+    if first_llm_at is not None:
+        normalized["history_runs"] = [
+            run
+            for run in _as_list(normalized.get("history_runs"))
+            if not _timestamp_before(_as_mapping(run).get("created_at"), first_llm_at)
+        ]
+        normalized["notification_runs"] = [
+            run
+            for run in _as_list(normalized.get("notification_runs"))
+            if not _timestamp_before(_as_mapping(run).get("created_at"), first_llm_at)
+        ]
+
+    first_stock_data_at = _first_timestamp(
+        [
+            run
+            for run in _as_list(normalized.get("provider_runs"))
+            if _safe_key(_as_mapping(run).get("data_type")) in _STOCK_CONTEXT_PROVIDER_DATA_TYPES
+        ]
+    )
+    if first_stock_data_at is not None:
+        normalized["provider_runs"] = [
+            run
+            for run in _as_list(normalized.get("provider_runs"))
+            if _safe_key(_as_mapping(run).get("data_type")) != "news_search"
+            or not _timestamp_before(_as_mapping(run).get("created_at"), first_stock_data_at)
+        ]
+    return normalized
+
+
+def _first_timestamp(items: List[Any]) -> Optional[datetime]:
+    timestamps = [
+        parsed
+        for parsed in (_datetime_for_elapsed(_as_mapping(item).get("created_at")) for item in items)
+        if parsed is not None
+    ]
+    return min(timestamps) if timestamps else None
+
+
+def _timestamp_before(value: Any, boundary: datetime) -> bool:
+    parsed = _datetime_for_elapsed(value)
+    if parsed is None:
+        return False
+    if parsed.tzinfo is None and boundary.tzinfo is not None:
+        parsed = parsed.replace(tzinfo=boundary.tzinfo)
+    elif parsed.tzinfo is not None and boundary.tzinfo is None:
+        boundary = boundary.replace(tzinfo=parsed.tzinfo)
+    return parsed < boundary
 
 
 def _put_skeleton_tail(
@@ -768,6 +860,26 @@ def _put_skeleton_tail(
     _append_edge(edges, "history_save", "notification", "control", downstream_status, label="通知")
 
 
+def _prune_active_skeleton_tail(
+    nodes: Dict[str, Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+) -> None:
+    remove_node_ids = set()
+    if "llm" in nodes and any(node_id.startswith("llm_") for node_id in nodes):
+        remove_node_ids.add("llm")
+    if "notification" in nodes and any(node_id.startswith("notification_") for node_id in nodes):
+        remove_node_ids.add("notification")
+    if not remove_node_ids:
+        return
+    for node_id in remove_node_ids:
+        nodes.pop(node_id, None)
+    edges[:] = [
+        edge
+        for edge in edges
+        if edge.get("from") not in remove_node_ids and edge.get("to") not in remove_node_ids
+    ]
+
+
 def _append_task_events(events: List[Dict[str, Any]], task: Any, flow_status: str) -> None:
     _append_event(
         events,
@@ -818,6 +930,130 @@ def _append_task_events(events: List[Dict[str, Any]], task: Any, flow_status: st
             title="任务完成",
             message=getattr(task, "message", None) or "分析完成",
         )
+
+
+def _append_active_flow_events(
+    nodes: Dict[str, Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    events: List[Dict[str, Any]],
+    flow_events: List[Any],
+    *,
+    flow_status: str,
+) -> None:
+    if not flow_events:
+        return
+
+    known_node_ids = set(nodes)
+    last_provider_node_by_type: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+    last_llm_node: Optional[str] = None
+    last_history_node: Optional[str] = None
+
+    for raw_event in flow_events:
+        event = _as_mapping(raw_event)
+        if not event:
+            continue
+        metadata = _sanitize_metadata(event.get("metadata") or {})
+        node_payload = metadata.get("node") if isinstance(metadata, Mapping) else None
+        node_id = _safe_key(event.get("node_id"))
+
+        if isinstance(node_payload, Mapping):
+            raw_node_id = _safe_text(node_payload.get("id"), max_length=120) or node_id
+            if raw_node_id:
+                node_id = raw_node_id
+                _put_node(
+                    nodes,
+                    node_id,
+                    lane=str(node_payload.get("lane") or "analysis"),
+                    kind=str(node_payload.get("kind") or "analysis"),
+                    label=str(node_payload.get("label") or node_id),
+                    status=str(node_payload.get("status") or flow_status),
+                    provider=node_payload.get("provider"),
+                    started_at=node_payload.get("started_at")
+                    or _started_at_from_end_and_duration(
+                        node_payload.get("ended_at") or event.get("timestamp"),
+                        node_payload.get("duration_ms"),
+                    ),
+                    ended_at=node_payload.get("ended_at") or event.get("timestamp"),
+                    duration_ms=node_payload.get("duration_ms"),
+                    attempts=node_payload.get("attempts"),
+                    record_count=node_payload.get("record_count"),
+                    message=node_payload.get("message") or event.get("message"),
+                    metadata={key: value for key, value in metadata.items() if key != "node"},
+                )
+
+        event_type = _safe_key(event.get("type")) or "event"
+        provider_data_type = None
+        provider_run = None
+        if event_type in {"provider_run", "provider_run_started"} and node_id and node_id in nodes:
+            provider_data_type = _safe_key(metadata.get("data_type") or "provider")
+            provider_run = {
+                "provider": metadata.get("provider") or nodes[node_id].get("provider"),
+                "success": event.get("severity") == "success" or nodes[node_id].get("status") in {"success", "fallback"},
+                "fallback_from": metadata.get("fallback_from"),
+                "fallback_to": metadata.get("fallback_to"),
+            }
+
+        if node_id and node_id in nodes and node_id in known_node_ids:
+            _refresh_incoming_edge_status(edges, node_id, nodes[node_id].get("status"))
+            if provider_data_type and provider_run:
+                last_provider_node_by_type[provider_data_type] = (node_id, provider_run)
+            elif event_type in {"llm_run", "llm_run_started"}:
+                last_llm_node = node_id
+            elif event_type == "history_run":
+                last_history_node = node_id
+
+        if node_id and node_id in nodes and node_id not in known_node_ids:
+            if provider_data_type and provider_run:
+                previous_provider = last_provider_node_by_type.get(provider_data_type)
+                if previous_provider:
+                    previous_provider_node, previous_provider_run = previous_provider
+                    edge_kind = _provider_transition_kind(previous_provider_run, provider_run)
+                    _append_edge(
+                        edges,
+                        previous_provider_node,
+                        node_id,
+                        edge_kind,
+                        nodes[node_id].get("status", "unknown"),
+                        label="降级" if edge_kind == "fallback" else ("重试" if edge_kind == "retry" else "调用"),
+                    )
+                else:
+                    _append_edge(edges, "task_queue", node_id, "control", nodes[node_id].get("status", "unknown"), label="调用")
+                last_provider_node_by_type[provider_data_type] = (node_id, provider_run)
+            elif event_type in {"llm_run", "llm_run_started"}:
+                anchor = "analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue"
+                _append_edge(edges, anchor, node_id, "data", nodes[node_id].get("status", "unknown"), label="生成")
+                last_llm_node = node_id
+            elif event_type == "history_run":
+                anchor = last_llm_node or ("analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue")
+                _append_edge(edges, anchor, node_id, "data", nodes[node_id].get("status", "unknown"), label="保存")
+                last_history_node = node_id
+            elif event_type == "notification_run":
+                anchor = last_history_node or last_llm_node or ("analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue")
+                _append_edge(edges, anchor, node_id, "control", nodes[node_id].get("status", "unknown"), label="通知")
+            known_node_ids.add(node_id)
+
+        _append_external_event(events, event)
+
+
+def _append_external_event(events: List[Dict[str, Any]], event: Dict[str, Any]) -> None:
+    event_id = _safe_text(event.get("id"), max_length=96) or f"flow_{len(events) + 1:04d}"
+    if any(existing.get("id") == event_id for existing in events):
+        return
+    metadata = _sanitize_metadata(event.get("metadata") or {})
+    if isinstance(metadata, Mapping) and "node" in metadata:
+        metadata = {key: value for key, value in metadata.items() if key != "node"}
+    events.append(
+        {
+            "id": event_id,
+            "timestamp": _datetime_to_iso(event.get("timestamp")),
+            "severity": event.get("severity") if event.get("severity") in {"info", "success", "warning", "danger"} else "info",
+            "type": _safe_key(event.get("type")) or "event",
+            "node_id": _safe_text(event.get("node_id"), max_length=120),
+            "title": _safe_text(event.get("title"), max_length=100) or "运行事件",
+            "message": _safe_text(event.get("message"), max_length=220),
+            "metadata": metadata,
+        }
+    )
 
 
 def _group_provider_runs(provider_runs: List[Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -1053,7 +1289,19 @@ def _append_edge(
     metadata: Optional[Any] = None,
 ) -> None:
     edge_id = f"{from_node}_to_{to_node}_{kind}"
-    if any(edge["id"] == edge_id for edge in edges):
+    for edge in edges:
+        if edge["id"] != edge_id:
+            continue
+        edge["status"] = _valid_status(status)
+        safe_label = _safe_text(label, max_length=40)
+        if safe_label:
+            edge["label"] = safe_label
+        safe_message = _safe_text(message, max_length=180)
+        if safe_message:
+            edge["message"] = safe_message
+        safe_metadata = _sanitize_metadata(metadata or {})
+        if safe_metadata:
+            edge["metadata"] = safe_metadata
         return
     edges.append(
         {
@@ -1067,6 +1315,19 @@ def _append_edge(
             "metadata": _sanitize_metadata(metadata or {}),
         }
     )
+
+
+def _refresh_incoming_edge_status(
+    edges: List[Dict[str, Any]],
+    node_id: Optional[str],
+    status: Optional[Any],
+) -> None:
+    if not node_id or status is None:
+        return
+    valid_status = _valid_status(status)
+    for edge in edges:
+        if edge.get("to") == node_id:
+            edge["status"] = valid_status
 
 
 def _append_event(
@@ -1136,23 +1397,11 @@ def _valid_status(value: Any) -> str:
 
 
 def _safe_text(value: Any, *, max_length: int = 300) -> Optional[str]:
-    if value is None:
-        return None
-    text = sanitize_diagnostic_text(value, max_length=max_length)
-    if not text:
-        return None
-    text = _WEBHOOK_URL_RE.sub("<redacted-url>", text)
-    text = _LOCAL_ABSOLUTE_PATH_RE.sub("<redacted-path>", text)
-    text = _SENSITIVE_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
-    if len(text) > max_length:
-        return f"{text[:max_length].rstrip()}..."
-    return text
+    return sanitize_diagnostic_text(value, max_length=max_length)
 
 
 def _safe_key(value: Any) -> str:
-    text = _safe_text(value, max_length=80) or ""
-    text = re.sub(r"[^A-Za-z0-9_]+", "_", text.strip().lower())
-    return text.strip("_")[:80]
+    return safe_diagnostic_key(value)
 
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -1166,32 +1415,7 @@ def _safe_int(value: Any) -> Optional[int]:
 
 
 def _sanitize_metadata(value: Any, *, depth: int = 0) -> Any:
-    if depth > 3:
-        return "<truncated>"
-    if isinstance(value, Mapping):
-        sanitized: Dict[str, Any] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= 20:
-                sanitized["truncated"] = True
-                break
-            safe_key = _safe_key(key)
-            if not safe_key:
-                continue
-            if _SENSITIVE_KEY_RE.search(str(key)):
-                sanitized[safe_key] = "<redacted>"
-                continue
-            safe_value = _sanitize_metadata(item, depth=depth + 1)
-            if safe_value not in (None, "", [], {}):
-                sanitized[safe_key] = safe_value
-        return sanitized
-    if isinstance(value, list):
-        items = [_sanitize_metadata(item, depth=depth + 1) for item in value[:8]]
-        return [item for item in items if item not in (None, "", [], {})]
-    if isinstance(value, tuple):
-        return _sanitize_metadata(list(value), depth=depth)
-    if isinstance(value, (int, float, bool)):
-        return value
-    return _safe_text(value, max_length=160)
+    return sanitize_diagnostic_metadata(value, depth=depth)
 
 
 def _as_mapping(value: Any) -> Dict[str, Any]:
@@ -1228,6 +1452,23 @@ def _elapsed_ms(start: Any, end: Any) -> Optional[int]:
     if seconds < 0:
         return None
     return int(seconds * 1000)
+
+
+def _started_at_from_end_and_duration(end: Any, duration_ms: Any) -> Optional[str]:
+    duration = _safe_int(duration_ms)
+    if duration is None:
+        return None
+    if isinstance(end, datetime):
+        parsed = end
+    elif isinstance(end, str) and "T" in end:
+        normalized = end[:-1] + "+00:00" if end.endswith("Z") else end
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+    else:
+        return None
+    return (parsed - timedelta(milliseconds=duration)).isoformat()
 
 
 def _local_timezone():

@@ -376,7 +376,7 @@ export function parseApiError(error: unknown): ParsedApiError {
   if (errorCode === 'alphasift_unavailable' || includesAny(matchText, ['cannot import alphasift', 'alphasift.screen'])) {
     return createParsedApiError({
       title: 'AlphaSift 未就绪',
-      message: '当前 DSA 后端环境无法导入 alphasift。请先执行 pip install -r requirements.txt，或重建 Docker/桌面后端产物。',
+      message: rawMessage,
       rawMessage,
       status,
       category: 'http_error',

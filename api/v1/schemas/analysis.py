@@ -23,6 +23,8 @@ class TaskStatusEnum(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELLED = "cancelled"
 
 
 AnalysisPhase = Literal["auto", "premarket", "intraday", "postmarket"]
@@ -78,7 +80,7 @@ class AnalyzeRequest(BaseModel):
         True,
         description="是否发送推送通知（Telegram/企业微信等）"
     )
-    report_language: Optional[Literal["zh", "en"]] = Field(
+    report_language: Optional[Literal["zh", "en", "ko"]] = Field(
         None,
         validation_alias=AliasChoices("report_language", "reportLanguage"),
         description="本次分析报告输出语言；未传时使用全局 REPORT_LANGUAGE",
@@ -114,7 +116,7 @@ class MarketReviewRequest(BaseModel):
         True,
         description="是否在大盘复盘完成后发送推送通知",
     )
-    report_language: Optional[Literal["zh", "en"]] = Field(
+    report_language: Optional[Literal["zh", "en", "ko"]] = Field(
         None,
         validation_alias=AliasChoices("report_language", "reportLanguage"),
         description="本次大盘复盘报告输出语言；未传时使用全局 REPORT_LANGUAGE",
@@ -263,10 +265,9 @@ class TaskStatus(BaseModel):
     
     task_id: str = Field(..., description="任务 ID")
     trace_id: Optional[str] = Field(None, description="诊断 trace ID")
-    status: str = Field(
+    status: TaskStatusEnum = Field(
         ..., 
         description="任务状态",
-        pattern="^(pending|processing|completed|failed)$"
     )
     progress: Optional[int] = Field(
         None, 

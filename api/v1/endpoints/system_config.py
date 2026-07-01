@@ -7,7 +7,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from api.deps import get_system_config_service
+from api.deps import get_runtime_scheduler_service, get_system_config_service
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.system_config import (
     DiscoverLLMChannelModelsRequest,
@@ -35,10 +35,45 @@ from src.services.system_config_service import (
     ConfigValidationError,
     SystemConfigService,
 )
+from src.services.runtime_scheduler import RuntimeSchedulerService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get(
+    "/scheduler/status",
+    summary="Get runtime scheduler status",
+    description="Return status for the in-process Web/API/Desktop scheduler.",
+)
+def get_scheduler_status(
+    scheduler: RuntimeSchedulerService = Depends(get_runtime_scheduler_service),
+) -> dict:
+    """Return runtime scheduler status."""
+    return scheduler.status()
+
+
+@router.post(
+    "/scheduler/run-now",
+    summary="Run scheduled analysis now",
+    description="Trigger one scheduled analysis run in the current process.",
+)
+def run_scheduler_now(
+    scheduler: RuntimeSchedulerService = Depends(get_runtime_scheduler_service),
+) -> dict:
+    """Trigger one runtime scheduled analysis run."""
+    result = scheduler.run_now()
+    if not result.get("accepted", False):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "scheduler_busy",
+                "message": "A scheduled analysis is already running",
+                "reason": result.get("reason", "analysis_already_running"),
+            },
+        )
+    return result
 
 
 class EnvBackupAccessDenied(Exception):
@@ -95,7 +130,11 @@ def _raise_env_backup_access_error(exc: EnvBackupAccessDenied) -> None:
         500: {"description": "Internal server error", "model": ErrorResponse},
     },
     summary="Get system configuration",
-    description="Read current configuration from .env and return raw values.",
+    description=(
+        "Read current configuration and return display values. Server-masked "
+        "sensitive fields may return the mask token; clients should use "
+        "raw_value_exists and is_masked to interpret values."
+    ),
 )
 def get_system_config(
     include_schema: bool = Query(True, description="Whether to include schema metadata"),
@@ -372,6 +411,7 @@ def test_llm_channel(
             enabled=request.enabled,
             timeout_seconds=request.timeout_seconds,
             capability_checks=request.capability_checks,
+            use_saved_secret=request.use_saved_secret,
         )
         return TestLLMChannelResponse.model_validate(payload)
     except (ValueError, TypeError) as exc:
@@ -460,6 +500,7 @@ def discover_llm_channel_models(
             api_key=request.api_key,
             models=request.models,
             timeout_seconds=request.timeout_seconds,
+            use_saved_secret=request.use_saved_secret,
         )
         return DiscoverLLMChannelModelsResponse.model_validate(payload)
     except (ValueError, TypeError) as exc:

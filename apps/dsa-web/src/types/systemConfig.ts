@@ -154,6 +154,24 @@ export interface ValidateSystemConfigResponse {
   issues: ConfigValidationIssue[];
 }
 
+export interface SchedulerStatusResponse {
+  enabled: boolean;
+  running: boolean;
+  scheduleTimes: string[];
+  nextRunAt?: string | null;
+  lastRunAt?: string | null;
+  lastSuccessAt?: string | null;
+  lastError?: string | null;
+  lastSkippedAt?: string | null;
+  lastSkipReason?: string | null;
+}
+
+export interface SchedulerRunNowResponse {
+  accepted: boolean;
+  running: boolean;
+  reason?: string;
+}
+
 export interface TestLLMChannelRequest {
   name: string;
   protocol: string;
@@ -163,6 +181,7 @@ export interface TestLLMChannelRequest {
   enabled?: boolean;
   timeoutSeconds?: number;
   capabilityChecks?: LLMCapabilityCheck[];
+  useSavedSecret?: boolean;
 }
 
 export type LLMCapabilityCheck = 'json' | 'tools' | 'vision' | 'stream';
@@ -244,6 +263,7 @@ export interface DiscoverLLMChannelModelsRequest {
   apiKey?: string;
   models?: string[];
   timeoutSeconds?: number;
+  useSavedSecret?: boolean;
 }
 
 export interface DiscoverLLMChannelModelsResponse {

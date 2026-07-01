@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from src.analyzer import AnalysisResult
 from src.config import get_config
 from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt
+from src.services.decision_signal_summary import format_decision_signal_excerpt
 from src.report_language import (
     get_localized_stock_name,
     get_report_labels,
@@ -27,7 +28,11 @@ from src.report_language import (
     localize_trend_prediction,
     normalize_report_language,
 )
-from src.utils.data_processing import normalize_model_used
+from src.utils.data_processing import (
+    normalize_model_used,
+    signal_attribution_has_content,
+    signal_attribution_weight_items,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +162,12 @@ def render(
             report_language=report_language,
         )
 
+    def decision_signal_excerpt(result: AnalysisResult) -> str:
+        return format_decision_signal_excerpt(
+            getattr(result, "decision_signal_summary", None),
+            report_language=report_language,
+        )
+
     def market_status_line() -> str:
         for source_results in (results or [], sorted_results):
             for result in source_results:
@@ -186,12 +197,15 @@ def render(
         "clean_sniper": _clean_sniper_value,
         "failed_checks": failed_checks,
         "phase_pack_excerpt": phase_pack_excerpt,
+        "decision_signal_excerpt": decision_signal_excerpt,
         "history_by_code": {},
         "get_chip_unavailable_reason": get_chip_unavailable_reason,
         "is_chip_structure_unavailable": is_chip_structure_unavailable,
         "localize_operation_advice": localize_operation_advice,
         "localize_trend_prediction": localize_trend_prediction,
         "localize_chip_health": localize_chip_health,
+        "signal_attribution_has_content": signal_attribution_has_content,
+        "signal_attribution_weight_items": signal_attribution_weight_items,
     }
     if extra_context:
         safe_extra_context = dict(extra_context)

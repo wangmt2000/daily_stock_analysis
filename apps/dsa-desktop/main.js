@@ -32,11 +32,27 @@ const LATEST_RELEASE_API_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${G
 const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
 const DESKTOP_UPDATE_BACKUP_DIR = '.dsa-desktop-update-backup';
 const DESKTOP_UPDATE_BACKUP_MANIFEST_FILE = 'runtime-state.json';
+const MAC_DESKTOP_CLI_PATH_ENTRIES = Object.freeze([
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  '/opt/homebrew/sbin',
+  '/usr/local/sbin',
+]);
+const MAC_DESKTOP_SYSTEM_PATH_ENTRIES = Object.freeze([
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+]);
 const DESKTOP_UPDATE_RUNTIME_RELATIVE_FILES = Object.freeze([
   '.env',
   path.join('data', 'stock_analysis.db'),
   path.join('data', 'stock_analysis.db-wal'),
   path.join('data', 'stock_analysis.db-shm'),
+  path.join('data', 'alphasift', 'hotspots.json'),
+  path.join('data', 'alphasift', 'hotspot.history.jsonl'),
+  path.join('data', 'alphasift', 'hotspot_details'),
+  path.join('data', 'alphasift', 'snapshot.last_good.json'),
   path.join('logs', 'desktop.log'),
 ]);
 
@@ -445,6 +461,26 @@ function normalizeBackupFileList(manifest) {
   return DESKTOP_UPDATE_RUNTIME_RELATIVE_FILES.slice();
 }
 
+function copyRuntimeStatePathSync(source, target) {
+  const stats = fs.statSync(source);
+  if (stats.isDirectory()) {
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(target, { recursive: true });
+    fs.readdirSync(source, { withFileTypes: true }).forEach((entry) => {
+      copyRuntimeStatePathSync(path.join(source, entry.name), path.join(target, entry.name));
+    });
+    return;
+  }
+
+  if (!stats.isFile()) {
+    throw new Error(`unsupported runtime state path type: ${source}`);
+  }
+
+  ensureDirectory(path.dirname(target));
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.copyFileSync(source, target);
+}
+
 function backupPackagedRuntimeState() {
   if (!isWindowsNsisInstalledApp()) {
     return;
@@ -460,8 +496,7 @@ function backupPackagedRuntimeState() {
     if (!fs.existsSync(absolutePath)) {
       return;
     }
-    ensureDirectory(path.dirname(backupPath));
-    fs.copyFileSync(absolutePath, backupPath);
+    copyRuntimeStatePathSync(absolutePath, backupPath);
     backedUpFiles.push(relativePath);
   });
 
@@ -527,8 +562,7 @@ function restorePackagedRuntimeStateFromBackup() {
         if (!fs.existsSync(source)) {
           return;
         }
-        ensureDirectory(path.dirname(target));
-        fs.copyFileSync(source, target);
+        copyRuntimeStatePathSync(source, target);
         result.restored.push(relativePath);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -600,8 +634,7 @@ function migrateMacPackagedRuntimeState() {
     }
 
     try {
-      ensureDirectory(path.dirname(target));
-      fs.copyFileSync(source, target);
+      copyRuntimeStatePathSync(source, target);
       result.migrated.push(relativePath);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -628,6 +661,56 @@ function resolveBackendPath() {
   }
 
   return null;
+}
+
+function extendMacDesktopBackendPath(rawPath) {
+  if (!isMac) {
+    return rawPath;
+  }
+
+  const seen = new Set();
+  const entries = String(rawPath || '')
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .filter((entry) => {
+      if (seen.has(entry)) {
+        return false;
+      }
+      seen.add(entry);
+      return true;
+    });
+
+  [...MAC_DESKTOP_CLI_PATH_ENTRIES, ...MAC_DESKTOP_SYSTEM_PATH_ENTRIES].forEach((entry) => {
+    if (!seen.has(entry)) {
+      entries.push(entry);
+      seen.add(entry);
+    }
+  });
+
+  return entries.join(path.delimiter);
+}
+
+function buildBackendEnvironment({ envFile, dbPath, logDir, sourceEnv = process.env }) {
+  const env = {
+    ...sourceEnv,
+    DSA_DESKTOP_MODE: 'true',
+    ENV_FILE: envFile,
+    DATABASE_PATH: dbPath,
+    LOG_DIR: logDir,
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+    WEBUI_ENABLED: 'false',
+    BOT_ENABLED: 'false',
+    DINGTALK_STREAM_ENABLED: 'false',
+    FEISHU_STREAM_ENABLED: 'false',
+  };
+
+  if (isMac) {
+    env.PATH = extendMacDesktopBackendPath(sourceEnv.PATH);
+  }
+
+  return env;
 }
 
 function sleep(ms) {
@@ -899,20 +982,7 @@ function startBackend({ port, envFile, dbPath, logDir }) {
   backendStartError = null;
   const launchStartedAt = Date.now();
 
-  const env = {
-    ...process.env,
-    DSA_DESKTOP_MODE: 'true',
-    ENV_FILE: envFile,
-    DATABASE_PATH: dbPath,
-    LOG_DIR: logDir,
-    PYTHONUTF8: '1',
-    PYTHONIOENCODING: 'utf-8',
-    SCHEDULE_ENABLED: 'false',
-    WEBUI_ENABLED: 'false',
-    BOT_ENABLED: 'false',
-    DINGTALK_STREAM_ENABLED: 'false',
-    FEISHU_STREAM_ENABLED: 'false',
-  };
+  const env = buildBackendEnvironment({ envFile, dbPath, logDir });
 
   const args = ['--serve-only', '--host', '127.0.0.1', '--port', String(port)];
   let launchMode = '';
@@ -1706,9 +1776,12 @@ module.exports = {
   UPDATE_MODE,
   UPDATE_STATUS,
   buildUpdateState,
+  backupPackagedRuntimeState,
   checkForDesktopUpdates,
   compareVersions,
   evaluateReleaseUpdate,
+  buildBackendEnvironment,
+  extendMacDesktopBackendPath,
   extractReleaseMetadata,
   fetchLatestReleaseJson,
   buildMainPageUrl,

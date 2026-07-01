@@ -714,6 +714,9 @@ class AgentOrchestrator:
             ctx.meta["report_language"] = normalize_report_language(context.get("report_language", "zh"))
             if context.get("market_phase_context"):
                 ctx.meta["market_phase_context"] = context["market_phase_context"]
+            daily_market_context = context.get("daily_market_context")
+            if isinstance(daily_market_context, dict) and daily_market_context:
+                ctx.meta["daily_market_context"] = dict(daily_market_context)
             analysis_context_pack_summary = context.get("analysis_context_pack_summary")
             if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
                 ctx.meta["analysis_context_pack_summary"] = analysis_context_pack_summary

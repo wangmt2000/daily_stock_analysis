@@ -27,6 +27,8 @@ from typing import Any, Callable, Dict, List, Optional
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.tools.registry import ToolRegistry
 from src.agent.stock_scope import StockScope
+from src.llm.usage import should_persist_usage_telemetry
+from src.utils.data_processing import normalize_report_signal_attribution
 from src.storage import persist_llm_usage as _persist_usage
 
 logger = logging.getLogger(__name__)
@@ -225,19 +227,23 @@ def parse_dashboard_json(content: str) -> Optional[Dict[str, Any]]:
         for block in json_blocks:
             parsed = _try_parse_json(block)
             if parsed is not None:
+                normalize_report_signal_attribution(parsed)
                 return parsed
             parsed = _try_repair_json(block, repair_json)
             if parsed is not None:
+                normalize_report_signal_attribution(parsed)
                 return parsed
 
     # Strategy 2: raw parse
     parsed = _try_parse_json(content)
     if parsed is not None:
+        normalize_report_signal_attribution(parsed)
         return parsed
 
     # Strategy 3: json_repair on full content
     parsed = _try_repair_json(content, repair_json)
     if parsed is not None:
+        normalize_report_signal_attribution(parsed)
         return parsed
 
     # Strategy 4: brace-delimited
@@ -247,9 +253,11 @@ def parse_dashboard_json(content: str) -> Optional[Dict[str, Any]]:
         candidate = content[brace_start : brace_end + 1]
         parsed = _try_parse_json(candidate)
         if parsed is not None:
+            normalize_report_signal_attribution(parsed)
             return parsed
         parsed = _try_repair_json(candidate, repair_json)
         if parsed is not None:
+            normalize_report_signal_attribution(parsed)
             return parsed
 
     logger.warning("Failed to parse dashboard JSON from agent response")
@@ -521,7 +529,7 @@ def run_agent_loop(
         if m and m != "error":
             models_used.append(m)
         model_for_usage = m or response.provider
-        if model_for_usage and model_for_usage != "error" and response.usage:
+        if model_for_usage and model_for_usage != "error" and should_persist_usage_telemetry(response.usage):
             _persist_usage(response.usage, model_for_usage, call_type="agent")
 
         remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
