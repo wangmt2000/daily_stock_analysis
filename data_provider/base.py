@@ -76,6 +76,7 @@ def normalize_stock_code(stock_code: str) -> str:
     - 'SH600519'    -> '600519'   (strip SH prefix)
     - 'SH.600519'   -> '600519'   (strip SH. prefix)
     - 'SZ000001'    -> '000001'   (strip SZ prefix)
+    - 'SS600519'    -> '600519'   (strip legacy Yahoo Shanghai prefix)
     - 'SZ.000001'   -> '000001'   (strip SZ. prefix)
     - 'BJ920748'    -> '920748'   (strip BJ prefix, BSE)
     - 'BJ.920748'   -> '920748'   (strip BJ. prefix, BSE)
@@ -103,15 +104,15 @@ def normalize_stock_code(stock_code: str) -> str:
         if candidate.isdigit() and 1 <= len(candidate) <= 5:
             return f"HK{candidate.zfill(5)}"
 
-    # Strip SH/SZ prefix (e.g. SH600519 -> 600519)
-    if upper.startswith(('SH', 'SZ')) and not upper.startswith('SH.') and not upper.startswith('SZ.'):
+    # Strip SH/SZ/SS prefix (e.g. SH600519 -> 600519, SS600519 -> 600519)
+    if upper.startswith(('SH', 'SZ', 'SS')) and not upper.startswith(('SH.', 'SZ.', 'SS.')):
         candidate = code[2:]
         # Only strip if the remainder looks like a valid numeric code
         if candidate.isdigit() and len(candidate) in (5, 6):
             return candidate
 
-    # Strip dotted SH/SZ prefix (e.g. SH.600519 -> 600519)
-    if upper.startswith(('SH.', 'SZ.')):
+    # Strip dotted SH/SZ/SS prefix (e.g. SH.600519 -> 600519)
+    if upper.startswith(('SH.', 'SZ.', 'SS.')):
         candidate = code[3:]
         if candidate.isdigit() and len(candidate) in (5, 6):
             return candidate
@@ -163,7 +164,10 @@ def _is_hk_market(code: str) -> bool:
     """
     判定是否为港股代码。
 
-    支持 `HK00700` 及纯 5 位数字形式（A 股 ETF/股票常见为 6 位）。
+    支持 ``.HK`` 后缀、``HK00700`` 前缀形式，以及 4-5 位纯数字裸码
+    （A 股 ETF/股票为 6 位，与港股 4-5 位裸数字不冲突）。``YfinanceFetcher``
+    与 ``AkshareFetcher`` / ``LongbridgeFetcher`` 的 ``_is_hk_code`` 与本
+    函数对裸港股码的位数范围保持一致。
     """
     normalized = (code or "").strip().upper()
     if normalized.endswith(".HK"):
@@ -172,7 +176,7 @@ def _is_hk_market(code: str) -> bool:
     if normalized.startswith("HK"):
         digits = normalized[2:]
         return digits.isdigit() and 1 <= len(digits) <= 5
-    if normalized.isdigit() and len(normalized) == 5:
+    if normalized.isdigit() and 4 <= len(normalized) <= 5:
         return True
     return False
 
@@ -1149,6 +1153,7 @@ class DataFetcherManager:
           2. PytdxFetcher (Priority 2) - 通达信
           3. BaostockFetcher (Priority 3)
           4. YfinanceFetcher (Priority 4)
+          5. TencentFetcher (Priority 5) - A 股最终兜底
         """
         from src.config import get_config
         from .efinance_fetcher import EfinanceFetcher
@@ -1214,11 +1219,11 @@ class DataFetcherManager:
         with self._fetchers_lock:
             self._fetchers = [
                 efinance,
-                tencent,
                 akshare,
                 pytdx,
                 baostock,
                 yfinance,
+                tencent,
                 *optional_fetchers,
             ]
 
@@ -2981,11 +2986,17 @@ class DataFetcherManager:
                 except Exception as exc:  # noqa: BLE001 - wiring failure: loud but fail-open
                     logger.error("[tw-inst] fetcher init failed (wiring bug?) code=%s: %s", stock_code, exc)
                     fetcher = None
-            if fetcher is not None:
-                # Run the fetch under the SAME fundamental stage/fetch budget as the other
-                # offshore blocks (_run_with_retry) so a slow / rate-limited TWSE/TPEx call
-                # cannot push the analysis past its deadline — it fails open on timeout.
-                inst_timeout = min(fetch_timeout, max(stage_timeout - (time.time() - start_ts), 0.0))
+            # fetch_timeout == 0 disables per-fetch fundamental fetches (same as valuation /
+            # bundle above, which gate on fetch_timeout); honour that for institution too so
+            # the FUNDAMENTAL_FETCH_TIMEOUT_SECONDS=0 config semantic is not bypassed.
+            if fetcher is not None and fetch_timeout > 0:
+                # The tw institution block is a WHOLE-MARKET download (~4-5s), far slower
+                # than the per-symbol quote/bundle fetches, and it is the LAST offshore
+                # block. When enabled, give it the full REMAINING stage budget rather than
+                # the ~3s per-fetch cap that starves it and makes the first/only stock of a
+                # run coin-flip between ok and not_supported. Bounded by the stage deadline
+                # via _run_with_retry, so it fails open (never blocks).
+                inst_timeout = max(stage_timeout - (time.time() - start_ts), 0.0)
                 if inst_timeout > 0:
                     tw_record, inst_err, _inst_ms = self._run_with_retry(
                         lambda: fetcher.get_institutional_net(stock_code),

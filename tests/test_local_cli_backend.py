@@ -23,6 +23,7 @@ from src.llm import local_cli_backend as local_cli_backend_module  # noqa: E402
 from src.llm.generation_backend import GenerationError, GenerationErrorCode  # noqa: E402
 from src.llm.local_cli_backend import (  # noqa: E402
     CLAUDE_CODE_CLI_PRESET,
+    CODEX_CLI_PRESET,
     LocalCliGenerationBackend,
     LocalCliExecutionResult,
     LocalCliExtractionError,
@@ -126,6 +127,16 @@ print({final_payload!r})
     assert "OpenAI Codex" in result.diagnostics["stdout_preview"]
     assert "final-message omitted" in result.diagnostics["stdout_preview"]
     assert "last_message" not in result.diagnostics["stdout_preview"]
+
+
+def test_codex_preset_pins_noninteractive_approval_policy_before_exec() -> None:
+    assert CODEX_CLI_PRESET.argv[:3] == (
+        "--ask-for-approval",
+        "never",
+        "exec",
+    )
+    assert CODEX_CLI_PRESET.argv[4:6] == ("--sandbox", "read-only")
+    assert CODEX_CLI_PRESET.contract_args[:3] == CODEX_CLI_PRESET.argv[:3]
 
 
 def test_claude_preset_runtime_argv_contains_contract_args(tmp_path: Path) -> None:
@@ -374,6 +385,53 @@ print(json.dumps({{"type": "step_finish", "reason": "stop"}}))
     assert result.provider == "opencode_cli"
     assert result.model == "opencode_cli"
     assert result.usage["backend"] == "opencode_cli"
+
+
+def test_opencode_static_instruction_does_not_force_stock_json_contract() -> None:
+    instruction = " ".join(str(arg) for arg in OPENCODE_CLI_PRESET.argv)
+    normalized_instruction = instruction.lower()
+
+    assert "attached prompt file" in instruction
+    assert "json object" not in normalized_instruction
+    assert "parser contract" not in normalized_instruction
+    for field_name in (
+        "sentiment_score",
+        "trend_prediction",
+        "operation_advice",
+        "analysis_summary",
+        "dashboard",
+    ):
+        assert field_name not in instruction
+
+
+def test_opencode_preset_accepts_free_text_without_json_validator(tmp_path: Path) -> None:
+    review = "## 今日复盘\n\n市场震荡，保持观察。"
+    script = _script(
+        tmp_path,
+        f"""
+import json
+print(json.dumps({{"type": "step_start"}}))
+print(json.dumps({{"type": "text", "part": {{"text": {review!r}}}}}, ensure_ascii=False))
+print(json.dumps({{"type": "step_finish", "reason": "stop"}}))
+""",
+    )
+    preset = LocalCliPreset(
+        preset_id="opencode_cli",
+        executable=sys.executable,
+        argv=(script, *OPENCODE_CLI_PRESET.argv),
+        display_name="Mock OpenCode CLI",
+        extractor=OPENCODE_CLI_PRESET.extractor,
+        contract_args=OPENCODE_CLI_PRESET.contract_args,
+        prompt_transport=OPENCODE_CLI_PRESET.prompt_transport,
+    )
+    backend = LocalCliGenerationBackend(
+        _config(generation_backend="opencode_cli"),
+        preset=preset,
+    )
+
+    result = backend.generate("请生成 Markdown 复盘", {}, response_validator=None)
+
+    assert result.text == review
 
 
 def test_opencode_model_override_inserts_model_arg(tmp_path: Path) -> None:

@@ -53,7 +53,18 @@ MARKET_TIMEZONE = {
 # P0 market phase baseline (Issue #1386). This is an intentionally small
 # regular-session inference layer; it does not change existing fail-open
 # trading-day filtering or effective-date behavior.
-_CLOSING_AUCTION_WINDOW_MINUTES = {"cn": 3, "hk": 10, "us": 5}
+# tw: TWSE/TPEx run a 13:25-13:30 closing call auction (5 min). JP/KR use
+# regular-session closing auction windows before the 15:30 close (JP 5 min,
+# KR 10 min). Without an entry here .get(market, 0) yields a zero-width
+# window, so the last regular-session minutes stay INTRADAY until POSTMARKET.
+_CLOSING_AUCTION_WINDOW_MINUTES = {
+    "cn": 3,
+    "hk": 10,
+    "us": 5,
+    "jp": 5,
+    "kr": 10,
+    "tw": 5,
+}
 _SUPPORTED_ANALYSIS_PHASES = {
     "auto",
     "premarket",
@@ -235,6 +246,60 @@ def get_effective_trading_date(
     except Exception as e:
         logger.warning("trading_calendar.get_effective_trading_date fail-open: %s", e)
         return fallback_date
+
+
+def resolve_historical_daily_bar_date(
+    market: Optional[str],
+    target_date: date,
+    phase: Optional[str],
+) -> Optional[date]:
+    """Resolve the completed daily bar that a historical phase could consume.
+
+    A persisted ``effective_daily_bar_date`` remains the primary authority.
+    This fallback is only for older snapshots that still contain a trustworthy
+    phase. It fails closed for missing, unknown, or calendar-inconsistent phases.
+    """
+    if market not in MARKET_EXCHANGE or not _XCALS_AVAILABLE:
+        return None
+
+    normalized_phase = str(phase or "").strip().lower()
+    if normalized_phase not in {
+        "premarket",
+        "intraday",
+        "lunch_break",
+        "closing_auction",
+        "postmarket",
+        "non_trading",
+    }:
+        return None
+
+    try:
+        cal = xcals.get_calendar(MARKET_EXCHANGE[market])
+        is_session = bool(cal.is_session(target_date))
+
+        if normalized_phase in {
+            "premarket",
+            "intraday",
+            "lunch_break",
+            "closing_auction",
+        }:
+            if not is_session:
+                return None
+            session = cal.date_to_session(target_date, direction="previous")
+            return cal.previous_session(session).date()
+
+        if normalized_phase == "postmarket":
+            return target_date if is_session else None
+
+        if is_session:
+            return None
+        return cal.date_to_session(target_date, direction="previous").date()
+    except Exception as e:
+        logger.warning(
+            "trading_calendar.resolve_historical_daily_bar_date fail-closed: %s",
+            e,
+        )
+        return None
 
 
 def _as_market_datetime(value: Any, tz_name: str) -> Optional[datetime]:

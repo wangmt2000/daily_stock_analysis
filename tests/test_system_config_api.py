@@ -20,8 +20,11 @@ from api.middlewares.auth import add_auth_middleware
 from api.middlewares.error_handler import add_error_handlers
 from api.v1.endpoints import system_config
 from api.v1.schemas.system_config import (
+    AgentBackendStatusPreviewRequest,
     DiscoverLLMChannelModelsRequest,
+    GenerationBackendStatusPreviewRequest,
     ImportSystemConfigRequest,
+    TestGenerationBackendRequest,
     TestLLMChannelRequest,
     TestNotificationChannelRequest,
     UpdateSystemConfigRequest,
@@ -163,6 +166,11 @@ class SystemConfigApiTestCase(unittest.TestCase):
         self.assertNotIn("codex_cli", {option["value"] for option in agent_schema["options"]})
         self.assertNotIn("claude_code_cli", {option["value"] for option in agent_schema["options"]})
         self.assertNotIn("opencode_cli", {option["value"] for option in agent_schema["options"]})
+        backend_schema = item_map["AGENT_BACKEND"]["schema"]
+        self.assertEqual(
+            backend_schema["validation"]["enum"],
+            ["auto", "litellm", "codex_app_server"],
+        )
         generation_schema = item_map["GENERATION_BACKEND"]["schema"]
         self.assertIn("claude_code_cli", generation_schema["validation"]["enum"])
         self.assertIn("opencode_cli", generation_schema["validation"]["enum"])
@@ -202,6 +210,151 @@ class SystemConfigApiTestCase(unittest.TestCase):
         check_map = {check["key"]: check for check in payload["checks"]}
         self.assertEqual(check_map["llm_primary"]["status"], "configured")
         self.assertEqual(check_map["llm_agent"]["status"], "inherited")
+
+    def test_get_generation_backend_status_uses_saved_config_only(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=litellm",
+            "LITELLM_MODEL=gemini/gemini-3-flash-preview",
+            "GEMINI_API_KEY=secret-key-value",
+        )
+
+        payload = system_config.get_generation_backend_status(service=self.service).model_dump()
+
+        self.assertEqual(payload["primary_backend_id"], "litellm")
+        self.assertEqual(payload["primary"]["backend_id"], "litellm")
+        self.assertTrue(payload["primary"]["available"])
+
+    def test_preview_generation_backend_status_uses_draft_items(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=litellm",
+            "LITELLM_MODEL=gemini/gemini-3-flash-preview",
+            "GEMINI_API_KEY=secret-key-value",
+        )
+
+        with patch("src.llm.local_cli_backend.shutil.which", return_value=None):
+            payload = system_config.preview_generation_backend_status(
+                request=GenerationBackendStatusPreviewRequest(
+                    items=[
+                        {"key": "GENERATION_BACKEND", "value": "codex_cli"},
+                        {"key": "GENERATION_FALLBACK_BACKEND", "value": ""},
+                    ],
+                    mask_token="******",
+                ),
+                service=self.service,
+            ).model_dump()
+
+        self.assertEqual(payload["primary_backend_id"], "codex_cli")
+        self.assertFalse(payload["primary"]["available"])
+        self.assertEqual(payload["primary"]["last_error_code"], "command_not_found")
+
+        saved_payload = system_config.get_generation_backend_status(service=self.service).model_dump()
+        self.assertEqual(saved_payload["primary_backend_id"], "litellm")
+
+    def test_generation_backend_smoke_test_returns_structured_failure(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=codex_cli",
+            "GENERATION_FALLBACK_BACKEND=",
+        )
+
+        with patch("src.llm.local_cli_backend.shutil.which", return_value=None):
+            payload = system_config.test_generation_backend(
+                request=TestGenerationBackendRequest(backend_id="codex_cli"),
+                service=self.service,
+            ).model_dump()
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["mode"], "json")
+        self.assertEqual(payload["status"]["backend_id"], "codex_cli")
+        self.assertEqual(payload["status"]["last_error_code"], "command_not_found")
+
+    def test_preview_generation_backend_status_returns_validation_error_for_bad_draft(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=codex_cli",
+            "GENERATION_FALLBACK_BACKEND=",
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            system_config.preview_generation_backend_status(
+                request=GenerationBackendStatusPreviewRequest(
+                    items=[{"key": "GENERATION_BACKEND_TIMEOUT_SECONDS", "value": "not-int"}],
+                    mask_token="******",
+                ),
+                service=self.service,
+            )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail["error"], "validation_failed")
+        self.assertEqual(ctx.exception.detail["issues"][0]["key"], "GENERATION_BACKEND_TIMEOUT_SECONDS")
+
+    def test_preview_agent_backend_status_uses_draft_without_persisting(self) -> None:
+        before = self.env_path.read_text(encoding="utf-8")
+        before_version = self.manager.get_config_version()
+
+        def fake_run(command, **kwargs):
+            if command[-1] == "--version":
+                return SimpleNamespace(returncode=0, stdout="codex-cli test\n")
+            if "generate-json-schema" in command:
+                schema_dir = Path(command[command.index("--out") + 1])
+                (schema_dir / "v2").mkdir(parents=True, exist_ok=True)
+                (schema_dir / "v2" / "ThreadStartParams.json").write_text(
+                    '{"properties":{"dynamicTools":{},"runtimeWorkspaceRoots":{}}}',
+                    encoding="utf-8",
+                )
+                (schema_dir / "v2" / "ThreadStartResponse.json").write_text(
+                    '{"properties":{"activePermissionProfile":{},"runtimeWorkspaceRoots":{}}}',
+                    encoding="utf-8",
+                )
+                (schema_dir / "ClientRequest.json").write_text(
+                    '["thread/inject_items","turn/start","turn/interrupt","config/read","mcpServerStatus/list"]',
+                    encoding="utf-8",
+                )
+                (schema_dir / "ServerRequest.json").write_text(
+                    '{"const":"item/tool/call"}',
+                    encoding="utf-8",
+                )
+                (schema_dir / "ServerNotification.json").write_text(
+                    '["item/completed","turn/completed"]',
+                    encoding="utf-8",
+                )
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with (
+            patch(
+                "src.services.agent_backend_status_service.resolve_command",
+                return_value=["/test/codex"],
+            ),
+            patch("src.services.agent_backend_status_service._run_codex_probe", side_effect=fake_run),
+        ):
+            payload = system_config.preview_agent_backend_status(
+                request=AgentBackendStatusPreviewRequest(
+                    items=[
+                        {"key": "AGENT_BACKEND", "value": "codex_app_server"},
+                        {"key": "AGENT_ARCH", "value": "single"},
+                    ]
+                ),
+                service=self.service,
+            ).model_dump()
+
+        self.assertEqual(payload["backend"], "codex_app_server")
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["version"], "codex-cli test")
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.manager.get_config_version(), before_version)
+
+    def test_preview_agent_backend_status_returns_flat_unavailable_for_codex_multi_draft(self) -> None:
+        payload = system_config.preview_agent_backend_status(
+            request=AgentBackendStatusPreviewRequest(
+                items=[
+                    {"key": "AGENT_BACKEND", "value": "codex_app_server"},
+                    {"key": "AGENT_ARCH", "value": "multi"},
+                ]
+            ),
+            service=self.service,
+        ).model_dump()
+
+        self.assertEqual(payload["backend"], "codex_app_server")
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["error_code"], "unsupported_agent_arch")
 
     def test_put_config_updates_secret_and_plain_field(self) -> None:
         current = system_config.get_system_config(include_schema=False, service=self.service).model_dump()
@@ -756,7 +909,19 @@ class SystemConfigApiTestCase(unittest.TestCase):
         self.assertEqual(mock_test.call_args.kwargs["channel"], "wechat")
         self.assertEqual(mock_test.call_args.kwargs["timeout_seconds"], 5)
 
-    def test_test_notification_channel_schema_accepts_p6_channels(self) -> None:
+    def test_test_notification_channel_schema_accepts_registered_channels(self) -> None:
+        dingtalk_request = TestNotificationChannelRequest(
+            channel="dingtalk",
+            items=[
+                {
+                    "key": "DINGTALK_WEBHOOK_URL",
+                    "value": "https://oapi.dingtalk.com/robot/send?access_token=test",
+                }
+            ],
+            title="DSA 閫氱煡娴嬭瘯",
+            content="hello",
+            timeout_seconds=5,
+        )
         ntfy_request = TestNotificationChannelRequest(
             channel="ntfy",
             items=[{"key": "NTFY_URL", "value": "https://ntfy.sh/dsa-topic"}],
@@ -775,6 +940,7 @@ class SystemConfigApiTestCase(unittest.TestCase):
             timeout_seconds=5,
         )
 
+        self.assertEqual(dingtalk_request.channel, "dingtalk")
         self.assertEqual(ntfy_request.channel, "ntfy")
         self.assertEqual(gotify_request.channel, "gotify")
 
