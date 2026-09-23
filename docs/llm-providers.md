@@ -4,7 +4,7 @@
 
 > 本页未引入新的外部 provider、模型名或 Base URL 兼容行为，仅整理配置参考与官方来源；实际兼容性仍以仓库当前运行时依赖与测试结论为准。
 
-> - 运行时基础：`requirements.txt` 当前锁定 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0`，兼容语义以该版本约束下实现为准。
+> - 运行时基础：`requirements.txt` 当前锁定 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0`，兼容语义以该版本约束下实现为准。
 > - 验证闭环：系统配置链路回归见 `tests/test_system_config_service.py` 与 `tests/test_system_config_api.py`，`Web` 侧配置页交互回归见现有组件测试用例。
 > - 回退路径：保留旧变量不做自动迁移；可通过 Web/桌面导出备份后 `POST /api/v1/system/config/import` 回滚，或手动恢复历史 `LLM_*` / `LITELLM_*` / `AGENT_*` / `VISION_MODEL` 配置。
 
@@ -76,6 +76,7 @@ LITELLM_MODEL=deepseek/deepseek-v4-flash
 ```env
 LLM_CHANNELS=my_proxy
 LLM_MY_PROXY_PROTOCOL=openai
+LLM_MY_PROXY_API_SURFACE=chat_completions
 LLM_MY_PROXY_BASE_URL=https://your-proxy.example.com/v1
 LLM_MY_PROXY_API_KEY=sk-xxx
 LLM_MY_PROXY_MODELS=gpt-5.5,claude-sonnet-4-6
@@ -83,6 +84,23 @@ LLM_MY_PROXY_MODELS=gpt-5.5,claude-sonnet-4-6
 
 OpenAI-compatible Base URL 只填到服务商兼容入口，不额外拼接 `/chat/completions`。本地 `.env`、Docker 和自托管脚本可以直接使用自定义 channel；GitHub Actions 需要 workflow 显式透传同名 `LLM_MY_PROXY_*` 变量。
 小米 MiMo 示例同理：适用于本地 `.env`、Docker 或自托管脚本；若在 GitHub Actions 使用 `LLM_CHANNELS=mimo`，需要在 workflow 中手动补齐 `LLM_MIMO_*` 映射后方可生效。
+
+### Anspire Responses API（GPT-5.6 名称为观测样本）
+
+Anspire 官方接入页公开了 `https://open-gateway.anspire.cn/v6/responses` 调用方式：<https://open.anspire.cn/model?link=sample&tab=models>。如果实时 `/models`、服务商说明和连接测试确认目标模型使用 Responses，可把模型放在同一渠道，并显式把 API Surface 设为 `responses`。下面的 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 是当前网关观测样本，不作为长期模型清单承诺：
+
+```env
+LLM_CHANNELS=anspire
+LLM_ANSPIRE_PROTOCOL=openai
+LLM_ANSPIRE_API_SURFACE=responses
+LLM_ANSPIRE_BASE_URL=https://open-gateway.anspire.cn/v6
+LLM_ANSPIRE_API_KEY=sk-xxx
+LLM_ANSPIRE_MODELS=gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna
+LITELLM_MODEL=openai/gpt-5.6-sol
+LITELLM_FALLBACK_MODELS=openai/gpt-5.6-terra,openai/gpt-5.6-luna
+```
+
+这里的能力不依赖 `gpt-5.6-*` 命名：任何服务商明确声明为 Responses-only 的模型都可使用同一配置方式。模型清单和账号权限可能变化，应以服务商 `/models` 返回、官方说明及实际连接测试为准。一个渠道只能使用一种 API Surface；若还要同时使用 Anspire 的 Chat Completions 模型，请为它们建立另一个 OpenAI-compatible 渠道，不要把两类模型混在同一渠道中。Web 设置页的「测试连接」会使用当前选择的 Surface，运行时不会在失败后静默改用另一个 endpoint。
 
 ## 常用服务商预设
 
@@ -123,11 +141,13 @@ OpenAI-compatible Base URL 只填到服务商兼容入口，不额外拼接 `/ch
 | OpenRouter | [Models API](https://openrouter.ai/docs/api/api-reference/models/get-models) | OpenRouter 支持 `~anthropic/claude-sonnet-latest`、`~openai/gpt-latest` 等 latest router alias；2026-05-03 的一次手动 live smoke 以 Claude Sonnet latest 作为默认示例通过，GPT latest 保留为可按账号权限切换的备选。 |
 | LiteLLM | [OpenAI-Compatible Endpoints](https://docs.litellm.ai/docs/providers/openai_compatible) | OpenAI-compatible 端点需要把运行时模型写成 `openai/<model>`，Base URL 只填到服务商兼容入口，不额外拼接 `/chat/completions`。 |
 
-本页预设只保证配置形状与当前依赖的 OpenAI-compatible 路由规则一致；实际连通性仍取决于服务商账号权限、地域、额度和模型开通状态。当前 LiteLLM 版本约束为 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0`（见 `requirements.txt`），保留历史最低版本、显式排除 PyPI 事故版本，并避免未来大版本自动进入。
+本页预设只保证配置形状与当前依赖的 OpenAI-compatible 路由规则一致；实际连通性仍取决于服务商账号权限、地域、额度和模型开通状态。当前 LiteLLM 版本约束为 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0`（见 `requirements.txt`），保留历史最低版本、显式排除 PyPI 事故版本，并将上界收敛到已验证的 `<1.99.0`，避免未来大版本自动进入。
 
 ## OpenAI-compatible 与 LiteLLM 规则
 
 - OpenAI-compatible provider 的 channel `protocol` 通常是 `openai`。
+- `LLM_<CHANNEL>_API_SURFACE` 默认是 `chat_completions`；Responses-only 模型显式设为 `responses`。Responses 渠道要求协议及每个模型的实际 LiteLLM provider 都是 `openai`；直连 provider 从当前安装的 LiteLLM registry 获取，并由系统配置 API 返回给 Web 编辑器作为共同真源。因此显式 `anthropic/`、`gemini/`、`xai/` 以及未来新增的冲突前缀都会在所有配置入口被一致识别，网关自有的 `deepseek-ai/...`、`Qwen/...` 等带斜杠模型 ID 则会规范化到 `openai/<model>`。同一个规范化公开 alias 不得跨渠道混用 Chat 与 Responses，避免 Router 在不同 Surface deployment 间负载均衡。运行时保留公开模型别名 `openai/<model>`，并通过 LiteLLM 的 `openai/responses/<model>` 桥接调用 `/responses`。
+- 该设计与主流项目的显式路由方式一致：[LiteLLM](https://github.com/BerriAI/litellm/blob/main/litellm/responses/main.py) 提供 Chat-to-Responses bridge，[OpenAI Agents SDK](https://openai.github.io/openai-agents-python/models/) 使用独立 Responses/Chat 模型类，[LangChain](https://docs.langchain.com/oss/python/integrations/chat/openai) 使用 `use_responses_api` 显式选择并仅在已知条件下自动路由。DSA 不在请求失败后猜测 endpoint，避免双请求、重复计费及掩盖真实服务端错误。
 - 运行时模型名通常写成 `openai/<model>`；例如自定义网关里的 `gpt-5.5` 可以作为 `openai/gpt-5.5` 被 LiteLLM 路由。
 - `Qwen/...`、`deepseek-ai/...` 这类是服务商或模型仓库组织名前缀，不等同于 LiteLLM provider prefix；不要因为它们包含斜杠就误判为 `provider/model` 路由。
 - Base URL 只填官方或网关给出的兼容入口，通常到 `/v1`、`/api/v3` 或厂商文档指定路径；不要手动追加 `/chat/completions`。
@@ -141,6 +161,7 @@ OpenAI-compatible Base URL 只填到服务商兼容入口，不额外拼接 `/ch
 | --- | --- | --- |
 | `LLM_CHANNELS` | Variables 或 Secrets | 逗号分隔渠道名，例如 `deepseek,minimax,volcengine`。 |
 | `LLM_<CHANNEL>_PROTOCOL` | Variables 或 Secrets | 非敏感，通常为 `openai`、`deepseek`、`gemini`、`anthropic` 或 `ollama`。 |
+| `LLM_<CHANNEL>_API_SURFACE` | Variables 或 Secrets | 可选；`chat_completions`（默认）或 `responses`。Responses 当前只支持 `openai` 协议。 |
 | `LLM_<CHANNEL>_BASE_URL` | Variables 或 Secrets | 非敏感时优先放 Variables；私有网关地址可放 Secrets。 |
 | `LLM_<CHANNEL>_MODELS` | Variables 或 Secrets | 非敏感模型列表，逗号分隔。 |
 | `LLM_<CHANNEL>_ENABLED` | Variables 或 Secrets | 可选，未配置时默认启用；设为 `false` 可跳过该渠道。 |
@@ -205,7 +226,7 @@ Phase 3 只支持普通分析 / JSON generation，不支持 stream/SSE、tools�
 
 - SiliconFlow 官方错误处理文档要求接口错误排查时记录 HTTP 错误码和 `message`，说明 403 表示余额不足或权限不够，其他情况参考报错 `message`，并建议换一个模型确认问题是否仍存在（中文：<https://docs.siliconflow.cn/cn/faqs/error-code>；英文：<https://docs.siliconflow.cn/en/faqs/error-code>）。
 - Issue #1208 中真实脱敏样例来自 SiliconFlow / OpenAI Compatible 渠道测试，经 LiteLLM 返回 `litellm.APIError: APIError: OpenAIException - Model disabled.`。
-- 线上复核记录（2026-05-06T16:21:21Z）：在 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0` 约束下，本地验证环境为 Python `3.13.12`、LiteLLM `1.82.3`、Base URL `https://api.siliconflow.cn/v1`、模型 `Qwen/Qwen3-235B-A22B-Thinking-2507`。直连 SiliconFlow Chat Completions 返回 HTTP `403`，响应体为 `{"code":30003,"message":"Model disabled.","data":null}`；同一模型通过 LiteLLM `completion(model="openai/Qwen/Qwen3-235B-A22B-Thinking-2507")` 返回 `APIError: OpenAIException - Model disabled.`。
+- 线上复核记录（2026-05-06T16:21:21Z）：在 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0` 约束下，本地验证环境为 Python `3.13.12`、LiteLLM `1.82.3`、Base URL `https://api.siliconflow.cn/v1`、模型 `Qwen/Qwen3-235B-A22B-Thinking-2507`。直连 SiliconFlow Chat Completions 返回 HTTP `403`，响应体为 `{"code":30003,"message":"Model disabled.","data":null}`；同一模型通过 LiteLLM `completion(model="openai/Qwen/Qwen3-235B-A22B-Thinking-2507")` 返回 `APIError: OpenAIException - Model disabled.`。
 
 因此当前运行时把该已观测 provider `message` 作为 best-effort 模型可用性诊断，而不是把它声明为官方跨 provider 错误码。实现仅在错误文本同时包含 `model` 和明确权限、禁用或不可用信号时进入该诊断；未覆盖或语义不同的 provider 文案会继续走既有兜底诊断。`provider_blocked` 同样是基于明确拦截文案的 best-effort 诊断，用于区分服务商/网关策略拦截与本地网络、TLS 或模型不可用问题。
 
@@ -216,7 +237,7 @@ Phase 3 只支持普通分析 / JSON generation，不支持 stream/SSE、tools�
 - 检测结果只代表当前账号、模型和 endpoint 的一次 best-effort 运行时结果。
 - 检测结果不会写回 `.env`，也不会阻止保存配置。
 - 能力检测失败不等于 provider 全局不支持；失败可能来自账号权限、模型未开通、endpoint 区域、余额、服务商兼容层或 LiteLLM 转换路径。
-- 当前实现未对所有真实 provider 做在线 smoke，兼容依据是 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0`（见 `requirements.txt`）、[LiteLLM Python SDK / OpenAI I/O format](https://docs.litellm.ai/)、[LiteLLM OpenAI-compatible 路由](https://docs.litellm.ai/docs/providers/openai_compatible)，以及 OpenAI Chat Completions 的 [JSON mode](https://platform.openai.com/docs/guides/structured-outputs?api-mode=chat)、[tool calling](https://platform.openai.com/docs/guides/function-calling?api-mode=chat)、[streaming](https://platform.openai.com/docs/guides/streaming-responses?api-mode=chat) 和 [vision input](https://platform.openai.com/docs/guides/images-vision?api-mode=chat) 请求形状。
+- 当前实现未对所有真实 provider 做在线 smoke，兼容依据是 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0`（见 `requirements.txt`）、[LiteLLM Python SDK / OpenAI I/O format](https://docs.litellm.ai/)、[LiteLLM OpenAI-compatible 路由](https://docs.litellm.ai/docs/providers/openai_compatible)，以及 OpenAI Chat Completions 的 [JSON mode](https://platform.openai.com/docs/guides/structured-outputs?api-mode=chat)、[tool calling](https://platform.openai.com/docs/guides/function-calling?api-mode=chat)、[streaming](https://platform.openai.com/docs/guides/streaming-responses?api-mode=chat) 和 [vision input](https://platform.openai.com/docs/guides/images-vision?api-mode=chat) 请求形状。
 
 ## 回滚方式
 

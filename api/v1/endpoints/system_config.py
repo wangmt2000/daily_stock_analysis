@@ -63,7 +63,7 @@ def get_scheduler_status(
 @router.post(
     "/scheduler/run-now",
     summary="Run scheduled analysis now",
-    description="Trigger one scheduled analysis run in the current process.",
+    description="Trigger one isolated analysis run through the current runtime scheduler service.",
 )
 def run_scheduler_now(
     scheduler: RuntimeSchedulerService = Depends(get_runtime_scheduler_service),
@@ -582,6 +582,7 @@ def test_llm_channel(
         payload = service.test_llm_channel(
             name=request.name,
             protocol=request.protocol,
+            api_surface=request.api_surface,
             base_url=request.base_url,
             api_key=request.api_key,
             models=request.models,

@@ -103,7 +103,7 @@
    - WebUI 保存后会触发当前进程的配置重载；运行中的读取路径会同步使用最新写回的 `.env`，例如定时任务会继续热读取保存后的 `STOCK_LIST`
    - 如果容器启动命令里传入了这些同名环境变量（如 `--env-file .env`、`docker run -e ...` 或 Compose `environment:`），后续重启时仍可能以启动环境变量为准；要让 WebUI 保存值接管，请同步更新或移除这些同名 override
    - 如需持久化 WebUI 保存的配置，请将 `ENV_FILE` 指向 `/app/data/runtime.env` 等可写数据卷文件，不要把宿主机 `.env` 单文件挂载到 `/app/.env`
-   - `SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`SCHEDULE_TIMES` 保存后会让 WebUI/API/Desktop 长运行进程按新配置启停或重建 runtime scheduler
+   - `SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`SCHEDULE_TIMES` 保存后会让 WebUI/API/Desktop 长运行进程按新配置启停或重建 runtime scheduler；重启 `--serve-only` 或 Desktop 进程时会恢复已启用的 daily jobs，但不会在启动时立即执行分析
    - `SCHEDULE_RUN_IMMEDIATELY` 与 `RUN_IMMEDIATELY` 仍属于启动期/一次性运行配置，保存后不会立即触发一次分析
 3. **Docker 手工改 `.env` 后**：修改后仍建议重启容器
    ```bash
@@ -166,8 +166,21 @@ PROXY_PORT=10809
 1. **自动分块**：最新版本已实现长消息自动切割
 2. **单股推送模式**：设置 `SINGLE_STOCK_NOTIFY=true`，每分析完一只股票立即推送
 3. **精简报告**：设置 `REPORT_TYPE=simple` 使用精简格式
+4. **仅落盘本地报告**：即使未配置任何通知渠道，`SINGLE_STOCK_NOTIFY=true` 仍会把单股报告保存到 `reports/report_YYYYMMDD_<股票代码>.md`
 
 ---
+
+### Q8.1: 分析结束了，但 `reports/` 里没有生成报告文件？
+
+**常见原因**：
+1. `STOCK_LIST` 为空，且本轮未启用大盘复盘
+2. 股票列表非空，但个股分析全部失败，最终没有成功结果
+3. 个股结果已生成，但写入 `reports/` 时失败（如目录权限或挂载问题）
+
+**现在的行为**：
+1. CLI 启动分析会对上述场景显式记录失败原因
+2. 非 `--serve` 的独立运行模式会返回非零退出码，避免工作流把“未生成报告”误判为成功
+3. 若是单股推送模式且通知未配置，仍会继续保存本地 Markdown 报告用于排查
 
 ### Q9: Telegram 推送收不到消息？
 
@@ -345,9 +358,32 @@ OPENAI_MODEL=deepseek-v4-flash
 
 ---
 
+## 🖥️ 桌面端相关
+
+### Q15: macOS 提示“应用已损坏”或无法打开桌面端？
+
+**原因**：当前 macOS DMG 尚未使用 Apple Developer 证书签名和公证。从浏览器下载后，macOS Gatekeeper 可能给应用添加 quarantine（下载隔离）属性并阻止启动。
+
+**解决方案**：
+
+1. 只从项目的 [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) 下载附件，并确认安装包架构与 Mac 一致。不要对第三方转载或来源不明的应用绕过 Gatekeeper。
+2. 将 `Daily Stock Analysis` 拖入“应用程序”，先在“系统设置 → 隐私与安全性”中尝试“仍要打开”。
+3. 如果仍无法启动，并且已经确认文件来自项目官方 Release，可在终端只针对该应用移除 quarantine 属性并启动：
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Daily Stock Analysis.app"
+   open "/Applications/Daily Stock Analysis.app"
+   ```
+
+如果应用不在 `/Applications`，请替换为实际 `.app` 路径。不要对整个 `/Applications` 目录执行 `xattr`。该命令只是临时放行受信任的 unsigned 应用，不等同于签名或公证；完整排查说明见 [桌面端打包与发布](desktop-package.md#macos-提示应用已损坏无法打开)。
+
+> 📌 相关 Issue: [#2113](https://github.com/ZhuLinsen/daily_stock_analysis/issues/2113)
+
+---
+
 ## 🔧 其他问题
 
-### Q15: 如何只运行大盘复盘，不分析个股？
+### Q16: 如何只运行大盘复盘，不分析个股？
 
 **方法**：
 ```bash
@@ -360,7 +396,7 @@ python main.py --market-only
 
 ---
 
-### Q16: 分析结果中买入/观望/卖出数量统计不对？
+### Q17: 分析结果中买入/观望/卖出数量统计不对？
 
 **原因**：早期版本使用正则匹配统计，可能与实际建议不一致。
 
@@ -368,7 +404,7 @@ python main.py --market-only
 
 ---
 
-### Q17: 为什么周末在 GitHub Actions 手动触发仍显示“非交易日跳过”？
+### Q18: 为什么周末在 GitHub Actions 手动触发仍显示“非交易日跳过”？
 
 **现象**：已经配置了 `TRADING_DAY_CHECK_ENABLED` 或希望手动运行，但日志仍提示“今日所有相关市场均为非交易日，跳过执行”。
 
@@ -396,4 +432,4 @@ python main.py --market-only
 
 ---
 
-*最后更新：2026-04-20*
+*最后更新：2026-08-03*

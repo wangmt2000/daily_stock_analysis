@@ -9,6 +9,7 @@ import { formatDateTime } from '../../utils/format';
 import { getMarketPhaseSummaryLabel, getPartialBarLabel } from '../../utils/marketPhase';
 import { getReportText, normalizeReportLanguage } from '../../utils/reportLanguage';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
+import { ShareImageButton } from './ShareImageButton';
 
 interface ReportOverviewProps {
   meta: ReportMeta;
@@ -250,8 +251,8 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
         <div className="lg:col-span-2 space-y-5">
           {/* 股票头部 */}
           <Card variant="gradient" padding="md" className="home-report-hero">
-            <div className="flex items-start justify-between mb-5">
-              <div className="flex-1">
+            <div className="mb-5 flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-3">
                   <h2 className="text-[28px] font-bold leading-tight text-foreground">
                     {meta.stockName || meta.stockCode}
@@ -290,6 +291,11 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
                   </span>
                 </div>
               </div>
+              <ShareImageButton
+                recordId={meta.id}
+                reportTitle={`${meta.stockName || meta.stockCode}-${meta.stockCode}`}
+                reportLanguage={reportLanguage}
+              />
             </div>
 
             {/* 关键结论 */}
@@ -298,6 +304,14 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
               <p className="mt-2 max-w-[62ch] whitespace-pre-wrap text-left text-[15px] leading-7 text-foreground">
                 {summary.analysisSummary || text.noAnalysisSummary}
               </p>
+              {details?.emptyNewsDisclosure ? (
+                <p
+                  role="note"
+                  className="mt-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-left text-sm leading-6 text-foreground"
+                >
+                  {details.emptyNewsDisclosure}
+                </p>
+              ) : null}
             </div>
           </Card>
 
@@ -367,7 +381,7 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
 
         {/* 右侧：情绪指标 / 自选操作 */}
         <div className="flex flex-col space-y-4">
-          {watchlist && meta.reportType !== 'market_review' && (
+          {watchlist && meta.reportType !== 'market_review' && meta.assetType !== 'index' && (
             <Card variant="bordered" padding="sm" className="home-panel-card">
               <div className="text-center space-y-3">
                 <span className="label-uppercase">{t('report.watchlist')}</span>

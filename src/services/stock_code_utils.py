@@ -6,15 +6,33 @@ Shared stock code utilities.
 from __future__ import annotations
 
 import re
+import unicodedata
+from importlib import import_module
 from dataclasses import dataclass
 from typing import List, Optional
 
-from data_provider.base import canonical_stock_code, is_bse_code
-from data_provider.us_index_mapping import is_us_index_code
+from data_provider.base import canonical_stock_code
 from src.services.market_symbol_utils import (
     get_suffix_market,
     normalize_suffix_market_symbol,
     suffix_base_lookup_allowed,
+)
+
+def _load_optional_provider_attr(module_name: str, attr_name: str):
+    """Load optional provider helpers without masking unrelated import failures."""
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name in {module_name, module_name.split(".", 1)[0]}:
+            return None
+        raise
+    return getattr(module, attr_name, None)
+
+
+_provider_is_bse_code = _load_optional_provider_attr("data_provider.base", "is_bse_code")
+_provider_is_us_index_code = _load_optional_provider_attr(
+    "data_provider.us_index_mapping",
+    "is_us_index_code",
 )
 
 
@@ -44,6 +62,23 @@ _SUFFIX_DIGIT_LENS: dict = {
 }
 
 _PRESERVE_SUFFIXES = {".T", ".KS", ".KQ", ".TW", ".TWO"}
+_US_INDEX_CODES = {
+    "SPX",
+    "^GSPC",
+    "GSPC",
+    "DJI",
+    "^DJI",
+    "DJIA",
+    "IXIC",
+    "^IXIC",
+    "NASDAQ",
+    "NDX",
+    "^NDX",
+    "VIX",
+    "^VIX",
+    "RUT",
+    "^RUT",
+}
 
 
 @dataclass(frozen=True)
@@ -88,11 +123,30 @@ def _infer_cn_exchange(base: str) -> str:
     if not (base.isdigit() and len(base) == 6):
         return ""
 
-    if is_bse_code(base):
+    if _is_bse_code(base):
         return "BJ"
     if base.startswith(("5", "6", "9")):
         return "SH"
     return "SZ"
+
+
+def _is_bse_code(code: str) -> bool:
+    """Use provider logic when available; keep a local equivalent for lightweight tests."""
+    if _provider_is_bse_code is not None:
+        return _provider_is_bse_code(code)
+
+    normalized = (code or "").strip().split(".")[0]
+    if len(normalized) != 6 or not normalized.isdigit():
+        return False
+    if normalized.startswith("900"):
+        return False
+    return normalized.startswith(("92", "43", "81", "82", "83", "87", "88"))
+
+
+def _is_us_index_code(code: str) -> bool:
+    if _provider_is_us_index_code is not None:
+        return _provider_is_us_index_code(code)
+    return (code or "").strip().upper() in _US_INDEX_CODES
 
 
 def _valid_exchange_code(exchange: str, base: str, digit_lens: tuple[int, ...]) -> bool:
@@ -249,7 +303,7 @@ def _build_market_code_variants(
             exchange = "SH"
         elif explicit_exchange == "SZ":
             exchange = "SZ"
-        elif explicit_exchange == "BJ" or is_bse_code(normalized_upper):
+        elif explicit_exchange == "BJ" or _is_bse_code(normalized_upper):
             exchange = "BJ"
         elif normalized_upper.startswith(("5", "6", "9")):
             exchange = "SH"
@@ -298,7 +352,9 @@ def resolve_daily_stock_identity(
 
     identity_code = raw_code
     trusted_market = str(market_hint or "").strip().lower()
-    if raw_code.isdigit() and len(raw_code) in {4, 5, 6}:
+    if trusted_market == "hk" and raw_code.isdigit() and 1 <= len(raw_code) <= 3:
+        identity_code = raw_code.zfill(5)
+    elif raw_code.isdigit() and len(raw_code) in {4, 5, 6}:
         from src.data.stock_index_loader import resolve_index_stock_code_candidates
 
         indexed_candidates = resolve_index_stock_code_candidates(raw_code)
@@ -309,9 +365,9 @@ def resolve_daily_stock_identity(
         indexed_offshore = [
             (candidate, market)
             for candidate, market in indexed_identities
-            if market in {"jp", "kr"}
+            if market in {"jp", "kr", "tw"}
         ]
-        if trusted_market in {"jp", "kr"}:
+        if trusted_market in {"jp", "kr", "tw"}:
             matching_candidates = [
                 candidate
                 for candidate, market in indexed_offshore
@@ -319,6 +375,13 @@ def resolve_daily_stock_identity(
             ]
             if len(matching_candidates) == 1:
                 identity_code = matching_candidates[0]
+            elif trusted_market == "tw" and len(raw_code) in {4, 5, 6}:
+                return DailyStockIdentity(
+                    normalized_code=raw_code,
+                    market="tw",
+                    refill_code="",
+                    code_candidates=(raw_code,),
+                )
             elif indexed_candidates:
                 return None
             elif trusted_market == "jp" and len(raw_code) in {4, 5}:
@@ -349,7 +412,7 @@ def resolve_daily_stock_identity(
         elif len(indexed_offshore) == 1:
             identity_code = indexed_offshore[0][0]
 
-    if is_us_index_code(identity_code):
+    if _is_us_index_code(identity_code):
         normalized_code, explicit_exchange = identity_code, ""
     elif identity_code.isdigit() and len(identity_code) == 4:
         normalized_code, explicit_exchange = identity_code.zfill(5), "HK"
@@ -365,7 +428,7 @@ def resolve_daily_stock_identity(
         market = "hk"
     elif suffix_market:
         market = suffix_market
-    elif is_us_index_code(normalized_code):
+    elif _is_us_index_code(normalized_code):
         market = "us"
     elif re.fullmatch(r"[A-Z]{1,5}(?:\.(?:US|[A-Z]))?", normalized_code):
         market = "us"
@@ -435,6 +498,20 @@ def resolve_index_stock_code_for_analysis(raw: str) -> str:
     if not text:
         return ""
 
+    # PR #2267 review remediation: converge registered CSI aliases
+    # (``csi930955`` / ``930955.CSI`` / ``CSI930955``) to the parser canonical so
+    # the resolver, task dedupe key and history candidates do not split the
+    # same index into distinct keys. The parser canonical is returned verbatim
+    # (lowercase ``csi{code}``) rather than re-uppercased by
+    # ``canonical_stock_code`` below.
+    normalized_csi = unicodedata.normalize("NFKC", text).strip().casefold()
+    if re.fullmatch(r"csi\d{6}", normalized_csi) or re.fullmatch(r"\d{6}\.csi", normalized_csi):
+        converged = _converge_registered_csi_identity(text)
+        # Return the parser canonical verbatim (lowercase ``csi{code}``) for
+        # every registered CSI form, including the already-canonical input.
+        if converged is not None:
+            return converged
+
     if is_code_like(text) or (text.isdigit() and len(text) == 4):
         from src.data.stock_index_loader import resolve_index_stock_code
 
@@ -443,3 +520,35 @@ def resolve_index_stock_code_for_analysis(raw: str) -> str:
             return canonical_stock_code(resolved)
 
     return canonical_stock_code(text)
+
+
+def _converge_registered_csi_identity(raw: str) -> Optional[str]:
+    """Converge a registered CSI explicit identity to its parser canonical.
+
+    PR #2267 review remediation: the resolver, task dedupe key and history
+    candidate builders must treat ``csi930955`` / ``930955.CSI`` /
+    ``CSI930955`` as the same registered CSI
+    index identity, so they do not split into distinct task keys or history
+    candidates. Returns the parser canonical (lowercase ``csi{code}``) when the
+    input is a registered CSI explicit identity, or ``None`` when it is not
+    (so callers keep their existing degradation semantics for unregistered
+    ``csi930956`` / ``930956.CSI``).
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    normalized = unicodedata.normalize("NFKC", text).strip().casefold()
+    is_csi_form = bool(
+        re.fullmatch(r"csi\d{6}", normalized)
+        or re.fullmatch(r"\d{6}\.csi", normalized)
+    )
+    if not is_csi_form:
+        return None
+
+    from src.services.stock_list_parser import parse_analysis_target
+
+    target = parse_analysis_target(text)
+    if target.asset_type == "index" and target.canonical_id:
+        return target.canonical_id
+    return None

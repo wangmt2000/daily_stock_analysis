@@ -101,7 +101,7 @@ This document compiles common issues encountered by users and their solutions.
    - Saving from WebUI triggers a config reload for the current process, and runtime reads continue from the latest persisted `.env`; for example, scheduled runs keep hot-reading the saved `STOCK_LIST`
    - If you pass the same keys as startup env vars (`--env-file .env`, `docker run -e ...`, or Compose `environment:`), those startup values can still win on later restarts; update or remove the same-name overrides if you want the WebUI-saved `.env` values to take over
    - To persist WebUI-saved config, point `ENV_FILE` at a writable data-volume file such as `/app/data/runtime.env`; do not bind-mount the host `.env` as a single file over `/app/.env`
-   - Saving `SCHEDULE_ENABLED`, `SCHEDULE_TIME`, or `SCHEDULE_TIMES` starts, stops, or rebuilds the runtime scheduler in long-running WebUI/API/Desktop processes
+   - Saving `SCHEDULE_ENABLED`, `SCHEDULE_TIME`, or `SCHEDULE_TIMES` starts, stops, or rebuilds the runtime scheduler in long-running WebUI/API/Desktop processes; restarting a `--serve-only` or Desktop process restores enabled daily jobs without immediately running an analysis at startup
    - `SCHEDULE_RUN_IMMEDIATELY` and `RUN_IMMEDIATELY` remain startup/one-shot settings; saving them does not immediately trigger an analysis run
 3. **Manual `.env` edits in Docker**: Restart the container after changes
    ```bash
@@ -164,8 +164,21 @@ First confirm whether `LITELLM_CONFIG` or `LLM_CHANNELS` is active, because eith
 1. **Auto-chunking**: Latest version implements automatic long message splitting
 2. **Single stock push mode**: Set `SINGLE_STOCK_NOTIFY=true`, push immediately after each stock analysis
 3. **Brief report**: Set `REPORT_TYPE=simple` for simplified format
+4. **Local file fallback**: Even with no notification channel configured, `SINGLE_STOCK_NOTIFY=true` still saves each stock report to `reports/report_YYYYMMDD_<stock_code>.md`
 
 ---
+
+### Q8.1: Analysis finished, but no report file was created under `reports/`?
+
+**Common causes**:
+1. `STOCK_LIST` is empty and market review was not enabled for this run
+2. The stock list is non-empty, but every stock analysis failed so no successful result was produced
+3. Stock results were produced, but writing to `reports/` failed (for example due to permissions or mount issues)
+
+**Current behavior**:
+1. CLI-triggered analysis now logs the exact failure reason for these cases
+2. Standalone non-`--serve` runs now return a non-zero exit code so workflows do not treat “no report generated” as success
+3. In single-stock push mode, local Markdown report saving still happens even when notifications are not configured
 
 ### Q9: Not receiving Telegram push messages?
 
@@ -320,9 +333,32 @@ Work through the following 5 checkpoints in order:
 
 ---
 
+## Desktop App
+
+### Q15: macOS says the desktop app is damaged or cannot be opened?
+
+**Cause**: The current macOS DMG is not signed and notarized with an Apple Developer certificate. After a browser download, macOS Gatekeeper may attach the quarantine attribute and block startup.
+
+**Solution**:
+
+1. Download only from the project's [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases), and select the package matching your Mac architecture. Do not bypass Gatekeeper for third-party copies or files from an untrusted source.
+2. Drag `Daily Stock Analysis` into Applications, then first try **System Settings → Privacy & Security → Open Anyway**.
+3. If it still does not start and you have verified that it came from the official project Release, remove quarantine only from this app and launch it:
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Daily Stock Analysis.app"
+   open "/Applications/Daily Stock Analysis.app"
+   ```
+
+Replace the path if the app is not in `/Applications`. Never run `xattr` against the entire `/Applications` directory. This is a temporary way to allow a trusted unsigned app; it is not a substitute for signing or notarization. See the [desktop packaging guide](desktop-package.md#macos-提示应用已损坏无法打开) for the complete troubleshooting notes.
+
+> Related Issue: [#2113](https://github.com/ZhuLinsen/daily_stock_analysis/issues/2113)
+
+---
+
 ## Other Issues
 
-### Q15: How to run only market review, without stock analysis?
+### Q16: How to run only market review, without stock analysis?
 
 **Method**:
 ```bash
@@ -335,7 +371,7 @@ python main.py --market-only
 
 ---
 
-### Q16: Buy/Hold/Sell counts in analysis results are incorrect?
+### Q17: Buy/Hold/Sell counts in analysis results are incorrect?
 
 **Cause**: Earlier versions used regex matching for statistics, may not match actual recommendations.
 
@@ -352,4 +388,4 @@ If the above content doesn't solve your issue, welcome to:
 
 ---
 
-*Last updated: 2026-04-20*
+*Last updated: 2026-08-03*

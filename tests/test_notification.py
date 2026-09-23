@@ -17,6 +17,7 @@ TODO:
 import os
 import sys
 import unittest
+from datetime import date
 from unittest import mock
 from typing import Optional
 
@@ -33,6 +34,7 @@ from src.config import Config
 from src.notification import NotificationBuilder, NotificationChannel, NotificationService
 from src.notification_noise import reset_notification_noise_state
 from src.analyzer import AnalysisResult
+from src.share_image import build_share_image_html
 from bot.models import BotMessage, ChatType
 import requests
 
@@ -327,7 +329,10 @@ class TestNotificationServiceSendToMethods(unittest.TestCase):
         mock_custom.assert_not_called()
 
     @mock.patch("src.notification.get_config")
-    def test_feishu_context_response_skips_static_webhook(self, mock_get_config: mock.MagicMock):
+    def test_feishu_context_response_strips_hidden_metadata_and_skips_static_webhook(
+        self,
+        mock_get_config: mock.MagicMock,
+    ):
         cfg = _make_config(
             feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
             feishu_app_id="cli_test",
@@ -335,17 +340,43 @@ class TestNotificationServiceSendToMethods(unittest.TestCase):
         )
         mock_get_config.return_value = cfg
         service = NotificationService(source_message=_make_feishu_message())
+        content = "[dsa-market-region]: # (cn)\n\n# 市场复盘\n\n正文"
 
         with mock.patch.object(service, "_send_feishu_stream_reply", return_value=True) as mock_reply, \
              mock.patch.object(service, "send_to_feishu", return_value=True) as mock_webhook:
-            result = service.send_with_results("content", route_type="report")
+            result = service.send_with_results(content, route_type="report")
 
         self.assertTrue(result.dispatched)
         self.assertTrue(result.success)
         self.assertEqual(result.status, "sent")
         self.assertEqual([item.channel for item in result.channel_results], ["__context__"])
-        mock_reply.assert_called_once_with("chat-1", "content")
+        mock_reply.assert_called_once_with("chat-1", "# 市场复盘\n\n正文")
         mock_webhook.assert_not_called()
+
+    @mock.patch("src.notification.get_config")
+    def test_send_feishu_stream_reply_strips_hidden_metadata_before_chunking(
+        self,
+        mock_get_config: mock.MagicMock,
+    ):
+        cfg = _make_config(
+            feishu_app_id="cli_test",
+            feishu_app_secret="app-secret",
+            feishu_max_bytes=10,
+        )
+        mock_get_config.return_value = cfg
+        service = NotificationService()
+        reply_client = mock.MagicMock()
+        content = "[dsa-market-region]: # (cn)\n\n# 市场复盘\n\n正文"
+
+        with mock.patch("bot.platforms.feishu_stream.FEISHU_SDK_AVAILABLE", True), \
+             mock.patch("src.config.get_config", return_value=cfg), \
+             mock.patch("bot.platforms.feishu_stream.FeishuReplyClient", return_value=reply_client), \
+             mock.patch.object(service, "_send_feishu_stream_chunked", return_value=True) as mock_chunked:
+            result = service._send_feishu_stream_reply("chat-1", content)
+
+        self.assertTrue(result)
+        mock_chunked.assert_called_once_with(reply_client, "chat-1", "# 市场复盘\n\n正文", 10)
+        reply_client.send_to_chat.assert_not_called()
 
     @mock.patch("src.notification.get_config")
     def test_feishu_context_failure_does_not_fallback_to_static_webhook(self, mock_get_config: mock.MagicMock):
@@ -436,10 +467,30 @@ class TestNotificationServiceSendToMethods(unittest.TestCase):
         mock_get_config.return_value = cfg
         service = NotificationService()
         with mock.patch.object(service, "send_feishu_file", return_value=True) as mock_file, \
-             mock.patch.object(service, "save_report_to_file", return_value="/tmp/report.md"):
+             mock.patch.object(service, "save_report_to_file", return_value="/tmp/report.md") as mock_save:
             result = service.send_with_results("report content", route_type="report")
         self.assertTrue(result.success)
         mock_file.assert_called_once()
+        mock_save.assert_called_once_with("report content", filename=mock.ANY)
+
+    @mock.patch("src.notification.get_config")
+    def test_feishu_send_as_file_route_report_strips_hidden_metadata_before_save(self, mock_get_config):
+        cfg = _make_config(
+            feishu_webhook_url="https://feishu.example/hook",
+            feishu_send_as_file=True,
+        )
+        mock_get_config.return_value = cfg
+        service = NotificationService()
+        content = "[dsa-market-region]: # (cn)\n\n# 市场复盘\n\n正文"
+
+        with mock.patch.object(service, "send_feishu_file", return_value=True), \
+             mock.patch.object(service, "save_report_to_file", return_value="/tmp/report.md") as mock_save:
+            result = service.send_with_results(content, route_type="report")
+
+        self.assertTrue(result.success)
+        saved_content = mock_save.call_args.args[0]
+        self.assertNotIn("[dsa-market-region]", saved_content)
+        self.assertIn("# 市场复盘", saved_content)
 
     @mock.patch("src.notification.get_config")
     def test_feishu_send_as_file_route_alert_calls_send_to_feishu(self, mock_get_config):
@@ -662,6 +713,27 @@ class TestNotificationServiceSendToMethods(unittest.TestCase):
 class TestNotificationServiceReportGeneration(unittest.TestCase):
     """报告生成与选路相关测试。"""
 
+    @staticmethod
+    def _source_result(
+        code: str,
+        name: str,
+        score: int,
+        data_sources: Optional[str],
+    ) -> AnalysisResult:
+        result = AnalysisResult(
+            code=code,
+            name=name,
+            sentiment_score=score,
+            trend_prediction="震荡",
+            operation_advice="观望",
+            analysis_summary=f"{name} summary",
+            report_language="zh",
+            data_sources=data_sources or "",
+        )
+        if data_sources is None:
+            setattr(result, "data_sources", None)
+        return result
+
     def test_signal_metadata_uses_resolved_eight_state_action(self):
         service = NotificationService()
         cases = [
@@ -772,6 +844,200 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
         self.assertEqual(mock_dashboard.call_count, 3)
         mock_brief.assert_called_once()
+
+    @mock.patch("src.notification.get_config")
+    def test_dashboard_sources_are_isolated_in_builtin_and_template_renderers(
+        self, mock_get_config: mock.MagicMock
+    ):
+        alpha = self._source_result("AAA", "Alpha", 80, "agent:a,daily:AlphaFetcher")
+        empty = self._source_result("NONE", "NoSource", 70, None)
+        beta = self._source_result("BBB", "Beta", 60, "agent:b,daily:BetaFetcher")
+
+        for renderer_enabled in (False, True):
+            with self.subTest(renderer_enabled=renderer_enabled):
+                mock_get_config.return_value = _make_config(
+                    report_renderer_enabled=renderer_enabled
+                )
+                service = NotificationService()
+                out = service.generate_dashboard_report(
+                    [beta, empty, alpha], report_date="2026-08-27"
+                )
+
+                alpha_start = out.index("Alpha (AAA)")
+                empty_start = out.index("NoSource (NONE)")
+                beta_start = out.index("Beta (BBB)")
+                alpha_block = out[alpha_start:empty_start]
+                empty_block = out[empty_start:beta_start]
+                beta_block = out[beta_start:]
+
+                self.assertIn("agent:a,daily:AlphaFetcher", alpha_block)
+                self.assertNotIn("daily:BetaFetcher", alpha_block)
+                self.assertNotIn("数据来源", empty_block)
+                self.assertIn("agent:b,daily:BetaFetcher", beta_block)
+                self.assertNotIn("daily:AlphaFetcher", beta_block)
+                self.assertEqual(out.count("agent:a,daily:AlphaFetcher"), 1)
+                self.assertEqual(out.count("agent:b,daily:BetaFetcher"), 1)
+                if not renderer_enabled:
+                    self.assertIn(
+                        "agent:a,daily:AlphaFetcher*\n\n---",
+                        alpha_block,
+                    )
+
+    @mock.patch("src.notification.get_config")
+    def test_brief_sources_are_isolated_in_builtin_and_template_renderers(
+        self, mock_get_config: mock.MagicMock
+    ):
+        alpha = self._source_result("AAA", "Alpha", 80, "daily:AlphaFetcher")
+        empty = self._source_result("NONE", "NoSource", 70, "")
+        beta = self._source_result("BBB", "Beta", 60, "daily:BetaFetcher")
+
+        for renderer_enabled in (False, True):
+            with self.subTest(renderer_enabled=renderer_enabled):
+                mock_get_config.return_value = _make_config(
+                    report_renderer_enabled=renderer_enabled
+                )
+                service = NotificationService()
+                out = service.generate_brief_report(
+                    [beta, empty, alpha], report_date="2026-08-27"
+                )
+
+                alpha_start = out.index("**Alpha(AAA)**")
+                empty_start = out.index("**NoSource(NONE)**")
+                beta_start = out.index("**Beta(BBB)**")
+                alpha_block = out[alpha_start:empty_start]
+                empty_block = out[empty_start:beta_start]
+                beta_block = out[beta_start:]
+
+                self.assertIn("daily:AlphaFetcher", alpha_block)
+                self.assertNotIn("daily:BetaFetcher", alpha_block)
+                self.assertNotIn("数据来源", empty_block)
+                self.assertIn("daily:BetaFetcher", beta_block)
+                self.assertNotIn("daily:AlphaFetcher", beta_block)
+                self.assertEqual(out.count("daily:AlphaFetcher"), 1)
+                self.assertEqual(out.count("daily:BetaFetcher"), 1)
+
+    @mock.patch("src.notification.get_config")
+    def test_dashboard_summary_only_keeps_sources_without_restoring_details(
+        self, mock_get_config: mock.MagicMock
+    ):
+        result = self._source_result("AAA", "Alpha", 80, "daily:AlphaFetcher")
+        result.dashboard = {
+            "core_conclusion": {"one_sentence": "summary-only conclusion"},
+            "battle_plan": {"entry_plan": "detail-only plan"},
+        }
+
+        for renderer_enabled in (False, True):
+            with self.subTest(renderer_enabled=renderer_enabled):
+                mock_get_config.return_value = _make_config(
+                    report_renderer_enabled=renderer_enabled
+                )
+                service = NotificationService()
+                service._report_summary_only = True
+                out = service.generate_dashboard_report(
+                    [result], report_date="2026-08-27"
+                )
+
+                self.assertEqual(out.count("daily:AlphaFetcher"), 1)
+                self.assertNotIn("核心结论", out)
+                self.assertNotIn("detail-only plan", out)
+
+    @mock.patch("src.notification.get_config")
+    def test_empty_template_output_falls_back_to_source_aware_reports(
+        self, mock_get_config: mock.MagicMock
+    ):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=True)
+        result = self._source_result("AAA", "Alpha", 80, "daily:AlphaFetcher")
+        service = NotificationService()
+
+        with mock.patch("src.services.report_renderer.render", return_value=None) as render:
+            dashboard = service.generate_dashboard_report(
+                [result], report_date="2026-08-27"
+            )
+            brief = service.generate_brief_report([result], report_date="2026-08-27")
+
+        self.assertEqual(render.call_count, 2)
+        self.assertEqual(dashboard.count("daily:AlphaFetcher"), 1)
+        self.assertEqual(brief.count("daily:AlphaFetcher"), 1)
+        self.assertIn("*📋 数据来源：daily:AlphaFetcher*", dashboard)
+        self.assertIn("*📋 数据来源：daily:AlphaFetcher*", brief)
+
+    @mock.patch("src.notification.get_config")
+    def test_source_labels_render_in_all_supported_languages(
+        self, mock_get_config: mock.MagicMock
+    ):
+        labels_by_language = {
+            "zh": "数据来源",
+            "en": "Data Sources",
+            "ko": "데이터 출처",
+        }
+        for language, expected_label in labels_by_language.items():
+            for renderer_enabled in (False, True):
+                for report_type in ("simple", "brief"):
+                    with self.subTest(
+                        language=language,
+                        renderer_enabled=renderer_enabled,
+                        report_type=report_type,
+                    ):
+                        mock_get_config.return_value = _make_config(
+                            report_renderer_enabled=renderer_enabled
+                        )
+                        service = NotificationService()
+                        result = self._source_result(
+                            "AAA", "Alpha", 80, "daily:AlphaFetcher"
+                        )
+                        result.report_language = language
+
+                        out = service.generate_aggregate_report(
+                            [result], report_type, report_date="2026-08-27"
+                        )
+
+                        self.assertIn(
+                            f"*📋 {expected_label}：daily:AlphaFetcher*",
+                            out,
+                        )
+
+    @mock.patch("src.notification.get_config")
+    def test_reports_omit_source_label_when_data_sources_are_missing(
+        self, mock_get_config: mock.MagicMock
+    ):
+        for data_sources in (None, "", "   "):
+            for renderer_enabled in (False, True):
+                for report_type in ("simple", "brief"):
+                    with self.subTest(
+                        data_sources=data_sources,
+                        renderer_enabled=renderer_enabled,
+                        report_type=report_type,
+                    ):
+                        mock_get_config.return_value = _make_config(
+                            report_renderer_enabled=renderer_enabled
+                        )
+                        service = NotificationService()
+                        result = self._source_result(
+                            "AAA", "Alpha", 80, data_sources
+                        )
+
+                        out = service.generate_aggregate_report(
+                            [result], report_type, report_date="2026-08-27"
+                        )
+
+                        self.assertNotIn("数据来源", out)
+
+    @mock.patch("src.notification.get_config")
+    def test_generate_daily_report_keeps_existing_source_line(
+        self, mock_get_config: mock.MagicMock
+    ):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        result = self._source_result(
+            "AAA", "Alpha", 80, "agent:a,daily:AlphaFetcher"
+        )
+
+        out = service.generate_daily_report([result], report_date="2026-08-27")
+
+        self.assertEqual(
+            out.count("*📋 数据来源：agent:a,daily:AlphaFetcher*"),
+            1,
+        )
 
     @mock.patch("src.notification.get_config")
     def test_generate_single_stock_report_keeps_legacy_simple_format(self, mock_get_config: mock.MagicMock):
@@ -1295,6 +1561,92 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertIn("Core Conclusion", out)
         self.assertIn("Action Levels", out)
         self.assertIn("Buy", out)
+
+    @mock.patch("src.notification.get_config")
+    def test_single_stock_share_image_reads_trend_from_generated_report(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="回调到支撑区可分批关注。",
+            dashboard={
+                "core_conclusion": {"one_sentence": "回调到支撑区可分批关注。"},
+                "battle_plan": {
+                    "sniper_points": {
+                        "ideal_buy": "1420-1450",
+                        "stop_loss": "1350",
+                        "take_profit": "1580",
+                    }
+                },
+            },
+        )
+
+        markdown = service.generate_single_stock_report(result)
+        html = build_share_image_html(markdown, generated_on=date(2026, 7, 31))
+
+        self.assertIn('class="signal-trend positive"', html)
+        self.assertIn(">看多<", html)
+        self.assertIn("个股决策卡", html)
+
+    @mock.patch("src.notification.get_config")
+    def test_dashboard_share_image_reads_chinese_volume_line_from_generated_report(
+        self, mock_get_config: mock.MagicMock
+    ):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="稳健持有。",
+            dashboard={
+                "core_conclusion": {"one_sentence": "稳健持有。"},
+                "data_perspective": {
+                    "trend_status": {
+                        "ma_alignment": "多头排列",
+                        "is_bullish": True,
+                        "trend_score": 78,
+                    },
+                    "price_position": {
+                        "current_price": "1450",
+                        "ma5": "1442",
+                        "ma10": "1430",
+                        "ma20": "1408",
+                        "bias_ma5": "0.55",
+                        "bias_status": "偏强",
+                        "support_level": "1420",
+                        "resistance_level": "1490",
+                    },
+                    "volume_analysis": {
+                        "volume_ratio": "1.35",
+                        "volume_status": "放量",
+                        "turnover_rate": "0.82",
+                        "volume_meaning": "量能配合上攻",
+                    },
+                },
+                "battle_plan": {
+                    "sniper_points": {
+                        "ideal_buy": "1420-1450",
+                        "stop_loss": "1350",
+                        "take_profit": "1580",
+                    }
+                },
+            },
+        )
+
+        markdown = service.generate_dashboard_report([result], report_date="2026-07-31")
+        html = build_share_image_html(markdown, generated_on=date(2026, 7, 31))
+
+        self.assertIn("技术参考", html)
+        self.assertIn(">量能<", html)
+        self.assertIn("1.35", html)
+        self.assertIn("0.82%", html)
 
     def _make_fundamental_context(self) -> dict:
         return {
@@ -1879,6 +2231,92 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
     @mock.patch("src.notification.get_config")
     @mock.patch("smtplib.SMTP_SSL")
+    def test_send_to_email_via_notification_service_strips_hidden_market_metadata(
+        self, mock_smtp_ssl: mock.MagicMock, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(
+            email_sender="user@qq.com",
+            email_password="PASS",
+            email_receivers=["default@example.com"],
+        )
+        mock_get_config.return_value = cfg
+
+        service = NotificationService()
+
+        ok = service.send("[dsa-market-region]: # (cn)\n\n# 🎯 Market Review\n\nBody")
+
+        self.assertTrue(ok)
+        msg = mock_smtp_ssl.return_value.send_message.call_args[0][0]
+        payloads = msg.get_payload()
+        self.assertNotIn("[dsa-market-region]", payloads[0].get_payload(decode=True).decode("utf-8"))
+        self.assertNotIn("[dsa-market-region]", payloads[1].get_payload(decode=True).decode("utf-8"))
+
+    @mock.patch("src.notification.get_config")
+    def test_email_text_fallback_strips_hidden_market_metadata_before_sender(
+        self, mock_get_config: mock.MagicMock
+    ):
+        cfg = _make_config(
+            email_sender="user@qq.com",
+            email_password="PASS",
+            email_receivers=["default@example.com"],
+        )
+        mock_get_config.return_value = cfg
+
+        service = NotificationService()
+        service.send_to_email = mock.MagicMock(return_value=True)
+
+        ok = service._send_to_static_channel(
+            NotificationChannel.EMAIL,
+            "[dsa-market-region]: # (cn)\n\n# 🎯 Market Review\n\nBody",
+            image_bytes=None,
+            email_stock_codes=None,
+            email_send_to_all=False,
+            route_type="report",
+        )
+
+        self.assertTrue(ok)
+        service.send_to_email.assert_called_once_with(
+            "# 🎯 Market Review\n\nBody",
+            receivers=None,
+        )
+
+    @mock.patch("src.notification.get_config")
+    def test_static_text_channels_strip_hidden_market_metadata_before_sender(
+        self, mock_get_config: mock.MagicMock
+    ):
+        mock_get_config.return_value = _make_config()
+        service = NotificationService()
+        raw_content = "[dsa-market-region]: # (cn)\n\n# 🎯 Market Review\n\nBody"
+        expected = "# 🎯 Market Review\n\nBody"
+        cases = [
+            (NotificationChannel.FEISHU, "send_to_feishu"),
+            (NotificationChannel.DINGTALK, "send_to_dingtalk"),
+            (NotificationChannel.NTFY, "send_to_ntfy"),
+            (NotificationChannel.GOTIFY, "send_to_gotify"),
+            (NotificationChannel.PUSHPLUS, "send_to_pushplus"),
+            (NotificationChannel.SERVERCHAN3, "send_to_serverchan3"),
+            (NotificationChannel.CUSTOM, "send_to_custom"),
+            (NotificationChannel.ASTRBOT, "send_to_astrbot"),
+        ]
+
+        for channel, method_name in cases:
+            with self.subTest(channel=channel.value), mock.patch.object(
+                service, method_name, return_value=True
+            ) as mock_sender:
+                ok = service._send_to_static_channel(
+                    channel,
+                    raw_content,
+                    image_bytes=None,
+                    email_stock_codes=None,
+                    email_send_to_all=False,
+                    route_type="report",
+                )
+
+                self.assertTrue(ok)
+                mock_sender.assert_called_once_with(expected)
+
+    @mock.patch("src.notification.get_config")
+    @mock.patch("smtplib.SMTP_SSL")
     def test_send_to_email_with_stock_group_routing(
         self, mock_smtp_ssl: mock.MagicMock, mock_get_config: mock.MagicMock
     ):
@@ -1918,9 +2356,15 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertTrue(ok)
         mock_post.assert_called_once()
         
+    @mock.patch("src.notification_sender.feishu_sender.time.sleep")
     @mock.patch("src.notification.get_config")
     @mock.patch("requests.post")
-    def test_send_to_feishu_via_notification_service_requires_chunking(self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock):
+    def test_send_to_feishu_via_notification_service_requires_chunking(
+        self,
+        mock_post: mock.MagicMock,
+        mock_get_config: mock.MagicMock,
+        mock_sleep: mock.MagicMock,
+    ):
         cfg = _make_config(feishu_webhook_url="https://feishu.example", feishu_max_bytes=2000)
         mock_get_config.return_value = cfg
         mock_post.return_value = _make_response(200, {"code": 0})
@@ -1932,6 +2376,7 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertAlmostEqual(mock_post.call_count, 4, delta=1)
+        self.assertEqual(mock_sleep.call_count, mock_post.call_count - 1)
 
     @mock.patch("src.notification.get_config")
     @mock.patch("requests.post")
@@ -2214,9 +2659,15 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertTrue(ok)
         mock_post.assert_called_once()
 
+    @mock.patch("src.notification_sender.wechat_sender.time.sleep")
     @mock.patch("src.notification.get_config")
     @mock.patch("requests.post")
-    def test_send_to_wechat_via_notification_service_requires_chunking(self, mock_post: mock.MagicMock, mock_get_config: mock.MagicMock):
+    def test_send_to_wechat_via_notification_service_requires_chunking(
+        self,
+        mock_post: mock.MagicMock,
+        mock_get_config: mock.MagicMock,
+        mock_sleep: mock.MagicMock,
+    ):
         cfg = _make_config(wechat_webhook_url="https://wechat.example", wechat_max_bytes=2000)
         mock_get_config.return_value = cfg
         mock_post.return_value = _make_response(200, {"errcode": 0})
@@ -2228,6 +2679,7 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertAlmostEqual(mock_post.call_count, 4, delta=1)
+        self.assertEqual(mock_sleep.call_count, mock_post.call_count - 1)
 
 
 if __name__ == "__main__":

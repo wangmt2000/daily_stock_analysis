@@ -1,8 +1,11 @@
 import type React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveWebBuildInfo } from '../../utils/constants';
 import type { SetupStatusResponse } from '../../types/systemConfig';
+import { DesktopUpdateIndicator } from '../../components/layout/DesktopUpdateIndicator';
+import { resetSharedDesktopUpdateState } from '../../desktop/updateStore';
 import SettingsPage from '../SettingsPage';
 
 const {
@@ -13,9 +16,8 @@ const {
   importEnv,
   runSchedulerNow,
   updateSystemConfig,
-  alphasiftEnable,
-  alphasiftInstall,
-  notifyAlphaSiftConfigChanged,
+  screeningEnable,
+  notifyScreeningConfigChanged,
   notifySystemConfigChanged,
   desktopCheckForUpdates,
   desktopGetUpdateState,
@@ -44,9 +46,8 @@ const {
   importEnv: vi.fn(),
   runSchedulerNow: vi.fn(),
   updateSystemConfig: vi.fn(),
-  alphasiftEnable: vi.fn(),
-  alphasiftInstall: vi.fn(),
-  notifyAlphaSiftConfigChanged: vi.fn(),
+  screeningEnable: vi.fn(),
+  notifyScreeningConfigChanged: vi.fn(),
   notifySystemConfigChanged: vi.fn(),
   desktopCheckForUpdates: vi.fn(),
   desktopGetUpdateState: vi.fn(),
@@ -78,10 +79,14 @@ const {
 
 const mockedAnchorClick = vi.fn();
 
-vi.mock('../../hooks', () => ({
-  useAuth: () => useAuthMock(),
-  useSystemConfig: () => useSystemConfigMock(),
-}));
+vi.mock('../../hooks', async () => {
+  const actual = await vi.importActual<typeof import('../../hooks')>('../../hooks');
+  return {
+    ...actual,
+    useAuth: () => useAuthMock(),
+    useSystemConfig: () => useSystemConfigMock(),
+  };
+});
 
 vi.mock('../../api/systemConfig', () => ({
   systemConfigApi: {
@@ -100,12 +105,11 @@ vi.mock('../../api/analysis', () => ({
   },
 }));
 
-vi.mock('../../api/alphasift', () => ({
-  alphasiftApi: {
-    enable: (...args: unknown[]) => alphasiftEnable(...args),
-    install: (...args: unknown[]) => alphasiftInstall(...args),
+vi.mock('../../api/screening', () => ({
+  screeningApi: {
+    enable: (...args: unknown[]) => screeningEnable(...args),
   },
-  notifyAlphaSiftConfigChanged: (...args: unknown[]) => notifyAlphaSiftConfigChanged(...args),
+  notifyScreeningConfigChanged: (...args: unknown[]) => notifyScreeningConfigChanged(...args),
   notifySystemConfigChanged: (...args: unknown[]) => notifySystemConfigChanged(...args),
 }));
 
@@ -140,6 +144,7 @@ vi.mock('../../components/settings', () => ({
         type="button"
         onClick={() => onDraftItemsChange?.([
           { key: 'LLM_CHANNELS', value: 'draft,backup' },
+          { key: 'LLM_DRAFT_API_SURFACE', value: 'responses' },
           { key: 'LITELLM_MODEL', value: 'openai/draft-model' },
           { key: 'GENERATION_BACKEND', value: 'codex_cli' },
         ])}
@@ -503,6 +508,41 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+function renderSettingsPage(route = '/settings') {
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <SettingsPage />
+    </MemoryRouter>,
+  );
+}
+
+function renderDesktopUpdateEntries(route = '/settings') {
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <>
+        <DesktopUpdateIndicator />
+        <SettingsPage />
+      </>
+    </MemoryRouter>,
+  );
+}
+
+function hangDesktopUpdateCheck() {
+  let resolveCheck: ((value: unknown) => void) | undefined;
+  desktopCheckForUpdates.mockImplementation(
+    () => new Promise((resolve) => {
+      resolveCheck = resolve;
+    }),
+  );
+  return {
+    async finish(value: unknown) {
+      await act(async () => {
+        resolveCheck?.(value);
+      });
+    },
+  };
+}
+
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -586,15 +626,10 @@ describe('SettingsPage', () => {
     updateSystemConfig.mockResolvedValue({
       success: true,
       configVersion: 'v2',
-      updatedKeys: ['ALPHASIFT_ENABLED'],
+      updatedKeys: ['SCREENING_ENABLED'],
       reloadTriggered: true,
     });
-    alphasiftInstall.mockResolvedValue({
-      installed: true,
-      alreadyInstalled: true,
-      installSpecIsDefault: true,
-    });
-    alphasiftEnable.mockResolvedValue(undefined);
+    screeningEnable.mockResolvedValue(undefined);
     desktopGetUpdateState.mockResolvedValue({
       status: 'idle',
       currentVersion: '3.12.0',
@@ -620,10 +655,15 @@ describe('SettingsPage', () => {
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(mockedAnchorClick);
+    resetSharedDesktopUpdateState();
+  });
+
+  afterEach(() => {
+    resetSharedDesktopUpdateState();
   });
 
   it('renders category navigation and auth settings modules', async () => {
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByRole('heading', { name: '系统设置' })).toBeInTheDocument();
     expect(screen.getByText('认证与登录保护')).toBeInTheDocument();
@@ -634,7 +674,7 @@ describe('SettingsPage', () => {
   it('renders first-run setup checks and routes setup actions', async () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByTestId('first-run-setup-card')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '首次启动配置检查' })).toBeInTheDocument();
@@ -650,11 +690,30 @@ describe('SettingsPage', () => {
     expect(setActiveCategory).toHaveBeenNthCalledWith(3, 'notification');
   });
 
+  it('applies category from the search string and scrolls to desktop version info', async () => {
+    const scrollIntoView = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    (window as { dsaDesktop?: unknown }).dsaDesktop = {
+      version: '3.12.0',
+      getUpdateState: desktopGetUpdateState,
+      checkForUpdates: desktopCheckForUpdates,
+      installDownloadedUpdate: desktopInstallDownloadedUpdate,
+      openReleasePage: desktopOpenReleasePage,
+      onUpdateStateChange: desktopOnUpdateStateChange,
+    };
+
+    renderSettingsPage('/settings?category=system#desktop-version-info');
+
+    await waitFor(() => expect(setActiveCategory).toHaveBeenCalledWith('system'));
+    expect(await screen.findByText('桌面端更新')).toBeInTheDocument();
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+  });
+
   it('keeps first-run setup summary neutral while setup status is loading', async () => {
     getSetupStatus.mockImplementation(() => new Promise(() => undefined));
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByText('正在检查首次启动配置')).toBeInTheDocument();
     expect(screen.getByText('正在读取配置状态，完成后会显示缺失项和试跑入口。')).toBeInTheDocument();
@@ -667,7 +726,7 @@ describe('SettingsPage', () => {
     getSetupStatus.mockRejectedValue(new Error('setup status unavailable'));
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByText('暂无法判断配置状态')).toBeInTheDocument();
     expect(screen.getByText('配置状态读取失败。可先检查或修改设置项，稍后刷新检查结果。')).toBeInTheDocument();
@@ -737,7 +796,7 @@ describe('SettingsPage', () => {
       .mockImplementationOnce(() => latestRefresh.promise);
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByText('初始状态')).toBeInTheDocument();
 
@@ -767,7 +826,7 @@ describe('SettingsPage', () => {
   it('runs a brief setup smoke analysis with the first watchlist stock', async () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     await screen.findByText('基础配置已满足最小可用分析');
     fireEvent.click(screen.getByRole('button', { name: '简短试跑' }));
@@ -821,7 +880,7 @@ describe('SettingsPage', () => {
       ],
     });
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     await screen.findByText('还缺少 1 项：Agent 渠道');
     expect(screen.getByRole('button', { name: '简短试跑' })).toBeEnabled();
@@ -858,7 +917,7 @@ describe('SettingsPage', () => {
     });
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByText('还有基础配置需要处理')).toBeInTheDocument();
     expect(screen.getByText('还缺少 1 项：模型渠道')).toBeInTheDocument();
@@ -872,7 +931,7 @@ describe('SettingsPage', () => {
   });
 
   it('renders web build info in system settings', async () => {
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByRole('heading', { name: '版本信息' })).toBeInTheDocument();
     expect(screen.getByText('3.11.0')).toBeInTheDocument();
@@ -883,7 +942,7 @@ describe('SettingsPage', () => {
   it('renders desktop app version in system settings during desktop runtime', async () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = { version: '3.12.0' };
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByRole('heading', { name: '版本信息' })).toBeInTheDocument();
     expect(screen.getByText('桌面端版本')).toBeInTheDocument();
@@ -893,7 +952,7 @@ describe('SettingsPage', () => {
   it('keeps version grid at three columns when desktop runtime has no usable version', async () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = { version: '   ' };
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const section = (await screen.findByRole('heading', { name: '版本信息' })).closest('section');
     const versionGrid = section?.querySelector('div.grid.grid-cols-1.gap-3');
@@ -906,7 +965,7 @@ describe('SettingsPage', () => {
   it('ignores non-string desktop runtime version values without breaking render', async () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = { version: 3120 };
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const section = (await screen.findByRole('heading', { name: '版本信息' })).closest('section');
     const versionGrid = section?.querySelector('div.grid.grid-cols-1.gap-3');
@@ -928,7 +987,7 @@ describe('SettingsPage', () => {
     });
     (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     await waitFor(() => {
       expect(desktopGetUpdateState).toHaveBeenCalledTimes(1);
@@ -963,7 +1022,7 @@ describe('SettingsPage', () => {
       isFallbackVersion: true,
     });
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByRole('heading', { name: '版本信息' })).toBeInTheDocument();
     expect(screen.getByText(/当前构建未提供发布版本/)).toBeInTheDocument();
@@ -974,7 +1033,7 @@ describe('SettingsPage', () => {
   it('resets local drafts from the page header button', () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ hasDirty: true, dirtyCount: 2 }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     // Clear the initial load call from useEffect
     vi.clearAllMocks();
@@ -1050,7 +1109,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getByText('AGENT_ORCHESTRATOR_TIMEOUT_S')).toBeInTheDocument();
     expect(screen.getByText('AGENT_DEEP_RESEARCH_BUDGET')).toBeInTheDocument();
@@ -1081,7 +1140,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getByTestId('settings-field-AGENT_BACKEND')).toBeInTheDocument();
     expect(screen.queryByTestId('settings-field-AGENT_GENERATION_BACKEND')).not.toBeInTheDocument();
@@ -1172,7 +1231,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getByText('AGENT_CONTEXT_COMPRESSION_PROFILE')).toBeInTheDocument();
     expect(screen.getByText('成本优先')).toBeInTheDocument();
@@ -1191,7 +1250,7 @@ describe('SettingsPage', () => {
 
     useSystemConfigMock.mockReturnValue(dirtyState);
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     // Clear initial useEffect load call
     vi.clearAllMocks();
@@ -1209,7 +1268,7 @@ describe('SettingsPage', () => {
   it('refreshes server state after intelligent import merges stock list', async () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'merge stock list' }));
 
@@ -1220,7 +1279,7 @@ describe('SettingsPage', () => {
   it('refreshes server state after llm channel editor saves', async () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'ai_model' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'save llm channels' }));
 
@@ -1241,7 +1300,7 @@ describe('SettingsPage', () => {
       ],
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'emit llm draft' }));
 
@@ -1249,6 +1308,7 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(statusItems).toHaveTextContent('GENERATION_BACKEND=litellm');
       expect(statusItems).toHaveTextContent('LLM_CHANNELS=draft,backup');
+      expect(statusItems).toHaveTextContent('LLM_DRAFT_API_SURFACE=responses');
       expect(statusItems).toHaveTextContent('LITELLM_MODEL=openai/draft-model');
       expect(statusItems).toHaveTextContent('OPENAI_MODEL=gpt-draft');
       expect(statusItems).toHaveTextContent('GEMINI_MODEL=gemini-draft');
@@ -1261,7 +1321,7 @@ describe('SettingsPage', () => {
   it('clears llm channel draft items after llm channel editor saves', async () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'ai_model' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'emit llm draft' }));
     expect(await screen.findByTestId('generation-backend-status-items')).toHaveTextContent('LLM_CHANNELS=draft,backup');
@@ -1307,7 +1367,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    const { container } = render(<SettingsPage />);
+    const { container } = renderSettingsPage();
 
     const promptCacheSummary = screen.getByText('Provider Prompt Cache 高级设置').closest('summary');
     const promptCacheDetails = promptCacheSummary?.closest('details');
@@ -1340,49 +1400,47 @@ describe('SettingsPage', () => {
     ]);
   });
 
-  it('notifies alphasift status update and skips install after generic save when ALPHASIFT_ENABLED is set false', async () => {
+  it('notifies screening status after generic save when SCREENING_ENABLED is set false', async () => {
     save.mockResolvedValue({ success: true });
-    getChangedItems.mockReturnValue([{ key: 'ALPHASIFT_ENABLED', value: 'false' }]);
+    getChangedItems.mockReturnValue([{ key: 'SCREENING_ENABLED', value: 'false' }]);
 
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
       hasDirty: true,
       dirtyCount: 1,
-      getChangedItems: () => [{ key: 'ALPHASIFT_ENABLED', value: 'false' }],
+      getChangedItems: () => [{ key: 'SCREENING_ENABLED', value: 'false' }],
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: /保存配置/ }));
 
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-    expect(notifyAlphaSiftConfigChanged).toHaveBeenCalledTimes(1);
+    expect(notifyScreeningConfigChanged).toHaveBeenCalledTimes(1);
     expect(notifySystemConfigChanged).toHaveBeenCalledTimes(1);
-    expect(alphasiftEnable).not.toHaveBeenCalled();
-    expect(alphasiftInstall).not.toHaveBeenCalled();
+    expect(screeningEnable).not.toHaveBeenCalled();
   });
 
-  it('runs the AlphaSift enable flow after generic save when ALPHASIFT_ENABLED is set true', async () => {
+  it('runs the Screening enable flow after generic save when SCREENING_ENABLED is set true', async () => {
     save.mockResolvedValue({ success: true });
-    getChangedItems.mockReturnValue([{ key: 'ALPHASIFT_ENABLED', value: 'true' }]);
+    getChangedItems.mockReturnValue([{ key: 'SCREENING_ENABLED', value: 'true' }]);
 
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
       hasDirty: true,
       dirtyCount: 1,
-      getChangedItems: () => [{ key: 'ALPHASIFT_ENABLED', value: 'true' }],
+      getChangedItems: () => [{ key: 'SCREENING_ENABLED', value: 'true' }],
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: /保存配置/ }));
 
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(notifySystemConfigChanged).toHaveBeenCalledTimes(1);
-    expect(alphasiftEnable).toHaveBeenCalledTimes(1);
-    expect(alphasiftInstall).not.toHaveBeenCalled();
-    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['ALPHASIFT_ENABLED']);
+    expect(screeningEnable).toHaveBeenCalledTimes(1);
+    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['SCREENING_ENABLED']);
   });
 
-  it('does not notify alphasift status when generic save updates other fields', async () => {
+  it('does not notify screening status when generic save updates other fields', async () => {
     save.mockResolvedValue({ success: true });
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
       hasDirty: true,
@@ -1390,30 +1448,31 @@ describe('SettingsPage', () => {
       getChangedItems: () => [{ key: 'LLM_CHANNELS', value: 'primary,backup' }],
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: /保存配置/ }));
 
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(notifySystemConfigChanged).toHaveBeenCalledTimes(1);
-    expect(notifyAlphaSiftConfigChanged).not.toHaveBeenCalled();
+    expect(notifyScreeningConfigChanged).not.toHaveBeenCalled();
   });
 
-  it('runs AlphaSift enable flow from the settings card', async () => {
+  it('runs Screening enable flow from the settings card', async () => {
     const configState = buildSystemConfigState();
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
-      activeCategory: 'data_source',
+      activeCategory: 'base',
       itemsByCategory: {
         ...configState.itemsByCategory,
-        data_source: [
+        base: [
+          ...configState.itemsByCategory.base,
           {
-            key: 'ALPHASIFT_ENABLED',
+            key: 'SCREENING_ENABLED',
             value: 'false',
             rawValueExists: true,
             isMasked: false,
             schema: {
-              key: 'ALPHASIFT_ENABLED',
-              category: 'data_source',
+              key: 'SCREENING_ENABLED',
+              category: 'base',
               dataType: 'boolean',
               uiControl: 'switch',
               isSensitive: false,
@@ -1424,108 +1483,35 @@ describe('SettingsPage', () => {
               displayOrder: 16,
             },
           },
-          {
-            key: 'ALPHASIFT_INSTALL_SPEC',
-            value: 'git+https://github.com/ZhuLinsen/alphasift.git@2c76b2b6074ae3bae01d52e5e830a4af3e3246b2',
-            rawValueExists: true,
-            isMasked: false,
-            schema: {
-              key: 'ALPHASIFT_INSTALL_SPEC',
-              category: 'data_source',
-              dataType: 'string',
-              uiControl: 'password',
-              isSensitive: true,
-              isRequired: false,
-              isEditable: true,
-              options: [],
-              validation: {},
-              displayOrder: 17,
-            },
-          },
         ],
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: '开启选股' }));
 
-    await waitFor(() => expect(alphasiftEnable).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screeningEnable).toHaveBeenCalledTimes(1));
     expect(updateSystemConfig).not.toHaveBeenCalled();
-    expect(alphasiftInstall).not.toHaveBeenCalled();
-    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['ALPHASIFT_ENABLED']);
+    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['SCREENING_ENABLED']);
   });
 
-  it('does not render raw AlphaSift install spec in the settings card', () => {
-    const privateInstallSpec = 'git+https://user:token@example.com/internal/alphasift.git';
+  it('maps SCREENING_ENABLED to the built-in screening card instead of a generic field', () => {
     const configState = buildSystemConfigState();
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
-      activeCategory: 'data_source',
+      activeCategory: 'base',
       itemsByCategory: {
         ...configState.itemsByCategory,
-        data_source: [
+        base: [
+          ...configState.itemsByCategory.base,
           {
-            key: 'ALPHASIFT_ENABLED',
-            value: 'true',
-            rawValueExists: true,
-            isMasked: false,
-            schema: {
-              key: 'ALPHASIFT_ENABLED',
-              category: 'data_source',
-              dataType: 'boolean',
-              uiControl: 'switch',
-              isSensitive: false,
-              isRequired: false,
-              isEditable: true,
-              options: [],
-              validation: {},
-              displayOrder: 16,
-            },
-          },
-          {
-            key: 'ALPHASIFT_INSTALL_SPEC',
-            value: privateInstallSpec,
-            rawValueExists: true,
-            isMasked: true,
-            schema: {
-              key: 'ALPHASIFT_INSTALL_SPEC',
-              category: 'data_source',
-              dataType: 'string',
-              uiControl: 'password',
-              isSensitive: true,
-              isRequired: false,
-              isEditable: true,
-              options: [],
-              validation: {},
-              displayOrder: 17,
-            },
-          },
-        ],
-      },
-    }));
-
-    render(<SettingsPage />);
-
-    expect(screen.getByText('启用内置 AlphaSift 实验性质选股能力。')).toBeInTheDocument();
-    expect(screen.queryByText(privateInstallSpec)).not.toBeInTheDocument();
-    expect(screen.queryByText(/安装来源/)).not.toBeInTheDocument();
-  });
-
-  it('maps ALPHASIFT_ENABLED to the AlphaSift card instead of a generic settings field', () => {
-    const configState = buildSystemConfigState();
-    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
-      activeCategory: 'data_source',
-      itemsByCategory: {
-        ...configState.itemsByCategory,
-        data_source: [
-          {
-            key: 'ALPHASIFT_ENABLED',
+            key: 'SCREENING_ENABLED',
             value: 'false',
             rawValueExists: true,
             isMasked: false,
             schema: {
-              key: 'ALPHASIFT_ENABLED',
-              category: 'data_source',
+              key: 'SCREENING_ENABLED',
+              category: 'base',
               dataType: 'boolean',
               uiControl: 'switch',
               isSensitive: false,
@@ -1536,46 +1522,29 @@ describe('SettingsPage', () => {
               displayOrder: 16,
             },
           },
-          {
-            key: 'ALPHASIFT_INSTALL_SPEC',
-            value: '******',
-            rawValueExists: true,
-            isMasked: true,
-            schema: {
-              key: 'ALPHASIFT_INSTALL_SPEC',
-              category: 'data_source',
-              dataType: 'string',
-              uiControl: 'password',
-              isSensitive: true,
-              isRequired: false,
-              isEditable: true,
-              options: [],
-              validation: {},
-              displayOrder: 17,
-            },
-          },
         ],
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getByRole('button', { name: '开启选股' })).toBeInTheDocument();
-    expect(screen.queryByTestId('settings-field-ALPHASIFT_ENABLED')).not.toBeInTheDocument();
-    expect(screen.getByTestId('settings-field-ALPHASIFT_INSTALL_SPEC')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '查看配置项' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-field-SCREENING_ENABLED')).not.toBeInTheDocument();
   });
 
-  it('scopes setup and AlphaSift helper cards to their related categories', async () => {
+  it('shows the Screening control only on the base settings page', async () => {
     const configState = buildSystemConfigState();
-    const dataSourceItems = [
+    const baseItems = [
+      ...configState.itemsByCategory.base,
       {
-        key: 'ALPHASIFT_ENABLED',
+        key: 'SCREENING_ENABLED',
         value: 'false',
         rawValueExists: true,
         isMasked: false,
         schema: {
-          key: 'ALPHASIFT_ENABLED',
-          category: 'data_source',
+          key: 'SCREENING_ENABLED',
+          category: 'base',
           dataType: 'boolean',
           uiControl: 'switch',
           isSensitive: false,
@@ -1592,37 +1561,45 @@ describe('SettingsPage', () => {
       activeCategory: 'base',
       itemsByCategory: {
         ...configState.itemsByCategory,
-        data_source: dataSourceItems,
+        base: baseItems,
       },
     }));
 
-    const { rerender } = render(<SettingsPage />);
+    const { rerender } = renderSettingsPage();
 
     expect(await screen.findByRole('heading', { name: '首次启动配置检查' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'AlphaSift 选股' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '选股' })).toBeInTheDocument();
 
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
       activeCategory: 'ai_model',
       itemsByCategory: {
         ...configState.itemsByCategory,
-        data_source: dataSourceItems,
+        base: baseItems,
       },
     }));
-    rerender(<SettingsPage />);
+    rerender(
+      <MemoryRouter initialEntries={['/settings']}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
 
     expect(screen.queryByRole('heading', { name: '首次启动配置检查' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'AlphaSift 选股' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '选股' })).not.toBeInTheDocument();
 
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
       activeCategory: 'data_source',
       itemsByCategory: {
         ...configState.itemsByCategory,
-        data_source: dataSourceItems,
+        base: baseItems,
       },
     }));
-    rerender(<SettingsPage />);
+    rerender(
+      <MemoryRouter initialEntries={['/settings']}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
 
-    expect(await screen.findByRole('heading', { name: 'AlphaSift 选股' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '选股' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '首次启动配置检查' })).not.toBeInTheDocument();
   });
 
@@ -1728,7 +1705,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByTestId('scheduler-settings-card')).toBeInTheDocument();
     expect(screen.queryByTestId('settings-field-SCHEDULE_ENABLED')).not.toBeInTheDocument();
@@ -1796,7 +1773,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(await screen.findByTestId('scheduler-run-now-button'));
 
@@ -1861,7 +1838,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByTestId('scheduler-last-success')).toHaveTextContent('-');
     expect(screen.getByTestId('scheduler-last-error')).toHaveTextContent('analysis failed');
@@ -1924,7 +1901,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const enabledCheckbox = await screen.findByTestId('scheduler-enabled-checkbox');
     expect(enabledCheckbox).toBeChecked();
@@ -1982,7 +1959,7 @@ describe('SettingsPage', () => {
         ],
       },
     }));
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const enabledCheckbox = await screen.findByTestId('scheduler-enabled-checkbox');
     expect(enabledCheckbox).toBeChecked();
@@ -2058,7 +2035,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const saveButton = screen.getByRole('button', { name: /保存配置/ });
     expect(saveButton).toBeDisabled();
@@ -2136,7 +2113,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const saveButton = screen.getByRole('button', { name: /保存配置/ });
     expect(saveButton).toBeDisabled();
@@ -2224,7 +2201,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByText('未启用')).toBeInTheDocument();
 
@@ -2234,22 +2211,23 @@ describe('SettingsPage', () => {
     expect(await screen.findByText('已启用')).toBeInTheDocument();
   });
 
-  it('refreshes AlphaSift state when the enable flow fails', async () => {
+  it('refreshes Screening state when the enable flow fails', async () => {
     const configState = buildSystemConfigState();
-    alphasiftEnable.mockRejectedValueOnce(new Error('config update failed'));
+    screeningEnable.mockRejectedValueOnce(new Error('config update failed'));
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
-      activeCategory: 'data_source',
+      activeCategory: 'base',
       itemsByCategory: {
         ...configState.itemsByCategory,
-        data_source: [
+        base: [
+          ...configState.itemsByCategory.base,
           {
-            key: 'ALPHASIFT_ENABLED',
+            key: 'SCREENING_ENABLED',
             value: 'false',
             rawValueExists: true,
             isMasked: false,
             schema: {
-              key: 'ALPHASIFT_ENABLED',
-              category: 'data_source',
+              key: 'SCREENING_ENABLED',
+              category: 'base',
               dataType: 'boolean',
               uiControl: 'switch',
               isSensitive: false,
@@ -2264,14 +2242,13 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(screen.getByRole('button', { name: '开启选股' }));
 
-    await waitFor(() => expect(alphasiftEnable).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screeningEnable).toHaveBeenCalledTimes(1));
     expect(updateSystemConfig).not.toHaveBeenCalled();
-    expect(alphasiftInstall).not.toHaveBeenCalled();
-    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['ALPHASIFT_ENABLED']);
+    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['SCREENING_ENABLED']);
   });
 
   it('passes LLM channel support keys to the channel editor without rendering them as generic fields', async () => {
@@ -2392,7 +2369,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const llmEditorItems = await screen.findByTestId('llm-channel-editor-items');
     expect(llmEditorItems).toHaveTextContent('LLM_CHANNELS');
@@ -2411,7 +2388,7 @@ describe('SettingsPage', () => {
   it('renders notification test panel before notification fields', () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'notification' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getByText('通知测试面板:WECHAT_WEBHOOK_URL')).toBeInTheDocument();
     expect(screen.getByText('WECHAT_WEBHOOK_URL')).toBeInTheDocument();
@@ -2422,7 +2399,7 @@ describe('SettingsPage', () => {
   it('uses browser and backend logs in settings panel diagnostic hints outside desktop runtime', () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'notification' }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getAllByText(/浏览器开发者工具控制台与后端日志/)).toHaveLength(2);
     expect(screen.queryByText('desktop.log')).not.toBeInTheDocument();
@@ -2432,14 +2409,14 @@ describe('SettingsPage', () => {
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'notification' }));
     (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getAllByText('desktop.log')).toHaveLength(2);
     expect(screen.queryByText(/浏览器开发者工具控制台与后端日志/)).not.toBeInTheDocument();
   });
 
   it('renders env backup actions outside desktop runtime', () => {
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getByRole('heading', { name: '配置备份' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导出 .env' })).toBeInTheDocument();
@@ -2454,7 +2431,7 @@ describe('SettingsPage', () => {
       refreshStatus,
     });
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.getByText(/当前 Web 端未开启管理员鉴权/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导出 .env' })).toBeDisabled();
@@ -2477,7 +2454,7 @@ describe('SettingsPage', () => {
       refreshStatus,
     });
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(screen.queryByText(/当前 Web 端未开启管理员鉴权/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导出 .env' })).not.toBeDisabled();
@@ -2487,7 +2464,7 @@ describe('SettingsPage', () => {
   it('exports saved env from config backup actions', async () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = { version: '3.12.0' };
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     vi.clearAllMocks();
 
@@ -2502,7 +2479,7 @@ describe('SettingsPage', () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = { version: '3.12.0' };
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({ hasDirty: true, dirtyCount: 2 }));
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     vi.clearAllMocks();
 
@@ -2515,7 +2492,7 @@ describe('SettingsPage', () => {
   it('reloads config after successful env import', async () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = { version: '3.12.0' };
 
-    const { container } = render(<SettingsPage />);
+    const { container } = renderSettingsPage();
 
     vi.clearAllMocks();
 
@@ -2609,7 +2586,7 @@ describe('SettingsPage', () => {
       },
     }));
 
-    const { container } = render(<SettingsPage />);
+    const { container } = renderSettingsPage();
 
     await waitFor(() => expect(getSchedulerStatus).toHaveBeenCalledTimes(1));
     expect(await screen.findByText('未启用')).toBeInTheDocument();
@@ -2635,7 +2612,7 @@ describe('SettingsPage', () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = { version: '3.12.0' };
     load.mockResolvedValue(false);
 
-    const { container } = render(<SettingsPage />);
+    const { container } = renderSettingsPage();
 
     vi.clearAllMocks();
     load.mockResolvedValue(false);
@@ -2666,7 +2643,7 @@ describe('SettingsPage', () => {
     });
     (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByText(/发现新版本:当前 3\.12\.0，最新 3\.13\.0/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '前往下载' })).toBeInTheDocument();
@@ -2675,7 +2652,7 @@ describe('SettingsPage', () => {
   it('checks desktop updates on demand and renders the latest-version state', async () => {
     (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(await screen.findByRole('button', { name: '检查更新' }));
 
@@ -2693,7 +2670,7 @@ describe('SettingsPage', () => {
     });
     (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     fireEvent.click(await screen.findByRole('button', { name: '前往下载' }));
 
@@ -2716,12 +2693,114 @@ describe('SettingsPage', () => {
     });
     (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
 
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     expect(await screen.findByText('更新已下载:新版本 3.13.0 已下载，可重启应用完成安装。')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '重启安装' }));
 
     await waitFor(() => expect(desktopInstallDownloadedUpdate).toHaveBeenCalledTimes(1));
+  });
+
+  it('disables the settings check button while the header entry is already checking', async () => {
+    const pendingCheck = hangDesktopUpdateCheck();
+    (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
+
+    renderDesktopUpdateEntries();
+
+    fireEvent.click(await screen.findByRole('button', { name: '桌面端更新' }));
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: '桌面端更新' })).getByRole('button', { name: '检查更新' }),
+    );
+
+    await waitFor(() => expect(desktopCheckForUpdates).toHaveBeenCalledTimes(1));
+
+    const settingsCard = await waitFor(() => {
+      const card = document.querySelector('#desktop-version-info');
+      expect(card).not.toBeNull();
+      expect(within(card as HTMLElement).getByRole('button', { name: '检查中...' })).toBeDisabled();
+      return card as HTMLElement;
+    });
+    const settingsButton = within(settingsCard).getByRole('button', { name: '检查中...' });
+
+    fireEvent.click(settingsButton);
+    expect(desktopCheckForUpdates).toHaveBeenCalledTimes(1);
+
+    await pendingCheck.finish({
+      status: 'up-to-date',
+      currentVersion: '3.12.0',
+      latestVersion: '3.12.0',
+      message: '当前桌面端已是最新版本。',
+    });
+  });
+
+  it('does not start a second check from the header while settings is already checking', async () => {
+    const pendingCheck = hangDesktopUpdateCheck();
+    (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
+
+    renderDesktopUpdateEntries();
+
+    const settingsCard = await waitFor(() => {
+      const card = document.querySelector('#desktop-version-info');
+      expect(card).not.toBeNull();
+      return card as HTMLElement;
+    });
+    fireEvent.click(within(settingsCard).getByRole('button', { name: '检查更新' }));
+
+    await waitFor(() => expect(desktopCheckForUpdates).toHaveBeenCalledTimes(1));
+    expect(within(settingsCard).getByRole('button', { name: '检查中...' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '桌面端更新' }));
+    expect(screen.queryByRole('button', { name: '检查更新' })).not.toBeInTheDocument();
+    fireEvent.click(within(settingsCard).getByRole('button', { name: '检查中...' }));
+    expect(desktopCheckForUpdates).toHaveBeenCalledTimes(1);
+
+    await pendingCheck.finish({
+      status: 'up-to-date',
+      currentVersion: '3.12.0',
+      latestVersion: '3.12.0',
+      message: '当前桌面端已是最新版本。',
+    });
+  });
+
+  it('keeps both entries busy when a late settings mount receives a stale idle snapshot', async () => {
+    const pendingCheck = hangDesktopUpdateCheck();
+    (window as { dsaDesktop?: unknown }).dsaDesktop = createDesktopRuntime();
+
+    const view = render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <DesktopUpdateIndicator />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '桌面端更新' }));
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: '桌面端更新' })).getByRole('button', { name: '检查更新' }),
+    );
+    await waitFor(() => expect(desktopCheckForUpdates).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <MemoryRouter initialEntries={['/settings']}>
+        <>
+          <DesktopUpdateIndicator />
+          <SettingsPage />
+        </>
+      </MemoryRouter>,
+    );
+
+    const settingsCard = await waitFor(() => {
+      const card = document.querySelector('#desktop-version-info');
+      expect(card).not.toBeNull();
+      return card as HTMLElement;
+    });
+    expect(within(settingsCard).getByRole('button', { name: '检查中...' })).toBeDisabled();
+    expect(desktopCheckForUpdates).toHaveBeenCalledTimes(1);
+
+    await pendingCheck.finish({
+      status: 'up-to-date',
+      currentVersion: '3.12.0',
+      latestVersion: '3.12.0',
+      message: '当前桌面端已是最新版本。',
+    });
   });
 });

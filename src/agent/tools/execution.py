@@ -21,6 +21,39 @@ from src.agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Cooperative cancellation signal (best-effort timeouts, Issue #1890 / review)
+# ---------------------------------------------------------------------------
+# Python cannot forcibly stop an already-started tool thread, so when a tool
+# times out its handler may keep running in the background.  To give long or
+# side-effecting handlers a way to honour the timeout, the runner arms a
+# per-call ``threading.Event`` on timeout and publishes it through this
+# contextvar for the duration of the call.  Handlers MAY poll
+# ``is_tool_cancellation_requested`` and abort early; the same signal is also
+# honoured by the existing ``check_tool_execution()`` checkpoint that data /
+# backtest / tool-surface handlers already call, so a timed-out handler stops at
+# its next safe boundary even without opting into the helper.  The signal is
+# strictly opt-in by checkpoint: handlers that never call either are completely
+# unaffected, and the runner only sets the event after a timeout has already
+# fired — never during normal completion.  This is the "in-handler cooperative
+# cancel" mitigation requested in review, layered on top of the non-retriable
+# cache (which blocks the LLM from re-launching the same call).
+TOOL_CANCEL_EVENT: "contextvars.ContextVar[Optional[threading.Event]]" = contextvars.ContextVar(
+    "tool_cancel_event", default=None
+)
+
+
+def is_tool_cancellation_requested() -> bool:
+    """Return True when the current tool call has been asked to cancel.
+
+    Tool handlers may call this cheaply inside long loops or before performing
+    an irreversible side effect, to honour a best-effort timeout.  Returns False
+    unless the runner has armed the cancellation event for the running call.
+    """
+    event = TOOL_CANCEL_EVENT.get()
+    return event is not None and event.is_set()
+
+
 _SUMMARY_LIMIT = 500
 _TOKEN_PATTERN = re.compile(
     r"(?i)\b(?:sk|pk|ghp|gho|github_pat|xox[baprs]?|bearer)[-_a-z0-9]{12,}\b"
@@ -100,12 +133,20 @@ def reset_tool_execution_context(token: contextvars.Token) -> None:
 def check_tool_execution() -> None:
     """Stop at a safe handler boundary when cancellation or deadline is reached."""
     context = _ACTIVE_TOOL_CONTEXT.get()
-    if context is None:
-        return
-    if context.cancel_event is not None and context.cancel_event.is_set():
-        raise ToolExecutionCancelled("Tool execution was cancelled")
-    if context.deadline is not None and time.monotonic() >= context.deadline:
-        raise ToolExecutionDeadlineExceeded("Tool execution deadline was exceeded")
+    if context is not None:
+        if context.cancel_event is not None and context.cancel_event.is_set():
+            raise ToolExecutionCancelled("Tool execution was cancelled")
+        if context.deadline is not None and time.monotonic() >= context.deadline:
+            raise ToolExecutionDeadlineExceeded("Tool execution deadline was exceeded")
+    # Runner-armed cooperative cancel (Issue #1890): when a per-tool timeout
+    # fires, the runner arms ``TOOL_CANCEL_EVENT`` for the running call.  Real
+    # tool handlers (data/backtest/tool-surface) poll this checkpoint rather than
+    # the opt-in ``is_tool_cancellation_requested()`` helper, so honour the signal
+    # here too — a still-running handler then aborts before its next side-effecting
+    # step instead of running to completion in the background thread.
+    cancel_event = TOOL_CANCEL_EVENT.get()
+    if cancel_event is not None and cancel_event.is_set():
+        raise ToolExecutionCancelled("Tool execution timed out (cooperative cancel)")
 
 
 def serialize_tool_result(result: Any) -> str:
@@ -128,45 +169,75 @@ def serialize_tool_result(result: Any) -> str:
     return str(result)
 
 
-def _normalize_tool_stock_code(value: Any) -> Any:
-    """Canonicalize stock code arguments so equivalent HK variants share one cache key."""
+def _normalize_tool_stock_code(value: Any, registry: Optional[Any] = None) -> Any:
+    """Canonicalize a stock argument for tool scope and cache keys.
+
+    An injected registry preserves exact parser INDEX canonicals. Direct calls
+    without one retain the legacy stock/HK normalization path.
+    """
     if not isinstance(value, str):
         return value
 
-    text = value.strip().upper()
+    text = value.strip()
     if not text:
         return text
 
-    if text.endswith(".HK"):
-        base = text[:-3]
+    if registry is not None:
+        try:
+            from src.services.stock_list_parser import ParseStatus, parse_analysis_target
+
+            target = parse_analysis_target(text, registry)
+            if target.asset_type == ParseStatus.INDEX and target.canonical_id:
+                return target.canonical_id
+        except Exception:
+            # Registry malformed/unavailable — fall through to the stock path.
+            pass
+
+    upper = text.upper()
+    if upper.endswith(".HK"):
+        base = upper[:-3]
         if base.isdigit() and 1 <= len(base) <= 5:
             return f"HK{base.zfill(5)}"
 
-    if text.startswith("HK"):
-        base = text[2:]
+    if upper.startswith("HK"):
+        base = upper[2:]
         if base.isdigit() and 1 <= len(base) <= 5:
             return f"HK{base.zfill(5)}"
 
-    if text.isdigit() and len(text) == 5:
-        return f"HK{text}"
+    if upper.isdigit() and len(upper) == 5:
+        return f"HK{upper}"
 
     try:
         from data_provider.base import canonical_stock_code, normalize_stock_code
 
-        return canonical_stock_code(normalize_stock_code(text))
+        return canonical_stock_code(normalize_stock_code(upper))
     except Exception:
-        return text
+        return upper
+
+
+def _default_index_registry_or_none() -> Optional[Any]:
+    """Return the default IndexRegistry, failing open to stock semantics."""
+    try:
+        from src.services.stock_list_parser import default_index_registry
+
+        return default_index_registry()
+    except Exception:
+        return None
 
 
 def _build_tool_cache_key(tool_name: str, arguments: Dict[str, Any]) -> Optional[str]:
-    """Build a stable cache key for tool calls with normalized stock-code arguments."""
+    """Build a stable cache key without folding index and bare-stock identities."""
     if not isinstance(arguments, dict):
         return None
+
+    registry = None
+    if "stock_code" in arguments:
+        registry = _default_index_registry_or_none()
 
     normalized_args: Dict[str, Any] = {}
     for key, value in arguments.items():
         if key == "stock_code":
-            normalized_args[key] = _normalize_tool_stock_code(value)
+            normalized_args[key] = _normalize_tool_stock_code(value, registry)
         else:
             normalized_args[key] = value
 
@@ -193,13 +264,13 @@ def _is_stock_scoped_tool(tool_registry: ToolRegistry, tool_name: str) -> bool:
     return any(param.name == "stock_code" for param in tool_def.parameters)
 
 
-def _normalize_guard_stock_code(value: Any) -> str:
+def _normalize_guard_stock_code(value: Any, registry: Optional[Any] = None) -> str:
     if value is None:
         return ""
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     raw = value if isinstance(value, str) else str(value)
-    normalized = _normalize_tool_stock_code(raw)
+    normalized = _normalize_tool_stock_code(raw, registry)
     return normalized if isinstance(normalized, str) else str(normalized)
 
 
@@ -212,7 +283,9 @@ def _guard_tool_stock_scope(
     tool_name: str,
     arguments: Dict[str, Any],
     stock_scope: Any,
+    index_registry: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Enforce one tool stock argument against the active canonical scope."""
     if stock_scope is None or not isinstance(arguments, dict):
         return None
     if not _is_stock_scoped_tool(tool_registry, tool_name):
@@ -220,12 +293,17 @@ def _guard_tool_stock_scope(
     if "stock_code" not in arguments:
         return None
 
-    requested = _normalize_guard_stock_code(arguments.get("stock_code"))
-    expected = _normalize_guard_stock_code(getattr(stock_scope, "expected_stock_code", ""))
+    if index_registry is None:
+        index_registry = _default_index_registry_or_none()
+
+    requested = _normalize_guard_stock_code(arguments.get("stock_code"), index_registry)
+    expected = _normalize_guard_stock_code(
+        getattr(stock_scope, "expected_stock_code", ""), index_registry
+    )
     allowed = {
         normalized
         for code in _iter_allowed_stock_codes(stock_scope)
-        for normalized in [_normalize_guard_stock_code(code)]
+        for normalized in [_normalize_guard_stock_code(code, index_registry)]
         if normalized
     }
     if requested and (requested == expected or requested in allowed):
